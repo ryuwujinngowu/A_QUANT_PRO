@@ -1,7 +1,27 @@
 # a_quant 项目记忆文档
 
-> 最后更新：2026-03-21
-> 分支：`claude/fix-limit-up-agent-strategy-v2CHN`
+> 最后更新：2026-03-22
+> 分支：`claude/check-latest-commit-y3f6a`
+
+---
+
+## 🔧 Git 配置（已保存）
+
+**仓库迁移到新地址**（2026-03-22）：因敏感信息泄露，将代码迁移到新仓库
+
+- **Remote URL**: `https://github.com/ryuwujinngowu/A_QUANT_PRO.git`
+- **开发分支约定**：`claude/` 前缀 + 会话 ID 后缀
+- **最新提交**：`21042da` - Update README with current architecture and Agent framework
+- **GitHub Token**：需要提供（存储在环境变量中，不提交到 git）
+  - 权限：`repo`, `workflow`
+  - 用于推送时需要
+
+**后续对话中的推送**：
+- 用户提供 token 后，使用：`git push -u https://oauth2:<token>@github.com/ryuwujinngowu/A_QUANT_PRO.git <branch>`
+- README 已更新，包含完整的 Agent 框架文档
+- 不需要重复配置仓库地址和分支名称
+
+---
 
 ---
 
