@@ -1,7 +1,11 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python:*)"
+      "Bash(python:*)",
+      "Bash(find E:PyCharma_quant_proagent_statsagents -type f -name *.py)",
+      "Bash(find E:PyCharma_quant_pro -type f -name *.md)"
     ]
-  }
+  },
+  "spinnerTipsEnabled": true,
+  "prefersReducedMotion": false
 }
