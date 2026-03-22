@@ -6,7 +6,6 @@ tests/
 *.iml
 .run
 __pycache__/
-utils/wechat_push.py
 fileserver.py
 /.claude/
 /backtest/回测记录.csv
