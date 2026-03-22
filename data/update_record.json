@@ -1,0 +1,10 @@
+{
+    "last_update_date": "2026-03-19",
+    "last_update_time": "2026-03-19 01:04:37",
+    "updated_tables": [
+        "stock_basic",
+        "stock_st",
+        "kline_day",
+        "index_daily"
+    ]
+}

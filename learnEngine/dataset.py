@@ -1,0 +1,538 @@
+"""
+训练集生成主流程 (dataset.py)
+==============================
+运行方式：python dataset.py
+
+整体流程（每日原子性处理）：
+  1. SectorHeatFeature.select_top3_hot_sectors(date)
+     → top3_sectors + adapt_score
+  2. 构建板块候选池 sector_candidate_map（过滤ST/北交所/无涨停基因）
+  3. FeatureDataBundle(... adapt_score=adapt_score) 统一预加载数据
+  4. FeatureEngine.run_single_date(data_bundle) → feature_df（含 adapt_score）
+  5. LabelEngine.generate_single_date → label_df
+  6. 合并、清洗、追加写入 CSV
+  7. ProcessedDatesManager 标记已处理（写入成功后才标记，保证幂等）
+"""
+
+import json
+import os
+import sys
+import warnings
+from collections import defaultdict
+from datetime import datetime, timedelta
+from typing import List, Dict
+
+import pandas as pd
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+from config.config import FILTER_BSE_STOCK, FILTER_STAR_BOARD, FILTER_688_BOARD
+from data.data_cleaner import data_cleaner
+from features import FeatureEngine, FeatureDataBundle
+from features.sector.sector_heat_feature import SectorHeatFeature
+from learnEngine.label import LabelEngine
+from utils.common_tools import (
+    get_stocks_in_sector,
+    filter_st_stocks,
+    sort_by_recent_gain,
+    get_trade_dates,
+    get_daily_kline_data,
+    has_recent_limit_up_batch,
+    calc_limit_up_price,
+    ensure_limit_list_ths_data,
+)
+from utils.log_utils import logger
+
+
+# ============================================================
+# 已处理日期管理（原子性读写，保证断点续跑幂等）
+# ============================================================
+
+class ProcessedDatesManager:
+    """管理已处理日期的读写，确保原子性"""
+
+    def __init__(self, file_path: str, factor_version: str):
+        self.file_path      = file_path
+        self.factor_version = factor_version
+        self.processed_dates = self._load()
+
+    def _load(self) -> List[str]:
+        """加载已处理日期；因子版本不一致则清空（强制重跑）"""
+        if not os.path.exists(self.file_path):
+            return []
+        try:
+            with open(self.file_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if data.get("factor_version") != self.factor_version:
+                    logger.warning("因子版本变更，清空已处理记录（将重新生成全量数据）")
+                    return []
+                return sorted(data.get("processed_dates", []))
+        except Exception as e:
+            logger.error(f"加载已处理日期失败: {e}")
+            return []
+
+    def is_processed(self, date: str) -> bool:
+        return date in self.processed_dates
+
+    def add(self, date: str):
+        """添加并立即持久化（写入成功后调用，保证幂等）"""
+        if date not in self.processed_dates:
+            self.processed_dates.append(date)
+            self._save()
+
+    def reset(self):
+        """清空已处理记录（如训练集 CSV 被删除，需重新生成时调用）"""
+        self.processed_dates = []
+        if os.path.exists(self.file_path):
+            os.remove(self.file_path)
+        logger.warning("已处理日期记录已重置，将重新生成全量数据")
+
+    def _save(self):
+        with open(self.file_path, "w", encoding="utf-8") as f:
+            json.dump(
+                {"factor_version": self.factor_version,
+                 "processed_dates": sorted(self.processed_dates)},
+                f, ensure_ascii=False, indent=2
+            )
+
+
+# ============================================================
+# 数据集清洗器
+# ============================================================
+
+class DataSetAssembler:
+    """单日数据校验 & 清洗"""
+
+    # 价格为 0 必属异常的核心列（停牌/数据缺失导致，宁可丢行也不污染模型）
+    _PRICE_SANITY_COL = "stock_close_d0"
+
+    @staticmethod
+    def validate_and_clean(df: pd.DataFrame) -> pd.DataFrame:
+        if df.empty:
+            return pd.DataFrame()
+
+        required = ["stock_code", "trade_date", "label1", "label2"]
+        missing  = [c for c in required if c not in df.columns]
+        if missing:
+            logger.error(f"[DataSetAssembler] 缺失核心列: {missing}")
+            return pd.DataFrame()
+
+        df = df.drop_duplicates(subset=["stock_code", "trade_date"])
+        df = df.dropna(subset=["label1", "label2"])
+
+        # ── 丢弃 D 日收盘价缺失或为零的行 ───────────────────────────────
+        # 该列为零必然是停牌 / 数据入库异常，宁可损失训练样本，
+        # 也不能让"收盘价=0"这种明显错误值进入特征矩阵污染模型。
+        if DataSetAssembler._PRICE_SANITY_COL in df.columns:
+            bad = df[DataSetAssembler._PRICE_SANITY_COL].isna() | \
+                  (df[DataSetAssembler._PRICE_SANITY_COL] <= 0)
+            bad_count = int(bad.sum())
+            if bad_count:
+                logger.warning(
+                    f"[DataSetAssembler] 丢弃 {DataSetAssembler._PRICE_SANITY_COL} "
+                    f"异常行（停牌/数据缺失）: {bad_count} 行"
+                )
+                df = df[~bad]
+
+        # ── 特征 NaN 填 0（中性值，与 FeatureDataBundle 设计对齐）────────
+        # 注意：label1/label2 已在上方 dropna 保证，此处 fillna 不会影响标签
+        df = df.fillna(0)
+        return df.reset_index(drop=True)
+
+
+# ============================================================
+# 私有辅助函数
+# ============================================================
+
+def _filter_ts_code_by_board(ts_code_list: List[str]) -> List[str]:
+    """过滤北交所 / 科创板 / 创业板"""
+    result = []
+    for ts in ts_code_list:
+        if not ts:
+            continue
+        if FILTER_BSE_STOCK and (ts.endswith(".BJ") or ts.startswith(("83", "87", "88"))):
+            continue
+        if FILTER_688_BOARD and ts.startswith("688"):
+            continue
+        if FILTER_STAR_BOARD and ts.startswith(("300", "301", "302")) and ts.endswith(".SZ"):
+            continue
+        result.append(ts)
+    return result
+
+
+def _check_stock_has_limit_up(
+        ts_code_list: List[str], end_date: str, day_count: int = 10
+) -> Dict[str, bool]:
+    """批量判断近 N 日是否有涨停（中性值兜底：异常时返回 False，不引入虚假正样本）"""
+    if not ts_code_list or day_count <= 0 or not end_date:
+        return {ts: False for ts in ts_code_list}
+
+    try:
+        if len(end_date) == 8 and end_date.isdigit():
+            end_dt = datetime.strptime(end_date, "%Y%m%d")
+        else:
+            end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+        end_fmt = end_dt.strftime("%Y-%m-%d")
+    except ValueError as e:
+        logger.error(f"日期解析失败: {end_date} | {e}")
+        return {ts: False for ts in ts_code_list}
+
+    try:
+        pre_end  = (end_dt - timedelta(days=1)).strftime("%Y-%m-%d")
+        start_dt = (end_dt - timedelta(days=60)).strftime("%Y-%m-%d")
+        dates    = get_trade_dates(start_dt, pre_end)[-day_count:]
+        if len(dates) < day_count:
+            logger.warning(f"回溯交易日不足 {day_count} 个，返回全 False（中性值）")
+            return {ts: False for ts in ts_code_list}
+    except Exception as e:
+        logger.error(f"获取交易日失败: {e}")
+        return {ts: False for ts in ts_code_list}
+
+    if not dates:
+        logger.warning("回溯交易日为空，返回全 False（中性值）")
+        return {ts: False for ts in ts_code_list}
+
+    # 确保 limit_list_ths 有最新数据（DB→API→DB 链路）
+    ensure_limit_list_ths_data(dates[-1])
+
+    try:
+        result = has_recent_limit_up_batch(
+            ts_code_list=ts_code_list,
+            start_date=dates[0],
+            end_date=dates[-1],
+        )
+    except Exception as e:
+        logger.error(f"涨停池批量查询失败: {e}")
+        return {ts: False for ts in ts_code_list}
+
+    logger.info(
+        f"近 {day_count} 日涨停判断完成 | 候选: {len(ts_code_list)} | 有涨停基因: {sum(result.values())}"
+    )
+    return result
+
+
+def _filter_limit_up_on_d0(daily_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    过滤 D 日涨停封板的股票（收盘价 == 涨停价，买不进去）
+    :param daily_df: D 日候选股日线 DataFrame（含 ts_code, pre_close, close）
+    :return: 过滤后的 DataFrame
+    """
+    if daily_df.empty:
+        return daily_df
+
+    keep_mask = []
+    for _, row in daily_df.iterrows():
+        ts_code   = row["ts_code"]
+        pre_close = row.get("pre_close", 0)
+        close     = row.get("close", 0)
+        if pre_close <= 0 or close <= 0:
+            keep_mask.append(True)  # 数据异常，保守保留
+            continue
+        limit_up = calc_limit_up_price(ts_code, pre_close)
+        if limit_up > 0 and close >= limit_up - 0.01:
+            keep_mask.append(False)  # D 日涨停封板，过滤
+        else:
+            keep_mask.append(True)
+
+    filtered = daily_df[keep_mask].copy()
+    removed  = len(daily_df) - len(filtered)
+    if removed > 0:
+        logger.info(f"[D日涨停过滤] 过滤涨停封板股: {removed} 只")
+    return filtered
+
+
+# 低流动性过滤阈值（成交额，单位：万元；tushare amount 单位为千元）
+MIN_AMOUNT_THRESHOLD = 10000  # 1000万元 = 10000千元
+
+
+def _filter_low_liquidity(daily_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    过滤成交额极低的股票（策略买不进去，加入训练集只会引入噪声）
+    :param daily_df: D 日候选股日线 DataFrame（含 amount 列，单位千元）
+    :return: 过滤后的 DataFrame
+    """
+    if daily_df.empty or "amount" not in daily_df.columns:
+        return daily_df
+
+    before = len(daily_df)
+    filtered = daily_df[daily_df["amount"] >= MIN_AMOUNT_THRESHOLD].copy()
+    removed = before - len(filtered)
+    if removed > 0:
+        logger.info(f"[低流动性过滤] 过滤成交额 < {MIN_AMOUNT_THRESHOLD}千元股: {removed} 只")
+    return filtered
+
+
+def validate_train_dataset(csv_path: str) -> pd.DataFrame:
+    """最终训练集全量校验"""
+    if not os.path.exists(csv_path):
+        logger.warning(f"训练集文件不存在，跳过校验: {csv_path}")
+        return pd.DataFrame()
+
+    df = pd.read_csv(csv_path)
+    logger.info(f"【最终校验】总行数: {len(df)}")
+
+    required = ["stock_code", "trade_date", "label1", "label2", "adapt_score"]
+    missing  = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f"缺失核心列: {missing}")
+
+    dup = df.duplicated(subset=["stock_code", "trade_date"]).sum()
+    if dup:
+        df = df.drop_duplicates(subset=["stock_code", "trade_date"])
+        logger.warning(f"移除重复行: {dup}")
+
+    null = df[["label1", "label2"]].isnull().sum().sum()
+    if null:
+        df = df.dropna(subset=["label1", "label2"])
+        logger.warning(f"移除标签空值行: {null}")
+
+    df.to_csv(csv_path, index=False, encoding="utf-8-sig")
+    logger.info(f"【最终校验】有效行数: {len(df)}")
+    return df
+
+
+# ============================================================
+# 主流程入口
+# ============================================================
+
+if __name__ == "__main__":
+    warnings.filterwarnings("ignore")
+
+    # ==================== 可配置参数 ====================
+    # START_DATE            = "2023-01-02"
+    # END_DATE              = "2023-12-30"
+    START_DATE            = "2024-11-02"
+    END_DATE              = "2026-03-11"
+    OUTPUT_CSV_PATH       = os.path.join(os.getcwd(), "train_dataset_final.csv")
+    PROCESSED_DATES_FILE  = "processed_dates.json"
+    # 因子逻辑有变更（新增列、修改计算公式）时必须更新版本号，否则旧数据不会重跑
+    FACTOR_VERSION        = "v3.9_vol_ratio_normalized_ma_clean"
+    # =====================================================
+
+    # ---------- 初始化核心组件 ----------
+    feature_engine    = FeatureEngine()          # 使用 features/__init__.py 的新引擎
+    label_engine      = LabelEngine(START_DATE, END_DATE)
+    sector_heat       = SectorHeatFeature()
+    dates_manager     = ProcessedDatesManager(PROCESSED_DATES_FILE, FACTOR_VERSION)
+
+    # ---------- 确定待处理日期 ----------
+    all_trade_dates = get_trade_dates(START_DATE, END_DATE)
+    to_process      = [d for d in all_trade_dates if not dates_manager.is_processed(d)]
+
+    # ── 启动一致性检查 ─────────────────────────────────────────────────────
+    # 场景：进程在"CSV 写入成功"与"标记已处理"之间崩溃
+    # 结果：数据已落盘但未标记 → 下次启动会重跑该日，写入重复行
+    # 修复：读取 CSV 中已有的日期，对未标记但已有数据的日期补充标记，
+    #       避免重复写入（最终校验的 deduplicate 作为兜底）
+    if os.path.exists(OUTPUT_CSV_PATH) and to_process:
+        try:
+            csv_dates = set(
+                pd.read_csv(OUTPUT_CSV_PATH, usecols=["trade_date"])["trade_date"]
+                .astype(str).unique()
+            )
+            retroactive = csv_dates & set(all_trade_dates) - set(dates_manager.processed_dates)
+            if retroactive:
+                logger.info(
+                    f"启动一致性修复：CSV 中已有数据但未标记完成的日期 → {sorted(retroactive)}，"
+                    f"自动补充标记（避免重复写入）"
+                )
+                for d in sorted(retroactive):
+                    dates_manager.add(d)
+                to_process = [d for d in all_trade_dates if not dates_manager.is_processed(d)]
+        except Exception as e:
+            logger.warning(f"启动一致性检查失败（忽略，继续正常处理）: {e}")
+
+    # ── CSV 删除但全部日期已标记 → 重置 ────────────────────────────────────
+    if not to_process and not os.path.exists(OUTPUT_CSV_PATH):
+        logger.warning("训练集 CSV 不存在但所有日期已标记为处理完成，重置记录并重新生成")
+        dates_manager.reset()
+        to_process = list(all_trade_dates)
+    if not to_process:
+        logger.info("✅ 所有日期已处理完成！")
+        validate_train_dataset(OUTPUT_CSV_PATH)
+        exit(0)
+    logger.info(f"待处理日期（共 {len(to_process)} 个）: {to_process}")
+
+    # ── 连续失败计数器：超阈值直接退出，避免系统性故障下静默空跑 ──────────────
+    MAX_CONSECUTIVE_FAILS = 5   # 连续 5 个日期失败 → 视为系统性异常，终止
+    consecutive_fails = 0
+
+    # ---------- CSV 写入模式 ----------
+    first_write   = not os.path.exists(OUTPUT_CSV_PATH)
+    fixed_columns = None
+    if not first_write:
+        fixed_columns = pd.read_csv(OUTPUT_CSV_PATH, nrows=0).columns.tolist()
+        logger.info(f"断点续跑 | 固定列数: {len(fixed_columns)}")
+
+    # ==================== 逐日原子性处理 ====================
+    for date in to_process:
+        logger.info(f"\n========== 处理日期: {date} ==========")
+        try:
+            # ---- Step 1: Top3 板块 + 轮动分（必须先于候选池构建）----
+            top3_result   = sector_heat.select_top3_hot_sectors(trade_date=date)
+            top3_sectors  = top3_result["top3_sectors"]
+            adapt_score   = top3_result["adapt_score"]
+
+            if not top3_sectors:
+                logger.warning(f"{date} Top3 板块为空，跳过")
+                consecutive_fails = 0  # 数据合理缺失，非系统性错误
+                continue
+
+            # ---- Step 2: ST + 宏观数据入库 ----
+            date_fmt = date.replace("-", "")
+            try:
+                data_cleaner.insert_stock_st(trade_date=date_fmt)
+            except Exception as e:
+                logger.error(f"{date} ST 数据入库失败: {e}", exc_info=True)
+            try:
+                data_cleaner.clean_and_insert_limit_list_ths(trade_date=date_fmt, limit_type="涨停池")
+                data_cleaner.clean_and_insert_limit_list_ths(trade_date=date_fmt, limit_type="跌停池")
+                data_cleaner.clean_and_insert_limit_step(trade_date=date_fmt)
+                data_cleaner.clean_and_insert_limit_cpt_list(trade_date=date_fmt)
+                data_cleaner.clean_and_insert_index_daily(trade_date=date_fmt)
+            except Exception as e:
+                logger.error(f"{date} 宏观数据入库失败: {e}", exc_info=True)
+
+            # ---- Step 3: 构建板块候选池 ----
+            daily_df          = get_daily_kline_data(date)   # 当日全市场日线（预取，后续复用）
+            sector_candidate_map: Dict = {}
+
+            for sector in top3_sectors:
+                logger.info(f"处理板块: {sector}")
+                try:
+                    raw_stocks = get_stocks_in_sector(sector)
+                    if not raw_stocks:
+                        logger.warning(f"[{sector}] 无股票，跳过")
+                        sector_candidate_map[sector] = pd.DataFrame()
+                        continue
+
+                    ts_codes = [item["ts_code"] for item in raw_stocks]
+
+                    # 板块过滤（北交所 / 科创 / 创业板）
+                    ts_codes = _filter_ts_code_by_board(ts_codes)
+                    if not ts_codes:
+                        sector_candidate_map[sector] = pd.DataFrame()
+                        continue
+
+                    # ST 过滤
+                    ts_codes = filter_st_stocks(ts_codes, date)
+                    if not ts_codes:
+                        sector_candidate_map[sector] = pd.DataFrame()
+                        continue
+
+                    # 过滤当日无日线数据的股票
+                    sector_daily = daily_df[daily_df["ts_code"].isin(ts_codes)].copy()
+                    if sector_daily.empty:
+                        sector_candidate_map[sector] = pd.DataFrame()
+                        continue
+
+                    # 近 10 日涨停基因过滤（仅保留有涨停基因的个股）
+                    candidates   = sector_daily["ts_code"].unique().tolist()
+                    limit_up_map = _check_stock_has_limit_up(candidates, date, day_count=10)
+                    keep         = [ts for ts, has in limit_up_map.items() if has]
+                    sector_daily = sector_daily[sector_daily["ts_code"].isin(keep)]
+
+                    # D 日涨停封板过滤（收盘价==涨停价，买不进去）
+                    sector_daily = _filter_limit_up_on_d0(sector_daily)
+
+                    # 低流动性过滤
+                    sector_daily = _filter_low_liquidity(sector_daily)
+
+                    sector_candidate_map[sector] = sector_daily
+                    logger.info(f"[{sector}] 最终候选股: {len(sector_candidate_map[sector])}")
+
+                except Exception as e:
+                    logger.error(f"[{sector}] 处理失败: {e}", exc_info=True)
+                    sector_candidate_map[sector] = pd.DataFrame()
+
+            # ---- Step 4: 构建数据容器（一次 IO 覆盖所有因子）----
+            target_ts_codes = list({
+                ts
+                for df in sector_candidate_map.values()
+                if not df.empty
+                for ts in df["ts_code"].tolist()
+            })
+            if not target_ts_codes:
+                logger.warning(f"{date} 候选池为空，跳过")
+                consecutive_fails = 0  # 候选池为空属于正常数据情况
+                continue
+
+            data_bundle = FeatureDataBundle(
+                trade_date           = date,
+                target_ts_codes      = target_ts_codes,
+                sector_candidate_map = sector_candidate_map,
+                top3_sectors         = top3_sectors,
+                adapt_score          = adapt_score,   # 注入，avoid 重复计算
+                load_minute          = True,
+            )
+
+            # ---- Step 5: 特征计算（adapt_score 已在 bundle 中，自动输出到 feature_df）----
+            feature_df = feature_engine.run_single_date(data_bundle)
+            if feature_df.empty:
+                logger.warning(f"{date} 特征计算失败，跳过")
+                continue
+
+            # ---- Step 6: 标签生成 ----
+            label_df = label_engine.generate_single_date(
+                date, feature_df["stock_code"].unique().tolist()
+            )
+            if label_df.empty:
+                logger.warning(f"{date} 标签生成失败，跳过")
+                continue
+
+            # ---- Step 7: 合并 & 清洗 ----
+            merged   = pd.merge(feature_df, label_df, on=["stock_code", "trade_date"], how="left")
+            clean_df = DataSetAssembler.validate_and_clean(merged)
+            if clean_df.empty:
+                logger.warning(f"{date} 清洗后无有效数据，跳过")
+                continue
+
+            # ---- Step 8: 列对齐（断点续跑时保持列顺序一致）----
+            if first_write:
+                fixed_columns = clean_df.columns.tolist()
+            else:
+                clean_df = clean_df.reindex(columns=fixed_columns, fill_value=0)
+
+            # ---- Step 9: 原子性写入 ----
+            clean_df.to_csv(
+                OUTPUT_CSV_PATH,
+                mode="a", header=first_write,
+                index=False, encoding="utf-8-sig"
+            )
+            first_write = False
+
+            # ---- Step 10: 标记已处理（写入成功后才标记，保证幂等）----
+            # 用独立 try 包裹：若 JSON 写盘失败（磁盘满等），不应影响数据，
+            # 下次启动时由"启动一致性检查"补充标记即可
+            try:
+                dates_manager.add(date)
+            except Exception as mark_err:
+                logger.warning(
+                    f"{date} 标记已处理失败（数据已写入，下次启动将自动补偿）: {mark_err}"
+                )
+
+            consecutive_fails = 0  # 本日成功，重置计数器
+            logger.info(f"✅ {date} 处理完成，写入 {len(clean_df)} 行")
+
+        except Exception as e:
+            consecutive_fails += 1
+            logger.error(
+                f"{date} 处理失败 (连续失败 {consecutive_fails}/{MAX_CONSECUTIVE_FAILS}): {e}",
+                exc_info=True,
+            )
+            if consecutive_fails >= MAX_CONSECUTIVE_FAILS:
+                logger.critical(
+                    f"连续 {MAX_CONSECUTIVE_FAILS} 个日期处理失败，"
+                    f"疑似系统性故障（DB 断连 / 数据异常），终止训练集生成"
+                )
+                raise RuntimeError(
+                    f"训练集生成异常退出：连续 {MAX_CONSECUTIVE_FAILS} 个日期失败"
+                ) from e
+            continue
+
+    # ==================== 最终校验 ====================
+    logger.info("\n========== 全量处理完成 ==========")
+    if os.path.exists(OUTPUT_CSV_PATH):
+        validate_train_dataset(OUTPUT_CSV_PATH)
+    else:
+        logger.error("❌ 训练集生成失败！")
