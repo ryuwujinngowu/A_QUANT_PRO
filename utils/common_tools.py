@@ -817,47 +817,68 @@ def analyze_stock_follower_strength(
     ts_code: str,
     trade_date: str,
     *,
-    rank_top_pct: float = 0.3,
-    lookback_trade_days: int = 5,
+    daily_rank_top_pct: float = 0.20,
+    amp_rank_top_pct: float = 0.30,
     minute_bucket: str = "5min",
 ) -> Dict[str, object]:
     """
-    综合判断某只股票在指定交易日是否属于"跟风票"。
+    判断目标股票在指定交易日是否属于"跟风票"。
 
-    分钟线数据走完整的 DB→API→入库 链路（get_kline_min_by_stock_date）。
-    若分钟线真的获取失败（所有重试耗尽），用中性值处理：不标记为跟风（保守包含股票）。
+    两步判断：
+    1. 日线层：peer 池 = 目标股所有概念（排除 default_exclude）下股票合并去重，按当日涨幅排序。
+               目标股涨幅排不进前 daily_rank_top_pct（默认 20%）→ 直接返回跟风。
+    2. 分钟线层（仅排进前 20% 的股票执行）：
+       - 目标股：找 5 分钟线振幅（high/首根开盘 - 1）最大的第一根 K 线 → T_target, A_target
+         （涨停场景：首次涨停时刻即为 T_target，因为振幅最大的第一根就是首次触及涨停的 K 线）
+       - 对涨幅高于目标股的每只股票：
+           * 找自身振幅最大的第一根 K 线 → T_i（用于计算时间中位数）
+           * 取 T_target 时刻的 5 分钟振幅 → A_i（"板块在 T_target 时刻的强度"）
+       - 不跟风需同时满足：
+           * 时间：T_target < median(T_i)   ← 目标股先于大多数强势股到达峰值
+           * 振幅：A_target 排在 {A_i} 前 amp_rank_top_pct（默认 30%）← 目标股振幅够强
+       - 任一不满足 → 跟风
 
-    输出结构说明（便于 agent 日志和后续调参）：
+    分钟线获取失败（所有重试耗尽）时用中性值：不标记为跟风（保守保留股票）。
+
+    返回字段：
       {
-        "is_follower": bool,              # 最终结论：今日跟风且近5日最强阳线也跟风
-        "trade_date": str,                # 本次判断的交易日
-        "target_pct_chg": float,          # 目标股票当日涨幅
-        "concept_tags": List[str],        # 目标股票概念列表
-        "peer_pool_size": int,            # 同概念活跃股票池数量（仅统计 pct_chg > 0）
-        "stronger_peer_count": int,       # 当日涨幅高于目标股票的同概念活跃股票数
-        "daily_rank_pct": float,          # 目标股票在活跃概念池中的排名百分位（越小越强）
-        "minute_follower": bool,          # 分钟线层是否判定为后排跟风
-        "minute_reason": str,             # 分钟线层判定依据摘要
-        "history_trade_date": str,        # 最近5个交易日内（不含今日）涨幅第一的阳线日期
-        "history_follower_hit": bool,     # 历史那根阳线是否也满足"日线层+分钟线层"跟风定义
-        "judgement_summary": List[str],   # 汇总说明，便于日志直出
+        "is_follower": bool,
+        "trade_date": str,
+        "target_pct_chg": float,
+        "concept_tags": List[str],            # 过滤 default_exclude 后的有效概念
+        "peer_pool_size": int,                # peer 池大小（当日有涨幅数据且 pct_chg > 0）
+        "daily_rank_pct": float,              # 排名百分位（越小越强）
+        "stronger_peer_count": int,           # 涨幅高于目标股的 peer 数量
+        "target_peak_time": str,              # T_target（HH:MM）
+        "target_peak_amp": float,             # A_target（%，相对首根开盘）
+        "stronger_median_peak_time": str,     # median(T_i)（HH:MM）
+        "target_amp_rank_pct": float,         # A_target 在 {A_i} 中的排名百分位
+        "timing_ok": bool,                    # T_target < median(T_i)
+        "amplitude_ok": bool,                 # A_target 在前 30%
+        "judgement_summary": List[str],
       }
     """
+    import time as _time
     from data.data_cleaner import data_cleaner
 
+    _t0 = _time.time()
     trade_date_fmt = trade_date.replace("-", "")
-    result = {
+    result: Dict[str, object] = {
         "is_follower": False,
         "trade_date": trade_date,
         "target_pct_chg": 0.0,
         "concept_tags": [],
         "peer_pool_size": 0,
-        "stronger_peer_count": 0,
         "daily_rank_pct": 1.0,
-        "minute_follower": False,
-        "minute_reason": "",
-        "history_trade_date": "",
-        "history_follower_hit": False,
+        "stronger_peer_count": 0,
+        "target_peak_time": "",
+        "target_peak_amp": 0.0,
+        "stronger_median_peak_time": "",
+        "target_amp_rank_pct": 1.0,
+        "timing_ok": False,
+        "amplitude_ok": False,
+        "amplitude_top3": False,
+        "leading_concepts": [],
         "judgement_summary": [],
     }
 
@@ -865,229 +886,301 @@ def analyze_stock_follower_strength(
         result["judgement_summary"].append("invalid_input")
         return result
 
+    _exclude_set = set(default_exclude)
+
     def _normalize_tags(raw_tags: str) -> List[str]:
         if not raw_tags:
             return []
         tags = re.split(r"[,，；;]+", str(raw_tags))
-        return [tag.strip() for tag in tags if tag and str(tag).strip()]
+        return [t.strip() for t in tags if t.strip() and t.strip() not in _exclude_set]
 
-    def _load_target_concepts() -> List[str]:
-        sql = "SELECT concept_tags FROM stock_basic WHERE ts_code = %s LIMIT 1"
-        rows = db.query(sql, params=(ts_code,)) or []
-        if not rows:
-            return []
-        return _normalize_tags(rows[0].get("concept_tags", ""))
-
-    def _load_trade_dates(end_trade_date: str, days: int) -> List[str]:
-        end_fmt = end_trade_date.replace("-", "")
-        try:
-            end_dt = datetime.strptime(end_fmt, "%Y%m%d")
-        except ValueError:
-            return []
-        start_dt = end_dt - timedelta(days=max(days * 3, 15))
-        try:
-            return get_trade_dates(start_dt.strftime("%Y-%m-%d"), end_dt.strftime("%Y-%m-%d"))
-        except Exception:
-            return []
-
-    def _aggregate_minute_features(min_df: pd.DataFrame) -> Dict[str, object]:
-        if min_df is None or min_df.empty:
-            return {"bucket_peak_map": {}, "lift_time": None, "lift_strength": 0.0}
-        work_df = min_df.copy()
-        if "trade_time" not in work_df.columns or "close" not in work_df.columns:
-            return {"bucket_peak_map": {}, "lift_time": None, "lift_strength": 0.0}
-        work_df["trade_time"] = pd.to_datetime(work_df["trade_time"])
-        work_df = work_df.sort_values("trade_time").reset_index(drop=True)
-        first_open = pd.to_numeric(work_df["open"], errors="coerce").dropna()
-        if first_open.empty or first_open.iloc[0] <= 0:
-            return {"bucket_peak_map": {}, "lift_time": None, "lift_strength": 0.0}
-        open_px = float(first_open.iloc[0])
-        work_df["close"] = pd.to_numeric(work_df["close"], errors="coerce")
-        work_df = work_df.dropna(subset=["close"])
-        if work_df.empty:
-            return {"bucket_peak_map": {}, "lift_time": None, "lift_strength": 0.0}
-        work_df["bucket"] = work_df["trade_time"].dt.floor(minute_bucket)
-        bucket_df = work_df.groupby("bucket", as_index=False)["close"].max()
-        bucket_df["lift_pct"] = (bucket_df["close"] / open_px - 1) * 100
-        bucket_peak_map = {
-            row["bucket"].strftime("%H:%M"): float(row["lift_pct"])
-            for _, row in bucket_df.iterrows()
-        }
-        lift_time = None
-        for _, row in bucket_df.iterrows():
-            if float(row["lift_pct"]) > 0:
-                lift_time = row["bucket"].strftime("%H:%M")
-                break
-        lift_strength = float(bucket_df["lift_pct"].max()) if not bucket_df.empty else 0.0
-        return {
-            "bucket_peak_map": bucket_peak_map,
-            "lift_time": lift_time,
-            "lift_strength": lift_strength,
-        }
-
-    def _minute_bucket_to_index(bucket_str: Optional[str]) -> int:
-        if not bucket_str:
-            return 10 ** 9
-        hh, mm = bucket_str.split(":")
-        return int(hh) * 60 + int(mm)
-
-    def _evaluate_single_day(check_trade_date: str) -> Dict[str, object]:
-        day_result = {
-            "trade_date": check_trade_date,
-            "is_follower_day": False,
-            "target_pct_chg": 0.0,
-            "peer_pool_size": 0,
-            "stronger_peer_count": 0,
-            "daily_rank_pct": 1.0,
-            "minute_follower": False,
-            "minute_reason": "",
-            "judgement_summary": [],
-        }
-        concepts = result["concept_tags"]
-        if not concepts:
-            day_result["judgement_summary"].append("no_concepts")
-            return day_result
-
-        peer_codes = set()
-        for concept in concepts:
-            stocks = get_stocks_in_sector(concept) or []
-            for stock in stocks:
-                code = stock.get("ts_code") if isinstance(stock, dict) else stock
-                code = str(code).strip()
-                if code:
-                    peer_codes.add(code)
-        peer_codes.add(ts_code)
-
-        daily_df = get_daily_kline_data(check_trade_date, ts_code_list=list(peer_codes))
-        if daily_df.empty or "ts_code" not in daily_df.columns:
-            day_result["judgement_summary"].append("missing_daily")
-            return day_result
-
-        daily_df = daily_df.copy()
-        daily_df["ts_code"] = daily_df["ts_code"].astype(str)
-        daily_df["pct_chg"] = pd.to_numeric(daily_df["pct_chg"], errors="coerce")
-        daily_df = daily_df.dropna(subset=["pct_chg"])
-        target_row = daily_df[daily_df["ts_code"] == ts_code]
-        if target_row.empty:
-            day_result["judgement_summary"].append("missing_target_daily")
-            return day_result
-
-        target_pct = float(target_row.iloc[0]["pct_chg"])
-        day_result["target_pct_chg"] = target_pct
-
-        active_df = daily_df[daily_df["pct_chg"] > 0].copy()
-        if active_df.empty or ts_code not in set(active_df["ts_code"].tolist()):
-            day_result["judgement_summary"].append("target_not_positive")
-            return day_result
-
-        active_df = active_df.sort_values("pct_chg", ascending=False).reset_index(drop=True)
-        day_result["peer_pool_size"] = int(len(active_df))
-        target_rank = int(active_df.index[active_df["ts_code"] == ts_code][0]) + 1
-        day_result["daily_rank_pct"] = target_rank / len(active_df)
-        stronger_df = active_df[active_df["pct_chg"] > target_pct].copy()
-        day_result["stronger_peer_count"] = int(len(stronger_df))
-
-        daily_follower = day_result["daily_rank_pct"] > rank_top_pct
-        if not daily_follower:
-            day_result["judgement_summary"].append("daily_rank_ok")
-            return day_result
-        if stronger_df.empty:
-            day_result["judgement_summary"].append("no_stronger_peers")
-            return day_result
-
-        target_min_df = data_cleaner.get_kline_min_by_stock_date(ts_code, check_trade_date.replace("-", ""))
-        target_min_feat = _aggregate_minute_features(target_min_df)
-        stronger_features = []
-        for stronger_code in stronger_df["ts_code"].astype(str).tolist():
-            peer_min_df = data_cleaner.get_kline_min_by_stock_date(stronger_code, check_trade_date.replace("-", ""))
-            feat = _aggregate_minute_features(peer_min_df)
-            if feat["bucket_peak_map"]:
-                stronger_features.append(feat)
-        if not stronger_features or not target_min_feat["bucket_peak_map"]:
-            day_result["judgement_summary"].append("minute_data_insufficient")
-            return day_result
-
-        stronger_bucket_df = pd.DataFrame([feat["bucket_peak_map"] for feat in stronger_features]).fillna(0.0)
-        median_series = stronger_bucket_df.median(axis=0).sort_index()
-        target_bucket_series = pd.Series(target_min_feat["bucket_peak_map"]).sort_index()
-        common_buckets = [bucket for bucket in median_series.index if bucket in target_bucket_series.index]
-        if not common_buckets:
-            day_result["judgement_summary"].append("minute_bucket_miss")
-            return day_result
-
-        target_lift_time = None
-        for bucket in common_buckets:
-            if float(target_bucket_series[bucket]) >= float(median_series[bucket]) * 0.8 and float(target_bucket_series[bucket]) > 0:
-                target_lift_time = bucket
-                break
-        peer_lift_time = None
-        for bucket in common_buckets:
-            if float(median_series[bucket]) > 0:
-                peer_lift_time = bucket
-                break
-
-        target_peak = float(target_bucket_series.max()) if not target_bucket_series.empty else 0.0
-        peer_peak_median = float(median_series.max()) if not median_series.empty else 0.0
-        late_lift = _minute_bucket_to_index(target_lift_time) > _minute_bucket_to_index(peer_lift_time)
-        weak_lift = target_peak < peer_peak_median * 0.8 if peer_peak_median > 0 else False
-        minute_follower = late_lift or weak_lift
-
-        day_result["minute_follower"] = minute_follower
-        day_result["minute_reason"] = (
-            f"late_lift={late_lift}, weak_lift={weak_lift}, "
-            f"target_lift_time={target_lift_time}, peer_lift_time={peer_lift_time}, "
-            f"target_peak={target_peak:.2f}, peer_peak_median={peer_peak_median:.2f}"
-        )
-        day_result["judgement_summary"].append("daily_rank_back")
-        day_result["judgement_summary"].append("minute_follow" if minute_follower else "minute_not_follow")
-        day_result["is_follower_day"] = daily_follower and minute_follower
-        return day_result
-
-    result["concept_tags"] = _load_target_concepts()
-    if not result["concept_tags"]:
-        result["judgement_summary"].append("no_concepts")
+    # ── Step 1: 加载目标股概念（排除 default_exclude）──────────────────────
+    rows = db.query("SELECT concept_tags FROM stock_basic WHERE ts_code = %s LIMIT 1", params=(ts_code,)) or []
+    if not rows:
+        result["judgement_summary"].append("no_stock_basic")
+        return result
+    valid_concepts = _normalize_tags(rows[0].get("concept_tags", ""))
+    result["concept_tags"] = valid_concepts
+    if not valid_concepts:
+        result["judgement_summary"].append("no_valid_concepts")
         return result
 
-    today_eval = _evaluate_single_day(trade_date)
-    result["target_pct_chg"] = today_eval["target_pct_chg"]
-    result["peer_pool_size"] = today_eval["peer_pool_size"]
-    result["stronger_peer_count"] = today_eval["stronger_peer_count"]
-    result["daily_rank_pct"] = today_eval["daily_rank_pct"]
-    result["minute_follower"] = today_eval["minute_follower"]
-    result["minute_reason"] = today_eval["minute_reason"]
-    result["judgement_summary"].extend(today_eval["judgement_summary"])
+    # ── Step 2: 拉取所有概念下的 peer 股票，合并去重 ────────────────────────
+    peer_codes: set = set()
+    for concept in valid_concepts:
+        stocks = get_stocks_in_sector(concept) or []
+        for s in stocks:
+            code = s.get("ts_code") if isinstance(s, dict) else s
+            code = str(code).strip()
+            if code:
+                peer_codes.add(code)
+    peer_codes.add(ts_code)
 
-    trade_dates = _load_trade_dates(trade_date, lookback_trade_days + 2)
-    prev_trade_dates = [d for d in trade_dates if d < trade_date][-lookback_trade_days:]
-    if prev_trade_dates:
-        history_rows = []
-        for d in prev_trade_dates:
-            day_df = get_daily_kline_data(d, ts_code_list=[ts_code])
-            if day_df.empty:
-                continue
-            day_df = day_df.copy()
-            day_df["pct_chg"] = pd.to_numeric(day_df["pct_chg"], errors="coerce")
-            day_df["open"] = pd.to_numeric(day_df["open"], errors="coerce")
-            day_df["close"] = pd.to_numeric(day_df["close"], errors="coerce")
-            day_df = day_df.dropna(subset=["pct_chg", "open", "close"])
-            if day_df.empty:
-                continue
-            row = day_df.iloc[0]
-            if float(row["close"]) > float(row["open"]):
-                history_rows.append({"trade_date": d, "pct_chg": float(row["pct_chg"])})
-        if history_rows:
-            history_pick = sorted(history_rows, key=lambda item: item["pct_chg"], reverse=True)[0]
-            result["history_trade_date"] = history_pick["trade_date"]
-            history_eval = _evaluate_single_day(history_pick["trade_date"])
-            result["history_follower_hit"] = bool(history_eval["is_follower_day"])
-            result["judgement_summary"].append(f"history_pick={history_pick['trade_date']}")
-            result["judgement_summary"].extend([f"history_{item}" for item in history_eval["judgement_summary"]])
-        else:
-            result["judgement_summary"].append("history_no_bullish_day")
+    # ── Step 3: 拉取当日日线，按涨幅排序，确认目标股排名 ────────────────────
+    daily_df = get_daily_kline_data(trade_date, ts_code_list=list(peer_codes))
+    if daily_df.empty or "ts_code" not in daily_df.columns:
+        result["judgement_summary"].append("missing_daily")
+        result["is_follower"] = True
+        return result
+
+    daily_df = daily_df.copy()
+    daily_df["ts_code"] = daily_df["ts_code"].astype(str)
+    daily_df["pct_chg"] = pd.to_numeric(daily_df["pct_chg"], errors="coerce")
+    daily_df = daily_df.dropna(subset=["pct_chg"])
+
+    target_row = daily_df[daily_df["ts_code"] == ts_code]
+    if target_row.empty:
+        result["judgement_summary"].append("target_missing_daily")
+        result["is_follower"] = True
+        return result
+
+    target_pct = float(target_row.iloc[0]["pct_chg"])
+    result["target_pct_chg"] = target_pct
+
+    active_df = daily_df[daily_df["pct_chg"] > 0].sort_values("pct_chg", ascending=False).reset_index(drop=True)
+    result["peer_pool_size"] = int(len(active_df))
+
+    if active_df.empty or ts_code not in set(active_df["ts_code"].tolist()):
+        result["judgement_summary"].append("target_not_positive")
+        result["is_follower"] = True
+        return result
+
+    target_rank_idx = int(active_df.index[active_df["ts_code"] == ts_code][0])  # 0-based
+    daily_rank_pct = (target_rank_idx + 1) / len(active_df)
+    result["daily_rank_pct"] = daily_rank_pct
+
+    stronger_df = active_df.iloc[:target_rank_idx].copy()
+    result["stronger_peer_count"] = int(len(stronger_df))
+
+    # ── Step 4: 日线层判断 ────────────────────────────────────────────────
+    if daily_rank_pct > daily_rank_top_pct:
+        result["is_follower"] = True
+        result["judgement_summary"].append(f"daily_rank_fail rank_pct={daily_rank_pct:.3f}")
+        return result
+
+    _t1 = _time.time()
+    result["judgement_summary"].append(f"daily_rank_ok rank_pct={daily_rank_pct:.3f}")
+
+    # 批量查询强势股名称+概念（1次SQL）
+    stronger_codes_all = stronger_df["ts_code"].astype(str).tolist()
+    _name_rows = db.query(
+        f"SELECT ts_code, name, concept_tags FROM stock_basic WHERE ts_code IN ({','.join(['%s']*len(stronger_codes_all))})",
+        params=tuple(stronger_codes_all),
+    ) or []
+    _name_map = {r["ts_code"]: r["name"] for r in _name_rows}
+    _concept_map = {r["ts_code"]: _normalize_tags(r.get("concept_tags", "")) for r in _name_rows}
+    # 加入目标股自身
+    _concept_map[ts_code] = valid_concepts
+
+    logger.debug(
+        f"[follower:{ts_code}] 日线层通过 rank={daily_rank_pct:.3f} "
+        f"peer池={result['peer_pool_size']} 更强股={len(stronger_codes_all)} 耗时={_t1-_t0:.1f}s"
+    )
+    for _sc in stronger_codes_all:
+        _sc_row = stronger_df[stronger_df["ts_code"] == _sc]
+        _sc_pct = float(_sc_row.iloc[0]["pct_chg"]) if not _sc_row.empty else 0.0
+        logger.debug(f"  [stronger] {_sc} {_name_map.get(_sc, '?')} pct_chg={_sc_pct:.2f}%")
+
+    if stronger_df.empty:
+        # 排第一，没有更强的 peer
+        result["is_follower"] = False
+        result["judgement_summary"].append("rank1_no_stronger_peers")
+        return result
+
+    # ── Step 5: 分钟线层 ─────────────────────────────────────────────────
+    def _get_first_open(min_df: pd.DataFrame) -> float:
+        if min_df is None or min_df.empty:
+            return 0.0
+        df = min_df.copy()
+        df["trade_time"] = pd.to_datetime(df["trade_time"])
+        df = df.sort_values("trade_time")
+        opens = pd.to_numeric(df["open"], errors="coerce").dropna()
+        return float(opens.iloc[0]) if not opens.empty else 0.0
+
+    def _find_peak_bar(min_df: pd.DataFrame, first_open: float) -> tuple:
+        """
+        找振幅（high/first_open - 1）最大的第一根 K 线。
+        涨停场景：最大振幅会在首次涨停时出现，之后维持（high 不再更高），
+        取第一根（即首次触及最高振幅的时刻），天然等同于"涨停时间"。
+        返回 (time_str "HH:MM", amplitude_pct)。
+        """
+        if min_df is None or min_df.empty or first_open <= 0:
+            return None, 0.0
+        df = min_df.copy()
+        df["trade_time"] = pd.to_datetime(df["trade_time"])
+        df = df.sort_values("trade_time").reset_index(drop=True)
+        df["high"] = pd.to_numeric(df["high"], errors="coerce")
+        df = df.dropna(subset=["high"])
+        if df.empty:
+            return None, 0.0
+        df["amp"] = (df["high"] / first_open - 1) * 100
+        max_amp = float(df["amp"].max())
+        # 取第一根达到 max_amp 的 K 线（0.05% 容差应对浮点误差）
+        peak_rows = df[df["amp"] >= max_amp - 0.05]
+        first_peak = peak_rows.iloc[0]
+        bucket = pd.Timestamp(first_peak["trade_time"]).floor(minute_bucket)
+        return bucket.strftime("%H:%M"), max_amp
+
+    def _get_amp_at_time(min_df: pd.DataFrame, target_time_str: str, first_open: float) -> float:
+        """
+        取 target_time_str 所在 5 分钟 bucket 的振幅（high/first_open - 1）%。
+        若该 bucket 无数据，取最近更早的 bucket。
+        """
+        if min_df is None or min_df.empty or first_open <= 0 or not target_time_str:
+            return 0.0
+        df = min_df.copy()
+        df["trade_time"] = pd.to_datetime(df["trade_time"])
+        df["bucket"] = df["trade_time"].dt.floor(minute_bucket)
+        df["high"] = pd.to_numeric(df["high"], errors="coerce")
+        df = df.dropna(subset=["high"])
+        if df.empty:
+            return 0.0
+        date_part = trade_date if "-" in trade_date else f"{trade_date_fmt[:4]}-{trade_date_fmt[4:6]}-{trade_date_fmt[6:]}"
+        target_bucket = pd.Timestamp(f"{date_part} {target_time_str}").floor(minute_bucket)
+        matched = df[df["bucket"] == target_bucket]
+        if matched.empty:
+            earlier = df[df["bucket"] <= target_bucket]
+            if earlier.empty:
+                return 0.0
+            matched = earlier.tail(1)
+        amp = float((matched["high"].iloc[0] / first_open - 1) * 100)
+        return max(amp, 0.0)
+
+    def _time_to_minutes(t_str: Optional[str]) -> int:
+        if not t_str:
+            return 10 ** 9
+        hh, mm = t_str.split(":")
+        return int(hh) * 60 + int(mm)
+
+    # 拉目标股分钟线
+    target_min_df = data_cleaner.get_kline_min_by_stock_date(ts_code, trade_date_fmt)
+    target_first_open = _get_first_open(target_min_df)
+    if target_first_open <= 0:
+        result["judgement_summary"].append("target_minute_missing_neutral")
+        result["is_follower"] = False
+        return result
+
+    t_target, a_target = _find_peak_bar(target_min_df, target_first_open)
+    if t_target is None:
+        result["judgement_summary"].append("target_peak_not_found_neutral")
+        result["is_follower"] = False
+        return result
+
+    result["target_peak_time"] = t_target
+    result["target_peak_amp"] = round(a_target, 3)
+
+    _t2 = _time.time()
+    logger.debug(
+        f"[follower:{ts_code}] 目标股分钟线完成 T_target={t_target} A_target={a_target:.2f}% 耗时={_t2-_t1:.1f}s"
+    )
+
+    # 对每只 stronger stock：找 T_i（自身峰值时间）和 A_i（T_target 时刻的振幅）
+    stronger_codes = stronger_df["ts_code"].astype(str).tolist()
+    peak_times_minutes: List[int] = []
+    amps_at_t: List[float] = []
+    # 保留完整明细（含股票代码），用于排名日志
+    stronger_details: List[Dict] = []
+
+    for sc in stronger_codes:
+        _t_sc = _time.time()
+        sc_min_df = data_cleaner.get_kline_min_by_stock_date(sc, trade_date_fmt)
+        sc_first_open = _get_first_open(sc_min_df)
+        if sc_first_open <= 0:
+            logger.debug(f"  [stronger_min] {sc} {_name_map.get(sc,'?')} 无分钟线数据")
+            continue
+        sc_peak_time, sc_peak_amp = _find_peak_bar(sc_min_df, sc_first_open)
+        if sc_peak_time:
+            peak_times_minutes.append(_time_to_minutes(sc_peak_time))
+        sc_amp_at_t = _get_amp_at_time(sc_min_df, t_target, sc_first_open)
+        amps_at_t.append(sc_amp_at_t)
+        stronger_details.append({
+            "ts_code": sc,
+            "name": _name_map.get(sc, "?"),
+            "peak_time": sc_peak_time,
+            "amp_at_t": sc_amp_at_t,
+        })
+        logger.debug(
+            f"  [stronger_min] {sc} {_name_map.get(sc,'?')} "
+            f"peak_time={sc_peak_time} peak_amp={sc_peak_amp:.2f}% "
+            f"amp@T_target={sc_amp_at_t:.2f}% 耗时={_time.time()-_t_sc:.1f}s"
+        )
+
+    if not peak_times_minutes or not amps_at_t:
+        result["judgement_summary"].append("stronger_minute_insufficient_neutral")
+        result["is_follower"] = False
+        return result
+
+    # 时间判断：T_target < median(T_i)
+    median_minutes = float(pd.Series(peak_times_minutes).median())
+    median_hh = int(median_minutes) // 60
+    median_mm = int(median_minutes) % 60
+    median_peak_time_str = f"{median_hh:02d}:{median_mm:02d}"
+    result["stronger_median_peak_time"] = median_peak_time_str
+    timing_ok = _time_to_minutes(t_target) < median_minutes
+
+    # 振幅判断：A_target 排在 {A_i} 前 amp_rank_top_pct
+    n = len(amps_at_t)
+    rank_above = sum(1 for a in amps_at_t if a > a_target)   # amps_at_t 不含目标股自身
+    target_amp_rank_pct = (rank_above + 1) / (n + 1)          # 分母含目标股
+    result["target_amp_rank_pct"] = round(target_amp_rank_pct, 3)
+    amplitude_ok = target_amp_rank_pct <= amp_rank_top_pct
+    amplitude_top3 = rank_above < 3   # 目标股振幅在所有股（stronger + 自身）中排前3
+
+    result["amplitude_top3"] = amplitude_top3
+
+    # ── Debug：T_target 时刻振幅排名，含目标股，输出前 10% ──────────────────
+    _all_at_t = stronger_details + [{"ts_code": ts_code, "name": "【目标股】", "peak_time": t_target, "amp_at_t": a_target}]
+    _all_at_t_sorted = sorted(_all_at_t, key=lambda x: x["amp_at_t"], reverse=True)
+    _top10_count = max(1, int(len(_all_at_t_sorted) * 0.10))
+    logger.debug(
+        f"[follower:{ts_code}] T_target={t_target} 时刻振幅排名（共{len(_all_at_t_sorted)}只，前10%={_top10_count}只，前3={amplitude_top3}）："
+    )
+    for _i, _item in enumerate(_all_at_t_sorted, 1):
+        _marker = " ◀ TOP10%" if _i <= _top10_count else ""
+        _top3_mark = " ◀ TOP3" if _i <= 3 else ""
+        _target_marker = " ★目标股" if _item["ts_code"] == ts_code else ""
+        logger.debug(
+            f"  #{_i:2d} {_item['ts_code']} {_item['name']}"
+            f"  amp@{t_target}={_item['amp_at_t']:.2f}%  peak_time={_item['peak_time']}"
+            f"{_marker}{_top3_mark}{_target_marker}"
+        )
+
+    # ── T_target 时刻振幅前3共有概念 ────────────────────────────────────────
+    _top3 = _all_at_t_sorted[:3]
+    _top3_concept_sets = []
+    for _item in _top3:
+        _c = _concept_map.get(_item["ts_code"], [])
+        if _c:
+            _top3_concept_sets.append(set(_c))
+    if _top3_concept_sets:
+        _common = _top3_concept_sets[0]
+        for _s in _top3_concept_sets[1:]:
+            _common = _common & _s
+        leading_concepts = sorted(_common)
     else:
-        result["judgement_summary"].append("history_window_empty")
+        leading_concepts = []
+    result["leading_concepts"] = leading_concepts
+    logger.debug(
+        f"[follower:{ts_code}] T_target={t_target} 振幅前3共有概念（{len(leading_concepts)}个）: {leading_concepts}"
+    )
 
-    result["is_follower"] = bool(today_eval["is_follower_day"] and result["history_follower_hit"])
+    # ── 最终判断 ─────────────────────────────────────────────────────────────
+    # 不跟风条件：(时间早 AND 振幅强) OR 振幅绝对前3
+    not_follower = (timing_ok and amplitude_ok) or amplitude_top3
+    result["timing_ok"] = timing_ok
+    result["amplitude_ok"] = amplitude_ok
+    result["is_follower"] = not not_follower
+    _total = _time.time() - _t0
+    result["judgement_summary"].append(
+        f"timing={'ok' if timing_ok else 'fail'} T_target={t_target} median_T={median_peak_time_str} | "
+        f"amp={'ok' if amplitude_ok else 'fail'} A_target={a_target:.2f}% "
+        f"amp_rank={target_amp_rank_pct:.3f} amp_top3={amplitude_top3} | "
+        f"total_time={_total:.1f}s"
+    )
+    logger.debug(
+        f"[follower:{ts_code}] 完成 is_follower={result['is_follower']} "
+        f"timing_ok={timing_ok} amplitude_ok={amplitude_ok} amplitude_top3={amplitude_top3} 总耗时={_total:.1f}s"
+    )
     return result
 
 
@@ -1669,8 +1762,12 @@ def ensure_limit_list_ths_data(trade_date: str) -> None:
         logger.warning(f"[ensure_limit_list_ths_data] {trade_date} 补拉失败：{e}")
 
 
+
+
 if __name__ == "__main__":
-    # result = select_top3_hot_sectors(trade_date="2024-02-20")
-    # print(result)
-    print(get_stocks_in_sector('军工'))
+    import json
+    import logging
+    logging.getLogger("a_quant").setLevel(logging.DEBUG)
+    result = analyze_stock_follower_strength("300724.SZ", "20260320")
+    print(json.dumps(result, ensure_ascii=False, indent=2))
     # pass
