@@ -1,7 +1,7 @@
 """
 板块热度策略 — 日频信号推送 (独立运行脚本)
 =============================================
-部署路径  : /home/a_quant
+部署路径  : /home/A_QUANT_PRO
 Python    : python3.8
 
 功能：
@@ -30,13 +30,13 @@ Python    : python3.8
   # 方案 A：次日凌晨 5 点触发（推荐）
   # 原因：处理前一交易日（T-1）的数据，凌晨 5 点 Tushare 分钟线已完整入库，
   #       信号结果稳定可靠；周一凌晨 5 点处理上周五数据。
-  00 05 * * 1-5 cd /home/a_quant && python3.8 runner/sector_heat_runner.py >> logs/runner.log 2>&1
+  00 05 * * 1-5 cd /home/A_QUANT_PRO && python3.8 runner/sector_heat_runner.py >> logs/runner.log 2>&1
 
   # 方案 B：当日 15:30 触发（实时性更高，但有分钟线缺失风险）
   # 原因：Tushare 分钟线在收盘后约 30-60 分钟完成入库。
   #       若在 15:05 等数据未完整时触发，HDI/SEI 特征为 0，信号可能与完整数据有差异。
   #       建议最早 15:30 触发以确保数据完整。
-  30 15 * * 1-5 cd /home/a_quant && python3.8 runner/sector_heat_runner.py --date $(date +%Y-%m-%d) >> logs/runner.log 2>&1
+  30 15 * * 1-5 cd /home/A_QUANT_PRO && python3.8 runner/sector_heat_runner.py --date $(date +%Y-%m-%d) >> logs/runner.log 2>&1
 
   ⚠ 如当前 crontab 缺少 cd 命令 或 缺少 5 个时间字段（分时日月周），
     cron 将无法执行或执行后路径错误。

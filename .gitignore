@@ -14,3 +14,4 @@ fileserver.py
 /logs/
 /sql/
 CLAUDE.md
+/.claude/
