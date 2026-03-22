@@ -1,0 +1,17 @@
+# 1. 忽略单个文件（精确路径）
+/config/.env
+.idea/
+.idea/workspace.xml
+tests/
+*.iml
+.run
+__pycache__/
+utils/wechat_push.py
+fileserver.py
+/.claude/
+/backtest/回测记录.csv
+/data_realtime/realtime_TickFetcher.py
+/learnEngine/history/
+/logs/
+/sql/
+CLAUDE.md

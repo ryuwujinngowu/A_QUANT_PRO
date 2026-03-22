@@ -1,0 +1,38 @@
+QuantTradingSystem/
+├── main.py                 # 项目入口（驱动回测/训练/实时监控）
+├── requirements.txt        # 依赖清单
+├── config/                 # 配置层
+│   ├── .env                # 环境变量（敏感配置）
+│   └── config.py           # 配置加载工具
+├── data/                   # 历史数据层
+│   ├── data_fetcher.py     # 历史行情/基本面数据拉取
+│   ├── data_cleaner.py     # 数据清洗（去重/补全/格式转换）
+│   └── autoUpdating.py     # 数据自动更新脚本
+├── data_realtime/          # 实时数据层
+│   └── data_realtime_fetcher.py  # 【修改】修正文件名拼写：realtme→realtime
+├── strategies/             # 策略层
+│   ├── base_strategy.py    # 策略抽象基类（封装通用逻辑）
+│   ├── limit_up_strategy.py # 涨停策略实现
+│   ├── multi_limit_up_strategy.py # 多涨停策略实现
+│   └── sector_heat_strategy.py  # 【修改】修正文件名：A_ector→sector，板块热度策略核心实现
+├── backtest/               # 回测层
+│   ├── engine.py           # 回测引擎（核心：逐K线模拟交易）
+│   ├── account.py          # 模拟账户（持仓/资金/订单管理）
+│   └── metrics.py          # 回测绩效指标（夏普比率/最大回撤/胜率等）
+├── learnEngine/            # 机器学习层【核心补全，原文件为空】
+│   ├── __init__.py         # 【新增】包导入初始化
+│   ├──
+│   ├── dataset.py          # 【核心】训练集构建（
+│   └── model.py            # 【修改】修正文件名：modle→model，XGBoost模型训练/推理/保存
+├── features/               # 特征工程层
+│   ├── __init__.py         # 【新增】包导入初始化
+│   ├── base_feature.py     # 特征基类
+│   ├── technical_indicator.py # 技术指标（MA/RSI/MACD等）
+│   ├── ma_indicator.py     # 均线计算
+│   ├── macd_indicator.py   # macd金叉死叉计算
+│   └── market_stats.py     # 【核心补全】板块热度30个因子计算
+└── utils/                  # 通用工具层
+    ├── common_tools.py     # 通用函数（时间转换/数据格式）
+    ├── db_utils.py         # 数据库操作（读写数据）
+    ├── log_utils.py        # 日志管理
+    └── wechat_push.py      # 微信消息推送
