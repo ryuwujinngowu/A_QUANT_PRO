@@ -18,20 +18,20 @@ def main():
     INIT_CAPITAL = DEFAULT_INIT_CAPITAL  # 初始本金10W元
 
     # # ===================== 初始化策略与回测引擎 =====================
-    strategy = HighLowSwitchStrategy()
-    engine = MultiStockBacktestEngine(
-        strategy=strategy,
-        init_capital=INIT_CAPITAL,
-        start_date=START_DATE,
-        end_date=END_DATE
-    )
-    # strategy = SectorHeatStrategy()
+    # strategy = HighLowSwitchStrategy()
     # engine = MultiStockBacktestEngine(
     #     strategy=strategy,
     #     init_capital=INIT_CAPITAL,
     #     start_date=START_DATE,
     #     end_date=END_DATE
     # )
+    strategy = SectorHeatStrategy()
+    engine = MultiStockBacktestEngine(
+        strategy=strategy,
+        init_capital=INIT_CAPITAL,
+        start_date=START_DATE,
+        end_date=END_DATE
+    )
     # strategy = MultiLimitUpStrategy()
     # engine = MultiStockBacktestEngine(
     #     strategy=strategy,

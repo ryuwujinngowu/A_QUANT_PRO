@@ -96,7 +96,7 @@ def _format_signal_message(trade_date: str, buy_signals: dict) -> Tuple[str, str
     :return: (title, content) 两个字符串
     """
     if not buy_signals:
-        title   = f"[量化] {trade_date} | 今日无买入信号"
+        title   = f"[板块热度筛选策略V1.2] {trade_date} | 今日无买入信号"
         content = (
             f"板块热度策略 | {trade_date}\n"
             f"今日无满足条件的买入标的。\n"
@@ -104,7 +104,7 @@ def _format_signal_message(trade_date: str, buy_signals: dict) -> Tuple[str, str
         )
         return title, content
 
-    title = f"[量化] {trade_date} | 发现 {len(buy_signals)} 个买入信号"
+    title = f"[板块热度筛选策略V1.2] {trade_date} | 发现 {len(buy_signals)} 个买入信号"
     lines = [
         f"📈 板块热度 XGBoost 策略",
         f"信号日期：{trade_date}",
@@ -144,9 +144,9 @@ def run_daily_signal(trade_date: str, dry_run: bool = False) -> bool:
         if not dry_run:
             # 修改1：使用正确的函数名 send_wechat_message_to_multiple_users
             # 补充说明：如果你的函数需要指定用户列表，可添加 users 参数，例如：
-            send_wechat_message_to_multiple_users(title=f"[量化] {trade_date} 今日非交易日", content=msg)
+            send_wechat_message_to_multiple_users(title=f"[板块热度筛选策略V1.2] {trade_date} 今日非交易日", content=msg)
             send_wechat_message_to_multiple_users(
-                title=f"[量化] {trade_date} 今日非交易日",
+                title=f"[板块热度筛选策略V1.2] {trade_date} 今日非交易日",
                 content=msg,
             )
         return True
