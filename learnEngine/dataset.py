@@ -119,6 +119,9 @@ class DataSetAssembler:
 
         df = df.drop_duplicates(subset=["stock_code", "trade_date"])
         df = df.dropna(subset=["label1", "label2"])
+        # label_raw_return 允许 NaN（旧数据或 D+1 停牌），填 0 不影响权重生成的兜底逻辑
+        if "label_raw_return" not in df.columns:
+            df["label_raw_return"] = float("nan")
 
         # ── 丢弃 D 日收盘价缺失或为零的行 ───────────────────────────────
         # 该列为零必然是停牌 / 数据入库异常，宁可损失训练样本，
@@ -303,10 +306,10 @@ if __name__ == "__main__":
     # END_DATE              = "2023-12-30"
     START_DATE            = "2024-11-02"
     END_DATE              = "2026-03-11"
-    OUTPUT_CSV_PATH       = os.path.join(os.getcwd(), "train_dataset_final.csv")
+    OUTPUT_CSV_PATH       = os.path.join(os.getcwd(), "datasets", "train_dataset_latest.csv")
     PROCESSED_DATES_FILE  = "processed_dates.json"
     # 因子逻辑有变更（新增列、修改计算公式）时必须更新版本号，否则旧数据不会重跑
-    FACTOR_VERSION        = "v3.9_vol_ratio_normalized_ma_clean"
+    FACTOR_VERSION        = "v4.0_loss_severity_raw_return"
     # =====================================================
 
     # ---------- 初始化核心组件 ----------

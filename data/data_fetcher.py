@@ -853,21 +853,42 @@ if __name__ == "__main__":
 
     # 2. 调用接口获取数据（示例：浦发银行 2025年1月前复权日线）
 
-    df = data_fetcher.fetch_kline_day_qfq(
-        ts_code="000001.SZ",  # 股票代码
-        start_date="20260301",# 开始日期
-        end_date="20260322"   # 结束日期
+    # df = data_fetcher.fetch_kline_day_qfq(
+    #     ts_code="000001.SZ",  # 股票代码
+    #     start_date="20260301",# 开始日期
+    #     end_date="20260322"   # 结束日期
+    # )
+    #
+    # # 3. 打印结果看看
+    # if not df.empty:
+    #     print("\n===== 获取到的前复权日线数据 =====")
+    #     print(f"数据形状：{df.shape}")  # 行数×列数
+    #     print("\n前5行数据：")
+    #     print(df.head())
+    #     print("\n数据字段：", df.columns.tolist())
+    # else:
+    #     print("未获取到数据，请检查Token/股票代码/日期是否正确")
+
+    df = data_fetcher.fetch_limit_list_ths(
+        trade_date="20241104",  # 核心测试日期：2024年11月04日
+        ts_code=None,  # 不指定个股，获取当日全市场涨跌停数据
+        limit_type="涨停池",  # 测试中文参数映射（也可试 "U"/"跌停池"/"炸板池"）
+        market="SZ"  # 测试深交所数据（也可试 "SH"/"BJ"）
     )
 
-    # 3. 打印结果看看
+    # 2. 打印结果验证
     if not df.empty:
-        print("\n===== 获取到的前复权日线数据 =====")
+        print("\n===== 获取到的20241104涨跌停数据 =====")
         print(f"数据形状：{df.shape}")  # 行数×列数
         print("\n前5行数据：")
         print(df.head())
         print("\n数据字段：", df.columns.tolist())
+        # 额外验证：limit_type 中文映射是否生效
+        if "limit_type" in df.columns:
+            print(f"\n涨跌停类型分布：\n{df['limit_type'].value_counts()}")
     else:
-        print("未获取到数据，请检查Token/股票代码/日期是否正确")
+        print("未获取到数据，请检查Token/交易日/市场参数是否正确")
+
 
     # =================== 测试：获取交易详细信息数据 =====")
     # pd.set_option('display.max_columns', None)

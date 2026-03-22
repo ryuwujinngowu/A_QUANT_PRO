@@ -107,10 +107,11 @@ class LabelEngine:
                 label2 = None  # D+2 无数据，后续清洗时 dropna
 
             rows.append({
-                "stock_code": ts_code,
-                "trade_date": trade_date,
-                "label1":     label1,
-                "label2":     label2,
+                "stock_code":       ts_code,
+                "trade_date":       trade_date,
+                "label1":           label1,
+                "label2":           label2,
+                "label_raw_return": round(d1_intra_return, 6),  # D+1日内实际收益率，供分级惩罚使用
             })
 
         result = pd.DataFrame(rows)

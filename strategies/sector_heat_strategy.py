@@ -35,6 +35,12 @@ from utils.common_tools import (
     ensure_limit_list_ths_data,
 )
 from utils.log_utils import logger
+from risk_penalty_core import (
+    RiskPenaltyConfig,
+    should_filter_high_risk_stock,
+    should_stop_loss,        # 预留：D+1开盘执行层调用（当前策略层仅引入，由执行引擎使用）
+    calc_strategy_weight_discount,
+)
 
 # 与 dataset.py 对齐的低流动性阈值（单位：千元）
 _MIN_AMOUNT = 10_000   # 1000 万元
@@ -59,7 +65,7 @@ class SectorHeatStrategy(BaseStrategy):
             "load_minute": True,     # 是否加载分钟线（保证特征与训练口径一致）
             "model_path": os.path.join(
                 os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                "sector_heat_xgb_model.pkl",
+                "model", "sector_heat_xgb_latest.pkl",
             ),
         }
 
@@ -69,6 +75,9 @@ class SectorHeatStrategy(BaseStrategy):
 
         # 模型（懒加载，首次调用 generate_signal 时加载）
         self._model = None
+
+        # 风险惩罚配置（使用选股模型专用预设，所有惩罚参数统一由 risk_penalty_core 管理）
+        self._risk_config: RiskPenaltyConfig = RiskPenaltyConfig.for_strategy_model()
 
         # 持仓管理：{ts_code: buy_date}，用于严格执行 D+1 卖出规则
         self.hold_stock_dict: Dict[str, str] = {}
@@ -232,6 +241,35 @@ class SectorHeatStrategy(BaseStrategy):
 
         if selected.empty:
             logger.info(f"{trade_date} 无股票超过概率阈值 {min_prob}，跳过买入")
+            return {}
+
+        # ── Step 5b: 风险惩罚过滤（高风险市场环境下过滤低流动性个股）────────
+        # 从 feature_df 读取宏观数据（若被 EXCLUDE_PATTERNS 过滤则取 0，自动跳过此过滤）
+        market_limit_down = int(feature_df.get("market_limit_down_count", pd.Series([0])).iloc[0]
+                                if "market_limit_down_count" in feature_df.columns else 0)
+        market_index_chg  = (float(feature_df["index_sh_pct_chg"].iloc[0])
+                             if "index_sh_pct_chg" in feature_df.columns else None)
+
+        before_risk_filter = len(selected)
+        selected = selected[
+            ~selected.apply(
+                lambda row: should_filter_high_risk_stock(
+                    market_limit_down_count=market_limit_down,
+                    stock_amount=float(row.get("stock_amount_d0", self._risk_config.min_liquidity_amount + 1)),
+                    config=self._risk_config,
+                    market_index_chg=market_index_chg,
+                ),
+                axis=1,
+            )
+        ]
+        if len(selected) < before_risk_filter:
+            logger.info(
+                f"{trade_date} 风险过滤移除 {before_risk_filter - len(selected)} 只"
+                f"（高风险市场+低流动性）| 跌停:{market_limit_down} 只"
+            )
+
+        if selected.empty:
+            logger.info(f"{trade_date} 风险过滤后候选为空，跳过买入")
             return {}
 
         # 返回格式 {ts_code: 'close'}，引擎以尾盘收盘价买入

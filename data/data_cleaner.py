@@ -1025,7 +1025,7 @@ class DataCleaner:
         final_df = self._align_df_with_db(cleaned_df, table_name)
         try:
             affected_rows = db.batch_insert_df(df=final_df, table_name=table_name, ignore_duplicate=True)
-            logger.info(f"涨跌停池入库完成 | 影响行数：{affected_rows}")
+            logger.debug(f"涨跌停池入库完成 | 影响行数：{affected_rows}")
             return affected_rows
         except Exception as e:
             logger.error(f"涨跌停池入库失败：{str(e)}", exc_info=True)

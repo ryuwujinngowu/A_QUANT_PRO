@@ -17,7 +17,9 @@
       "WebFetch(domain:tushare.pro)",
       "Bash(python3:*)",
       "Bash(grep -v \"^$\")",
-      "Bash(source venv/bin/activate)"
+      "Bash(source venv/bin/activate)",
+      "Bash(grep -E \"\\\\.\\(csv|json\\)$\")",
+      "Bash(python -c \":*)"
     ]
   },
   "spinnerTipsEnabled": true,
