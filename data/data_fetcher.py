@@ -6,6 +6,7 @@ from typing import Optional, Dict, Any, List, Union
 import pandas as pd
 from  utils.common_tools import retry_decorator
 import tushare as ts
+import tushare.pro.client as _ts_client
 from utils.log_utils import logger
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -34,7 +35,8 @@ def initialize_tushare():
     try:
         ts.set_token(TS_TOKEN)
         pro = ts.pro_api()
-        pro._DataApi__http_url = TUSHARE_API_URL  # 自定义接口地址
+        pro._DataApi__http_url = TUSHARE_API_URL  # 实例级别（self.pro.xxx 调用时生效）
+        _ts_client.DataApi._DataApi__http_url = TUSHARE_API_URL  # 类级别（ts.pro_bar 调用时生效）
         logger.info("Tushare Pro API 初始化成功")
         return pro
     except Exception as e:
@@ -187,10 +189,10 @@ class DataFetcher:
             "ts_code": ts_code,
             "start_date": start_date,
             "end_date": end_date,
-            "adj": adj or "qfq"  # 默认前复权；传入 "hfq" 可获取后复权数据
+            "adj": adj or "qfq",  # 默认前复权；传入 "hfq" 可获取后复权数据
+            "asset": "E",
+            "freq": "D",
         })
-        TUSHARE_TOKEN = TS_TOKEN_DEFAULT
-        ts.set_token(TUSHARE_TOKEN)  # 初始化token
         try:
             kline_qfq_df = ts.pro_bar(**params)
             logger.debug(f"前复权日线数据获取，参数：{params}，行数：{len(kline_qfq_df)}")
@@ -809,25 +811,25 @@ if __name__ == "__main__":
 # """===================== 分钟线接口（fetch_stk_mins）专项测试用例 ====================="""
 #
 #
-    try:
-        # 全局配置：显示所有列，方便查看返回结果
-        pd.set_option('display.max_columns', None)
-        pd.set_option('display.width', None)
-    #
-        logger.info("===== 测试1：有效股票+完整交易日分钟线（1min） =====")
-        # 测试标的：000001.SZ（平安银行，确保有数据）
-        # 测试日期：2026-01-05（你的回测日期，交易日）
-        mins_df_1 = data_fetcher.fetch_stk_mins(
-            ts_code="302132.SZ",
-            freq="1min",
-            start_date="2025-02-17 09:25:00",
-            end_date="2025-02-17 15:00:00"
-        )
-        logger.info(f"✅ 有效股票分钟线获取成功，行数：{len(mins_df_1)}")
-        logger.info(f"返回字段：{mins_df_1.columns.tolist()}")
-        logger.info(f"前5行数据：\n{mins_df_1.head()}")
-    except Exception as e:
-        logger.error(f"❌ 分钟线接口测试崩溃，核心错误：{str(e)}", exc_info=True)
+    # try:
+    #     # 全局配置：显示所有列，方便查看返回结果
+    #     pd.set_option('display.max_columns', None)
+    #     pd.set_option('display.width', None)
+    # #
+    #     logger.info("===== 测试1：有效股票+完整交易日分钟线（1min） =====")
+    #     # 测试标的：000001.SZ（平安银行，确保有数据）
+    #     # 测试日期：2026-01-05（你的回测日期，交易日）
+    #     mins_df_1 = data_fetcher.fetch_stk_mins(
+    #         ts_code="302132.SZ",
+    #         freq="1min",
+    #         start_date="2025-02-17 09:25:00",
+    #         end_date="2025-02-17 15:00:00"
+    #     )
+    #     logger.info(f"✅ 有效股票分钟线获取成功，行数：{len(mins_df_1)}")
+    #     logger.info(f"返回字段：{mins_df_1.columns.tolist()}")
+    #     logger.info(f"前5行数据：\n{mins_df_1.head()}")
+    # except Exception as e:
+    #     logger.error(f"❌ 分钟线接口测试崩溃，核心错误：{str(e)}", exc_info=True)
 
 
     # logger.info("===== 测试：获取交易日历数据 =====")
@@ -850,22 +852,23 @@ if __name__ == "__main__":
     # ts.set_token(TUSHARE_TOKEN)  # 初始化token
 
     # 2. 调用接口获取数据（示例：浦发银行 2025年1月前复权日线）
-    # df = data_fetcher.fetch_kline_day_qfq(
-    #     ts_code="600000.SH",  # 股票代码
-    #     start_date="20250101",# 开始日期
-    #     end_date="20260223"   # 结束日期
-    # )
-    #
-    # # 3. 打印结果看看
-    # if not df.empty:
-    #     print("\n===== 获取到的前复权日线数据 =====")
-    #     print(f"数据形状：{df.shape}")  # 行数×列数
-    #     print("\n前5行数据：")
-    #     print(df.head())
-    #     print("\n数据字段：", df.columns.tolist())
-    # else:
-    #     print("未获取到数据，请检查Token/股票代码/日期是否正确")
-    #
+
+    df = data_fetcher.fetch_kline_day_qfq(
+        ts_code="000001.SZ",  # 股票代码
+        start_date="20260301",# 开始日期
+        end_date="20260322"   # 结束日期
+    )
+
+    # 3. 打印结果看看
+    if not df.empty:
+        print("\n===== 获取到的前复权日线数据 =====")
+        print(f"数据形状：{df.shape}")  # 行数×列数
+        print("\n前5行数据：")
+        print(df.head())
+        print("\n数据字段：", df.columns.tolist())
+    else:
+        print("未获取到数据，请检查Token/股票代码/日期是否正确")
+
     # =================== 测试：获取交易详细信息数据 =====")
     # pd.set_option('display.max_columns', None)
     # pd.set_option('display.max_rows', None)
