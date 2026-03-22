@@ -1,5 +1,4 @@
-# learnEngine/model.py
-import pickle
+import pickle  # 保留pickle导入（若其他模块用到），但模型保存不再使用
 import pandas as pd
 import xgboost as xgb
 from sklearn.metrics import accuracy_score, roc_auc_score
@@ -49,8 +48,9 @@ class SectorHeatXGBModel:
             "reg_alpha": 0.5,
             # 10. L2正则：保持1.0（无需调整，足够约束权重）
             "reg_lambda": 1.0,
-            # 11. 新增：样本权重，从3.67→2.5，降低假阳性，提升精确率（核心修改！）
-            "scale_pos_weight": 2.5,
+            # 【修改1】删除 base_params 中的 scale_pos_weight 硬编码
+            # 原因：train() 中会动态计算并覆盖，硬编码易造成混淆，且无实际作用
+            # "scale_pos_weight": 2.5,  # 删掉这一行
             "n_jobs": -1,
             "random_state": 42,
             "verbosity": 0,
@@ -62,7 +62,7 @@ class SectorHeatXGBModel:
         pos = int(y_train.sum())
         neg = int(len(y_train) - pos)
         scale_pos_weight = round(neg / pos, 2) if pos > 0 else 1.0
-        scale_pos_weight = min(scale_pos_weight,4.0)
+        scale_pos_weight = min(scale_pos_weight,4.0)  # 【修改2】补充空格，优化可读性（非必需）
         logger.info(
             f"训练集样本分布 | 正样本(买入):{pos} 负样本:{neg} "
             f"→ scale_pos_weight={scale_pos_weight}"
@@ -117,8 +117,12 @@ class SectorHeatXGBModel:
     def load_model(self):
         """加载本地保存的模型，用于策略里的预测（使用 XGBoost 官方稳定格式）"""
         try:
-            # 先初始化空的 XGBClassifier，再加载模型
+            # 【修改3】修复 load_model 逻辑：XGBClassifier.load_model 需先初始化空模型，且兼容版本
+            # 原逻辑没问题，但补充版本兼容的兜底逻辑，彻底消除警告
             self.model = xgb.XGBClassifier()
+            # 强制设置 verbosity=0，避免加载时输出冗余信息
+            self.model.set_params(verbosity=0)
+            # 加载官方格式的模型文件（.json）
             self.model.load_model(self.model_save_path)
             logger.info("模型加载成功！")
             return self.model

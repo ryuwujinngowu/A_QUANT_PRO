@@ -45,9 +45,11 @@ TRAIN_CSV_PATH   = os.path.join(os.getcwd(), "learnEngine", "datasets", "train_d
 MODEL_VERSION    = "v4.0_loss_severity_raw_return"
 _MODEL_DIR       = os.path.join(os.getcwd(), "model")
 # 版本化存档：每次训练生成独立文件，不覆盖历史模型
-MODEL_SAVE_PATH  = os.path.join(_MODEL_DIR, f"sector_heat_xgb_{MODEL_VERSION}.pkl")
+# 【修改1】将 .pkl 改为 .json（匹配 model.py 中 XGBoost 官方保存格式）
+MODEL_SAVE_PATH  = os.path.join(_MODEL_DIR, f"sector_heat_xgb_{MODEL_VERSION}.json")
 # 稳定路径：策略/回测统一加载此文件，train.py 训练完后自动同步覆盖
-MODEL_LATEST_PATH = os.path.join(_MODEL_DIR, "sector_heat_xgb_latest.pkl")
+# 【修改2】同步改为 .json
+MODEL_LATEST_PATH = os.path.join(_MODEL_DIR, "sector_heat_xgb_latest.json")
 
 TARGET_LABEL     = "label1"       # 训练目标：label1 (日内 5% 收益) 或 label2 (隔夜高开)
 VAL_RATIO        = 0.2            # 验证集占比（按时间序列尾部切分）
