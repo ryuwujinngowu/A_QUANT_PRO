@@ -1762,6 +1762,25 @@ def ensure_limit_list_ths_data(trade_date: str) -> None:
         logger.warning(f"[ensure_limit_list_ths_data] {trade_date} 补拉失败：{e}")
 
 
+def ensure_stk_factor_pro_data(trade_date: str) -> None:
+    """
+    确保 stk_factor_pro 表有指定交易日的技术面因子数据。
+    若 DB 无数据，走 API 补拉（DB→API→DB 链路）。
+
+    :param trade_date: 交易日，支持 YYYY-MM-DD / YYYYMMDD
+    """
+    from data.data_cleaner import data_cleaner
+
+    trade_date_fmt = trade_date.replace("-", "")
+    check_sql = "SELECT 1 FROM stk_factor_pro WHERE trade_date = %s LIMIT 1"
+    try:
+        existing = db.query(check_sql, (trade_date_fmt,))
+        if existing:
+            return
+        logger.info(f"[ensure_stk_factor_pro_data] {trade_date} 无技术面因子数据，触发 API 补拉")
+        data_cleaner.clean_and_insert_stk_factor_pro(trade_date=trade_date_fmt)
+    except Exception as e:
+        logger.warning(f"[ensure_stk_factor_pro_data] {trade_date} 补拉失败：{e}")
 
 
 if __name__ == "__main__":

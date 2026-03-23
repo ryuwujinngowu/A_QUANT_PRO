@@ -1134,6 +1134,46 @@ class DataCleaner:
             logger.error(f"❌ stock_st数据入库失败：{str(e)}", exc_info=True)
             return None
 
+    def clean_and_insert_stk_factor_pro(
+            self,
+            trade_date: str,
+            table_name: str = "stk_factor_pro"
+    ) -> Optional[int]:
+        """
+        全市场技术面因子清洗入库（按交易日，一次拉取当日所有股票）。
+
+        接口文档：股票技术面因子(专业版) - stk_factor_pro（doc_id=328）
+        建表 SQL：sql/create_stk_factor_pro.sql
+
+        :param trade_date: 交易日，支持 YYYYMMDD / YYYY-MM-DD
+        :param table_name: 目标表名，默认 stk_factor_pro
+        :return: 入库行数，失败返回 None
+        """
+        trade_date_fmt = trade_date.replace("-", "")
+        logger.info(f"===== 开始技术面因子数据入库 | trade_date={trade_date_fmt} =====")
+
+        raw_df = data_fetcher.fetch_stk_factor_pro(trade_date=trade_date_fmt)
+        if raw_df.empty:
+            logger.warning(f"技术面因子原始数据为空，trade_date={trade_date_fmt}，跳过入库")
+            return 0
+
+        cleaned_df = self._clean_special_fields(raw_df)
+        if cleaned_df.empty:
+            return 0
+
+        final_df = self._align_df_with_db(cleaned_df, table_name)
+        if final_df.empty:
+            logger.warning(f"技术面因子对齐DB列后为空（表{table_name}可能未建立），跳过入库")
+            return 0
+
+        try:
+            affected_rows = db.batch_insert_df(df=final_df, table_name=table_name, ignore_duplicate=True)
+            logger.info(f"技术面因子入库完成 | trade_date={trade_date_fmt} | 影响行数：{affected_rows}")
+            return affected_rows
+        except Exception as e:
+            logger.error(f"技术面因子入库失败 | trade_date={trade_date_fmt}：{str(e)}", exc_info=True)
+            return None
+
 
 # 全局实例（保持不变，确保下游调用）
 data_cleaner = DataCleaner()

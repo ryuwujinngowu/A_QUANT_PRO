@@ -1,12 +1,12 @@
 """
 agent_stats — 智能体选股跟踪引擎（服务器运行入口）
 =====================================================
-部署路径  : /home/a_quant
+部署路径  : /home/A_QUANT_PRO
 Python    : python3.8
-日志目录  : /home/a_quant/logs/agent_stats.log
+日志目录  : /home/A_QUANT_PRO/logs/agent_stats.log
 
 ─── crontab 配置（每工作日凌晨 3 点，daily 模式）────────────────────────
-  0 3 * * 1-5 cd /home/a_quant && python3.8 agent_stats/run.py --mode daily >> logs/agent_stats.log 2>&1
+  0 4 * * 1-5 cd /home/A_QUANT_PRO && python3.8 agent_stats/run.py --mode daily >> logs/agent_stats.log 2>&1
 
   注意：
   · 必须 cd 到项目根目录，否则模块导入路径错误
@@ -52,7 +52,7 @@ from pathlib import Path
 
 # 获取当前脚本的绝对路径 (agent_stats/run.py)
 current_file = Path(__file__).resolve()
-# 项目根目录是 agent_stats 的父目录 (a_quant/)
+# 项目根目录是 agent_stats 的父目录 (A_QUANT_PRO/)
 project_root = current_file.parent.parent
 
 # 将项目根目录加入 sys.path（如果尚未存在）

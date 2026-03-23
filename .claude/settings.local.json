@@ -13,7 +13,11 @@
       "Bash(py -3.10 --version)",
       "Bash(py -3.9 --version)",
       "Bash(py -3.11 --version)",
-      "Bash(LOG_LEVEL=DEBUG python -m utils.common_tools)"
+      "Bash(LOG_LEVEL=DEBUG python -m utils.common_tools)",
+      "WebFetch(domain:tushare.pro)",
+      "Bash(python3:*)",
+      "Bash(grep -v \"^$\")",
+      "Bash(source venv/bin/activate)"
     ]
   },
   "spinnerTipsEnabled": true,

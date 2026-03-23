@@ -17,11 +17,12 @@
     feature_df  = engine.run_single_date(data_bundle)
 
 已注册因子（按导入顺序）：
-    sei_emotion   → SEIFeature（由 sector_stock 内部调用，不单独运行）
-    sector_heat   → SectorHeatFeature（板块热度 + adapt_score 全局因子）
-    sector_stock  → SectorStockFeature（个股维度全量情绪因子）
-    ma_position   → MAPositionFeature（均线 + 乖离率 + 个股位置，D 日截面）
-    market_macro  → MarketMacroFeature（涨跌停 + 连板 + 最强板块 + 指数，全局因子）
+    sei_emotion      → SEIFeature（由 sector_stock 内部调用，不单独运行）
+    sector_heat      → SectorHeatFeature（板块热度 + adapt_score 全局因子）
+    sector_stock     → SectorStockFeature（个股维度全量情绪因子）
+    ma_position      → MAPositionFeature（均线 + 乖离率 + 个股位置，D 日截面）
+    stk_factor_pro   → StkFactorProFeature（MACD/KDJ/RSI/Bollinger，来源Tushare stk_factor_pro）
+    market_macro     → MarketMacroFeature（涨跌停 + 连板 + 最强板块 + 指数，全局因子）
 """
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -58,12 +59,13 @@ from features.emotion.sei_feature import SEIFeature                        # noq
 from features.sector.sector_heat_feature import SectorHeatFeature          # noqa: F401  # 板块热度 + adapt_score（全局因子）
 from features.sector.sector_stock_feature import SectorStockFeature        # noqa: F401  # 板块个股全量情绪因子（个股因子）
 from features.technical.ma_position_feature import MAPositionFeature       # noqa: F401  # 均线 + 乖离率 + 位置（个股因子，用前复权数据）
+from features.technical.stk_factor_feature import StkFactorProFeature      # noqa: F401  # 技术面因子：MACD/KDJ/RSI/Boll（个股因子，来源Tushare stk_factor_pro）
 from features.macro.market_macro_feature import MarketMacroFeature         # noqa: F401  # 市场宏观因子：涨跌停/连板/指数（全局因子）
 
 __all__ = [
     "FeatureEngine", "FeatureDataBundle",
     "SectorHeatFeature", "SectorStockFeature", "SEIFeature", "MAPositionFeature",
-    "MarketMacroFeature",
+    "StkFactorProFeature", "MarketMacroFeature",
     "feature_registry",
 ]
 
