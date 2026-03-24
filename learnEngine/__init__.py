@@ -11,4 +11,9 @@ __all__ = [
     "DataSetAssembler",
     "validate_train_dataset",
     "SectorHeatXGBModel",
+    # factor_search 按需导入（避免启动时加载 optuna 等重量级依赖）：
+    # from learnEngine.factor_search import FactorSearchEngine
+    "FactorSearchEngine",
+    "FactorGroupEngine",
+    "SearchResultExporter",
 ]

@@ -24,7 +24,7 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import (
     accuracy_score, roc_auc_score, precision_score, recall_score,
-    classification_report, confusion_matrix,
+    classification_report, confusion_matrix, precision_recall_curve, f1_score,
 )
 from typing import List
 
@@ -42,14 +42,12 @@ from utils.log_utils import logger
 TRAIN_CSV_PATH   = os.path.join(os.getcwd(), "learnEngine", "datasets", "train_dataset_latest.csv")
 
 # 模型版本号（与 dataset.py FACTOR_VERSION 保持一致，修改因子时两处同步更新）
-MODEL_VERSION    = "v4.0_loss_severity_raw_return"
+MODEL_VERSION    = "v4.1_loss_severity_balanced"  # 【修改1】版本号升级，区分旧版
 _MODEL_DIR       = os.path.join(os.getcwd(), "model")
 # 版本化存档：每次训练生成独立文件，不覆盖历史模型
-# 【修改1】将 .pkl 改为 .json（匹配 model.py 中 XGBoost 官方保存格式）
-MODEL_SAVE_PATH  = os.path.join(_MODEL_DIR, f"sector_heat_xgb_{MODEL_VERSION}.json")
+MODEL_SAVE_PATH  = os.path.join(_MODEL_DIR, f"sector_heat_xgb_{MODEL_VERSION}.pkl")
 # 稳定路径：策略/回测统一加载此文件，train.py 训练完后自动同步覆盖
-# 【修改2】同步改为 .json
-MODEL_LATEST_PATH = os.path.join(_MODEL_DIR, "sector_heat_xgb_latest.json")
+MODEL_LATEST_PATH = os.path.join(_MODEL_DIR, "sector_heat_xgb_latest.pkl")  # 【修改2】改回 .pkl，保持兼容
 
 TARGET_LABEL     = "label1"       # 训练目标：label1 (日内 5% 收益) 或 label2 (隔夜高开)
 VAL_RATIO        = 0.2            # 验证集占比（按时间序列尾部切分）
@@ -249,6 +247,35 @@ def evaluate_model(model, X_val, y_val, feature_cols):
     logger.info("分类报告:")
     logger.info("\n" + classification_report(y_val, y_pred, target_names=["不买", "买入"]))
 
+    # 决策阈值优化（默认 0.5 对不平衡数据往往太高）
+    logger.info("决策阈值搜索:")
+    prec_curve, rec_curve, thresholds = precision_recall_curve(y_val, y_proba)
+    # 计算每个阈值的 F1
+    f1_array = 2 * (prec_curve[:-1] * rec_curve[:-1]) / (prec_curve[:-1] + rec_curve[:-1] + 1e-10)
+    best_f1_idx = np.argmax(f1_array)
+    best_threshold = thresholds[best_f1_idx]
+    best_f1 = f1_array[best_f1_idx]
+
+    # 用最优阈值重新计算指标
+    y_pred_opt = (y_proba >= best_threshold).astype(int)
+    prec_opt = precision_score(y_val, y_pred_opt, zero_division=0)
+    rec_opt  = recall_score(y_val, y_pred_opt, zero_division=0)
+    f1_opt   = f1_score(y_val, y_pred_opt, zero_division=0)
+
+    logger.info(f"  默认阈值 0.5:  Precision={precision:.4f}  Recall={recall:.4f}  F1={2*precision*recall/(precision+recall+1e-10):.4f}")
+    logger.info(f"  最优阈值 {best_threshold:.3f}: Precision={prec_opt:.4f}  Recall={rec_opt:.4f}  F1={f1_opt:.4f}")
+
+    # 展示多个候选阈值的效果
+    logger.info("  阈值敏感度分析:")
+    for t in [0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5]:
+        y_t = (y_proba >= t).astype(int)
+        p_t = precision_score(y_val, y_t, zero_division=0)
+        r_t = recall_score(y_val, y_t, zero_division=0)
+        f_t = f1_score(y_val, y_t, zero_division=0)
+        n_pred = y_t.sum()
+        logger.info(f"    threshold={t:.2f}: Prec={p_t:.4f} Rec={r_t:.4f} F1={f_t:.4f} 预测买入数={n_pred}")
+    logger.info("")
+
     # 特征重要性 Top 20
     importances = model.feature_importances_
     fi = pd.DataFrame({
@@ -260,7 +287,11 @@ def evaluate_model(model, X_val, y_val, feature_cols):
     for i, row in fi.head(20).iterrows():
         logger.info(f"  {row['feature']:40s} {row['importance']:.4f}")
 
-    return {"accuracy": acc, "auc": auc, "precision": precision, "recall": recall}
+    return {
+        "accuracy": acc, "auc": auc, "precision": precision, "recall": recall,
+        "best_threshold": float(best_threshold),
+        "precision_at_best": prec_opt, "recall_at_best": rec_opt, "f1_at_best": f1_opt,
+    }
 
 
 # ============================================================
@@ -270,7 +301,7 @@ if __name__ == "__main__":
     warnings.filterwarnings("ignore")
 
     logger.info("=" * 60)
-    logger.info("开始模型训练")
+    logger.info("开始模型训练（平衡版：避亏 + 开仓）")
     logger.info("=" * 60)
 
     # 1. 加载数据
@@ -283,18 +314,45 @@ if __name__ == "__main__":
     # 2. 时间序列切分
     X_train, X_val, y_train, y_val = time_series_split(X, y, df, VAL_RATIO)
 
-    # 3. 训练模型（含亏损惩罚）
+    # 3. 训练模型（含亏损惩罚 - 平衡版配置）
     # df_train_partition: 与 time_series_split 内部逻辑对齐，取时序前 80% 的原始行（含宏观特征）
     sort_idx    = np.argsort(df["trade_date"].values)
     split_point = int(len(df) * (1 - VAL_RATIO))
     df_train_partition = df.iloc[sort_idx[:split_point]]
 
     xgb_model = SectorHeatXGBModel(model_save_path=MODEL_SAVE_PATH)
+
+    # ========== 亏损惩罚配置（临时中间值，待 Optuna 搜索后替换） ==========
+    # 权重设计说明：
+    #   正样本权重 = class_balance_ratio（由 sample_weight 内部计算，≈ neg/pos，cap 4.0）
+    #   负样本权重 = loss_weight_multiplier × severity_tier
+    #   scale_pos_weight = 1.0（类别平衡全由 sample_weight 承担，避免双重叠加）
+    #
+    # 当前值为手工估算的中间点，精确最优值由 learnEngine/factor_search.py 自动搜索确定。
+    config = RiskPenaltyConfig.for_strategy_model()
+
+    config.loss_weight_multiplier = 1.5
+    config.high_risk_env_extra_multiplier = 1.15
+
+    config.loss_severity_tiers = (
+        (-0.07, 1.8),   # 跌停级（<-7%）：重亏，需要模型重点关注
+        (-0.03, 1.4),   # 中亏（-3%~-7%）
+        ( 0.00, 1.1),   # 小亏（0~-3%）
+        ( 0.03, 1.0),   # 微赚但未达标：中性
+    )
+
+    logger.info("=" * 60)
+    logger.info("【平衡版配置】已加载：")
+    logger.info(f"  loss_weight_multiplier = {config.loss_weight_multiplier}")
+    logger.info(f"  high_risk_env_extra = {config.high_risk_env_extra_multiplier}")
+    logger.info(f"  loss_severity_tiers = {config.loss_severity_tiers}")
+    logger.info("=" * 60)
+
     train_with_risk_penalty(
         xgb_model, X_train, X_val, y_train, y_val, feature_cols,
         df_train=df_train_partition,
         label_col=TARGET_LABEL,
-        config=RiskPenaltyConfig.for_strategy_model(),
+        config=config,
     )
 
     # 4. 详细评估

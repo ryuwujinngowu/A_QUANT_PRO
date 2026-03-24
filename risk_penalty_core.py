@@ -332,19 +332,26 @@ def generate_sample_weights(
         logger.info(f"[RiskPenalty] 未检测到 label_raw_return，使用统一惩罚（loss_multiplier={config.loss_weight_multiplier}）")
 
     # ── 逐行生成权重 ─────────────────────────────────────────────
+    # ── 类别平衡权重（替代 scale_pos_weight，由 sample_weight 统一承担）───
+    # 正样本少，需要放大其权重以平衡；亏损惩罚在此基础上对负样本微调
+    pos_total = int((labels == 1).sum())
+    neg_total = int((labels == 0).sum())
+    # class_balance_ratio: 正样本的放大倍数，等效于 scale_pos_weight
+    class_balance_ratio = min(neg_total / pos_total, 4.0) if pos_total > 0 else 1.0
+
     loss_base_weight = config.win_weight_base * config.loss_weight_multiplier
 
     for i in range(n):
         label_val = labels[i]
         if np.isnan(label_val):
-            weights[i] = config.win_weight_base   # NaN 标签按中性处理
+            weights[i] = config.win_weight_base
             continue
 
         if int(label_val) == 1:
-            # 盈利样本：基础权重（未来可在此按盈利幅度加成）
-            weights[i] = config.win_weight_base
+            # 盈利样本：基础权重 × 类别平衡倍数（补偿正样本数量劣势）
+            weights[i] = config.win_weight_base * class_balance_ratio
         else:
-            # 亏损样本：分级惩罚 or 统一惩罚
+            # 亏损样本：分级惩罚 or 统一惩罚（基础权重 1.0，不再与类别平衡竞争）
             if has_raw_return:
                 raw_ret = raw_returns[i]
                 severity = _get_severity_multiplier(raw_ret, sorted_tiers)
@@ -357,6 +364,11 @@ def generate_sample_weights(
                 w *= config.high_risk_env_extra_multiplier
 
             weights[i] = w
+
+    logger.info(
+        f"[RiskPenalty] 类别平衡 | 正样本:{pos_total} 负样本:{neg_total} | "
+        f"正样本权重倍数:{class_balance_ratio:.2f} | 负样本基础权重:{config.loss_weight_multiplier}"
+    )
 
     # ── 归一化与截断 ─────────────────────────────────────────────
     weights = normalize_weights(weights, clip_max_multiplier=clip_max_multiplier)
@@ -448,16 +460,15 @@ def train_with_risk_penalty(
     # ── Step 1: 生成样本权重 ─────────────────────────────────────
     weights = generate_sample_weights(df_train, label_col=label_col, config=config)
 
-    # ── Step 2: 动态计算 scale_pos_weight（复刻 model.py 逻辑）──
-    pos = int(y_train.sum())
-    neg = int(len(y_train) - pos)
-    scale_pos_weight = round(neg / pos, 2) if pos > 0 else 1.0
-    scale_pos_weight = min(scale_pos_weight, 4.0)
+    # ── Step 2: scale_pos_weight 设为 1.0 ──────────────────────
+    # 类别平衡已由 sample_weight 内部的 class_balance_ratio 承担，
+    # 不再通过 scale_pos_weight 双重叠加，避免正负样本权重方向冲突。
+    scale_pos_weight = 1.0
     logger.info(
         f"[RiskPenalty] 风险惩罚训练启动 | "
         f"loss_multiplier={config.loss_weight_multiplier} | "
         f"high_risk_extra={config.high_risk_env_extra_multiplier} | "
-        f"scale_pos_weight={scale_pos_weight} | "
+        f"scale_pos_weight={scale_pos_weight}（类别平衡已由sample_weight承担） | "
         f"样本数:训练={len(X_train)} 验证={len(X_val)}"
     )
 

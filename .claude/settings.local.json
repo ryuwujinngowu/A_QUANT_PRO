@@ -19,7 +19,11 @@
       "Bash(grep -v \"^$\")",
       "Bash(source venv/bin/activate)",
       "Bash(grep -E \"\\\\.\\(csv|json\\)$\")",
-      "Bash(python -c \":*)"
+      "Bash(python -c \":*)",
+      "Bash(pip show:*)",
+      "Bash(pip install:*)",
+      "Bash(wmic OS get FreePhysicalMemory,TotalVisibleMemorySize /Value)",
+      "Bash(file /e/PyCharm/a_quant_pro/model/*.pkl)"
     ]
   },
   "spinnerTipsEnabled": true,
