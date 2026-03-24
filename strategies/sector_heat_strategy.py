@@ -26,6 +26,7 @@ from data.data_cleaner import data_cleaner
 from features import FeatureEngine, FeatureDataBundle
 from features.sector.sector_heat_feature import SectorHeatFeature
 from strategies.base_strategy import BaseStrategy
+from backtest.stop_loss_engine import StopLossConfig
 from utils.common_tools import (
     filter_st_stocks,
     get_daily_kline_data,
@@ -81,6 +82,15 @@ class SectorHeatStrategy(BaseStrategy):
 
         # 持仓管理：{ts_code: buy_date}，用于严格执行 D+1 卖出规则
         self.hold_stock_dict: Dict[str, str] = {}
+
+        # 止损止盈配置：D+1 短线策略启用 -5% 固定止损 + 8% 止盈
+        self._stop_loss_config = StopLossConfig(
+            enabled=True,
+            fixed_stop_loss_pct=-0.05,   # -5% 止损（短线策略止损线较紧）
+            take_profit_pct=0.08,        # +8% 止盈
+            trailing_stop_pct=None,      # 短线不启用移动止损
+            max_hold_days=None,          # 由策略自身的 D+1 逻辑控制
+        )
 
         self.initialize()
 
@@ -139,6 +149,10 @@ class SectorHeatStrategy(BaseStrategy):
     # ------------------------------------------------------------------ #
     # 可选引擎回调
     # ------------------------------------------------------------------ #
+
+    def get_stop_loss_config(self):
+        """返回止损止盈配置，由回测引擎自动执行分钟线扫描"""
+        return self._stop_loss_config
 
     def on_sell_success(self, ts_code: str) -> None:
         """卖出成功后从内部持仓字典移除"""

@@ -7,7 +7,7 @@
 3. 统一管理策略通用属性（如信号映射、策略名称）
 """
 from abc import ABC, abstractmethod
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional
 from utils.log_utils import logger
 from config.config import (
     MAIN_BOARD_LIMIT_UP_RATE,
@@ -16,6 +16,7 @@ from config.config import (
 )
 import pandas as pd
 from utils.common_tools import  calc_limit_up_price, calc_limit_down_price
+from backtest.stop_loss_engine import StopLossConfig
 
 
 class BaseStrategy(ABC):
@@ -80,6 +81,25 @@ class BaseStrategy(ABC):
         :return: 跌停价格（保留2位小数，无效值返回0）
         """
         return calc_limit_down_price(ts_code, pre_close)
+
+    # ========== 止损止盈配置接口（子类按需重写） ==========
+    def get_stop_loss_config(self) -> Optional[StopLossConfig]:
+        """
+        返回止损止盈配置。默认返回 None（不启用止损引擎）。
+        子类重写此方法以声明自己的止损规则，引擎会在日循环中自动执行。
+
+        示例::
+
+            def get_stop_loss_config(self):
+                return StopLossConfig(
+                    enabled=True,
+                    fixed_stop_loss_pct=-0.08,   # -8% 固定止损
+                    take_profit_pct=0.15,         # +15% 止盈
+                    trailing_stop_pct=0.05,       # 盘中最高回撤 5% 触发
+                    max_hold_days=10,             # 最多持仓 10 天
+                )
+        """
+        return None
 
     # ========== 可选扩展方法（子类按需重写） ==========
     def get_strategy_info(self) -> Dict[str, any]:

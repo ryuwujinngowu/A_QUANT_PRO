@@ -9,6 +9,7 @@ from backtest.metrics import BacktestMetrics
 from data.data_cleaner import data_cleaner
 from data.data_fetcher import data_fetcher
 from strategies.base_strategy import BaseStrategy
+from backtest.stop_loss_engine import StopLossEngine, StopLossConfig
 from utils.db_utils import db
 from utils.log_utils import logger
 
@@ -37,6 +38,21 @@ class MultiStockBacktestEngine:
         # ========== 【新增】支持的买入类型定义 ==========
         self.SUPPORT_BUY_TYPES = ["open", "close", "limit_up", "limit_down", "custom"]
         self.DEFAULT_BUY_TYPE = "limit_up"  # 兼容旧策略的默认类型
+
+        # ========== 【新增】止损止盈引擎（从策略获取配置，策略未声明则不启用） ==========
+        sl_config = None
+        if hasattr(self.strategy, "get_stop_loss_config"):
+            sl_config = self.strategy.get_stop_loss_config()
+        if sl_config and sl_config.enabled:
+            self.stop_loss_engine = StopLossEngine(config=sl_config)
+            logger.info(
+                f"[止损引擎] 已启用 | 固定止损:{sl_config.fixed_stop_loss_pct}"
+                f" | 止盈:{sl_config.take_profit_pct}"
+                f" | 移动止损:{sl_config.trailing_stop_pct}"
+                f" | 超期天数:{sl_config.max_hold_days}"
+            )
+        else:
+            self.stop_loss_engine = None
 
     def run(self) -> dict:
         """执行回测核心流程"""
@@ -87,6 +103,51 @@ class MultiStockBacktestEngine:
             for ts_code in open_sell_ts_codes:
                 if ts_code in self.strategy.sell_signal_map:
                     del self.strategy.sell_signal_map[ts_code]
+
+            # ========== 【新增】分钟线止损止盈扫描（在买入信号之前执行，优先级最高） ==========
+            if self.stop_loss_engine and self.account.positions:
+                sl_results = self.stop_loss_engine.scan_positions(
+                    trade_date=trade_date,
+                    positions=self.account.positions,
+                    daily_df=daily_df,
+                )
+                for sl_result in sl_results:
+                    ts_code = sl_result.ts_code
+                    if ts_code not in self.account.positions:
+                        continue  # 可能已被开盘卖出信号清掉
+
+                    # 检查一字跌停（无法卖出）
+                    stock_df = daily_df[daily_df["ts_code"] == ts_code]
+                    if not stock_df.empty:
+                        pre_close = stock_df["pre_close"].iloc[0]
+                        limit_down_price = self.strategy.calc_limit_down_price(ts_code, pre_close)
+                        open_price = stock_df["open"].iloc[0]
+                        high_price = stock_df["high"].iloc[0]
+                        is_limit_down_lock = (
+                            (open_price <= limit_down_price + 0.001)
+                            and (high_price <= limit_down_price + 0.001)
+                        )
+                        if is_limit_down_lock:
+                            logger.warning(
+                                f"{trade_date} 止损卖出拦截：{ts_code} 当日一字跌停，无法卖出"
+                            )
+                            continue
+
+                    # 执行止损/止盈卖出
+                    sell_price = sl_result.trigger_price
+                    if self.account.sell(trade_date=trade_date, ts_code=ts_code, price=sell_price):
+                        logger.info(
+                            f"[{trade_date}] {ts_code} 止损引擎卖出成功"
+                            f" | 类型:{sl_result.trigger_type}"
+                            f" | 触发时间:{sl_result.trigger_time}"
+                            f" | 触发价:{sl_result.trigger_price:.4f}"
+                            f" | 涨跌幅:{sl_result.pct_from_cost:.2%}"
+                        )
+                        # 从策略的 sell_signal_map 中移除（避免重复卖出）
+                        self.strategy.sell_signal_map.pop(ts_code, None)
+                        # 触发卖出成功回调
+                        if hasattr(self.strategy, "on_sell_success"):
+                            self.strategy.on_sell_success(ts_code)
 
             # ========== 【核心改动1：第一次生成信号，兼容新旧两种买入格式】 ==========
             buy_signal, _ = self.strategy.generate_signal(
