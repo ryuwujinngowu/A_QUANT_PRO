@@ -31,7 +31,8 @@ from typing import List
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 
 from learnEngine.model import SectorHeatXGBModel
-from risk_penalty_core import train_with_risk_penalty, RiskPenaltyConfig
+# [回退] 亏损惩罚功能回测表现不佳，暂时停用，保留代码以备后续优化后重新启用
+# from risk_penalty_core import train_with_risk_penalty, RiskPenaltyConfig
 from utils.log_utils import logger
 
 
@@ -39,10 +40,10 @@ from utils.log_utils import logger
 # 可配置参数
 # ============================================================
 # 数据集路径（与 dataset.py OUTPUT_CSV_PATH 保持一致）
-TRAIN_CSV_PATH   = os.path.join(os.getcwd(), "learnEngine", "datasets", "train_dataset_latest.csv")
+TRAIN_CSV_PATH   = os.path.join(os.getcwd(), "learnEngine", "datasets", "train_dataset_final.csv")
 
 # 模型版本号（与 dataset.py FACTOR_VERSION 保持一致，修改因子时两处同步更新）
-MODEL_VERSION    = "v4.1_loss_severity_balanced"  # 【修改1】版本号升级，区分旧版
+MODEL_VERSION    = "v4.0"  # [回退] 去除亏损惩罚后恢复基线版本号
 _MODEL_DIR       = os.path.join(os.getcwd(), "model")
 # 版本化存档：每次训练生成独立文件，不覆盖历史模型
 MODEL_SAVE_PATH  = os.path.join(_MODEL_DIR, f"sector_heat_xgb_{MODEL_VERSION}.pkl")
@@ -63,62 +64,50 @@ EXCLUDE_COLS = [
 # 因子过滤模式（fnmatch 通配符）：匹配到的列将被排除在训练特征之外
 # 修改此处即可在不重新生成 CSV 的情况下切换因子组合，无需重跑 dataset.py
 EXCLUDE_PATTERNS: List[str] = [
+    # ===== 原始价格类：无跨股可比性，归一化信息已由 bias/ma_slope 携带 =====
     "stock_open_*",
     "stock_high_*",
     "stock_low_*",
     "stock_close_*",
-    # 原始均线绝对价格：无跨股可比性，归一化信息已由bias/ma_slope携带
     "ma5",
     "ma10",
-    # "ma13",
+    # "ma13",  # 保留：旧模型使用，对趋势判断有增量
 
-    # ========== 新增：全NaN无数据的垃圾因子 ==========
-    # 市场宏观类因子：全为NaN，无有效样本，完全无预测力
-    "market_*",
-    # 板块分类ID：ICIR接近0，无任何预测价值
-    "sector_id",
+    # ===== 全 NaN / 无数据因子 =====
+    "market_*",     # 市场宏观类：全为 NaN，完全无预测力
+    "sector_id",    # 板块分类 ID：ICIR≈0
 
-    # ========== 新增：所有d1-d4滞后无效因子 ==========
-    # 所有非当日的滞后因子：仅d0当日因子有效，d1-d4 ICIR全<0.5，预测力严重衰减，冗余噪声
-    "*_d[1-4]",
+    # ===== d1-d4 滞后因子 =====
+    "*_d[1-4]",     # 仅 d0 当日因子有效，d1-d4 预测力严重衰减
 
-    # ========== 新增：冗余/刚过线但无增量信息的因子 ==========
-    # 短周期乖离率：与核心因子bias13高度相关，无增量信息
-    "bias5",
-    "bias10",
-    # 短周期价格位置：与核心因子pos_20d高度相关，无增量信息
-    "pos_5d",
-    "index_*",
-    # ========== 新增：大样本下完全无效的因子 ==========
-    # 板块均值类因子：ICIR全<0.2，无稳定预测力
+    # ===== 冗余因子 =====
+    "bias5",        # 与 bias13 高度相关
+    "bias10",       # 与 bias13 高度相关
+    "pos_5d",       # 与 pos_20d 高度相关
+    "index_*",      # 指数涨跌幅：与 market_* 同源，训练集中全 NaN
+
+    # ===== 以下因子保留给模型/factor_search 自动判断 =====
+    # 注释 = 保留（旧模型使用，对 AUC/Recall 有贡献）
     # 'sector_avg_profit_*',
     # 'sector_avg_loss_*',
     # 'stock_sector_20d_rank',
-    # 'stock_vol_ratio_*'
-    # 'stock_amount_5d_ratio_*'
+    # 'stock_vol_ratio_*',
     # 'ma_align',
-    'pos_5d',
     # 'from_high_20d',
     # 'stock_vwap_dev_*',
-    # 涨跌幅原始值：ICIR<0.2，无预测力
-    "stock_pct_chg_*",
-    # HDI持股难度因子：大样本下ICIR<0.2，无稳定预测力
-    "stock_hdi_*",
-    # 盈利/亏损情绪分：仅d1刚过线，其余全无效，且与max_dd/vwap_dev高度相关
-    "stock_profit_*",
-    # "stock_loss_*",
-    # 涨跌停行为因子：大样本下ICIR<0.3，无稳定预测力
-    "stock_seal_times_*",
-    "stock_break_times_*",
-    # "stock_lift_times_*",
-    # 趋势拟合因子：ICIR<0.2，无预测力
-    "stock_trend_r2_*",
-    # K线辅助因子：ICIR<0.3，无稳定预测力
-    "stock_cpr_*",
-    "stock_candle_*",
-    # "stock_gap_return_*",
-    # "stock_lower_shadow_*",
-    # 时间持续类因子：ICIR<0.4，无稳定预测力
+
+    # ===== 低 ICIR 因子（旧模型也排除） =====
+    "stock_pct_chg_*",          # 涨跌幅原始值
+    "stock_hdi_*",              # HDI 持股难度
+    "stock_profit_*",           # 盈利情绪分（与 max_dd 高度相关）
+    "stock_seal_times_*",       # 涨停封板次数
+    "stock_break_times_*",      # 涨停打开次数
+    # "stock_lift_times_*",     # 保留：旧模型使用
+    "stock_trend_r2_*",         # 趋势拟合
+    "stock_cpr_*",              # K 线比率
+    "stock_candle_*",           # K 线形态
+    # "stock_gap_return_*",     # 保留：旧模型使用
+    # "stock_lower_shadow_*",   # 保留：旧模型使用
     "stock_red_time_ratio_*",
     "stock_float_profit_time_ratio_*",
     "stock_red_session_pm_ratio_*",
@@ -247,34 +236,34 @@ def evaluate_model(model, X_val, y_val, feature_cols):
     logger.info("分类报告:")
     logger.info("\n" + classification_report(y_val, y_pred, target_names=["不买", "买入"]))
 
-    # 决策阈值优化（默认 0.5 对不平衡数据往往太高）
-    logger.info("决策阈值搜索:")
-    prec_curve, rec_curve, thresholds = precision_recall_curve(y_val, y_proba)
-    # 计算每个阈值的 F1
-    f1_array = 2 * (prec_curve[:-1] * rec_curve[:-1]) / (prec_curve[:-1] + rec_curve[:-1] + 1e-10)
-    best_f1_idx = np.argmax(f1_array)
-    best_threshold = thresholds[best_f1_idx]
-    best_f1 = f1_array[best_f1_idx]
-
-    # 用最优阈值重新计算指标
-    y_pred_opt = (y_proba >= best_threshold).astype(int)
-    prec_opt = precision_score(y_val, y_pred_opt, zero_division=0)
-    rec_opt  = recall_score(y_val, y_pred_opt, zero_division=0)
-    f1_opt   = f1_score(y_val, y_pred_opt, zero_division=0)
-
-    logger.info(f"  默认阈值 0.5:  Precision={precision:.4f}  Recall={recall:.4f}  F1={2*precision*recall/(precision+recall+1e-10):.4f}")
-    logger.info(f"  最优阈值 {best_threshold:.3f}: Precision={prec_opt:.4f}  Recall={rec_opt:.4f}  F1={f1_opt:.4f}")
-
-    # 展示多个候选阈值的效果
-    logger.info("  阈值敏感度分析:")
-    for t in [0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5]:
-        y_t = (y_proba >= t).astype(int)
-        p_t = precision_score(y_val, y_t, zero_division=0)
-        r_t = recall_score(y_val, y_t, zero_division=0)
-        f_t = f1_score(y_val, y_t, zero_division=0)
-        n_pred = y_t.sum()
-        logger.info(f"    threshold={t:.2f}: Prec={p_t:.4f} Rec={r_t:.4f} F1={f_t:.4f} 预测买入数={n_pred}")
-    logger.info("")
+    # # 决策阈值优化（默认 0.5 对不平衡数据往往太高）
+    # logger.info("决策阈值搜索:")
+    # prec_curve, rec_curve, thresholds = precision_recall_curve(y_val, y_proba)
+    # # 计算每个阈值的 F1
+    # f1_array = 2 * (prec_curve[:-1] * rec_curve[:-1]) / (prec_curve[:-1] + rec_curve[:-1] + 1e-10)
+    # best_f1_idx = np.argmax(f1_array)
+    # best_threshold = thresholds[best_f1_idx]
+    # best_f1 = f1_array[best_f1_idx]
+    #
+    # # 用最优阈值重新计算指标
+    # y_pred_opt = (y_proba >= best_threshold).astype(int)
+    # prec_opt = precision_score(y_val, y_pred_opt, zero_division=0)
+    # rec_opt  = recall_score(y_val, y_pred_opt, zero_division=0)
+    # f1_opt   = f1_score(y_val, y_pred_opt, zero_division=0)
+    #
+    # logger.info(f"  默认阈值 0.5:  Precision={precision:.4f}  Recall={recall:.4f}  F1={2*precision*recall/(precision+recall+1e-10):.4f}")
+    # logger.info(f"  最优阈值 {best_threshold:.3f}: Precision={prec_opt:.4f}  Recall={rec_opt:.4f}  F1={f1_opt:.4f}")
+    #
+    # # 展示多个候选阈值的效果
+    # logger.info("  阈值敏感度分析:")
+    # for t in [0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5]:
+    #     y_t = (y_proba >= t).astype(int)
+    #     p_t = precision_score(y_val, y_t, zero_division=0)
+    #     r_t = recall_score(y_val, y_t, zero_division=0)
+    #     f_t = f1_score(y_val, y_t, zero_division=0)
+    #     n_pred = y_t.sum()
+    #     logger.info(f"    threshold={t:.2f}: Prec={p_t:.4f} Rec={r_t:.4f} F1={f_t:.4f} 预测买入数={n_pred}")
+    # logger.info("")
 
     # 特征重要性 Top 20
     importances = model.feature_importances_
@@ -289,8 +278,8 @@ def evaluate_model(model, X_val, y_val, feature_cols):
 
     return {
         "accuracy": acc, "auc": auc, "precision": precision, "recall": recall,
-        "best_threshold": float(best_threshold),
-        "precision_at_best": prec_opt, "recall_at_best": rec_opt, "f1_at_best": f1_opt,
+        # "best_threshold": float(best_threshold),
+        # "precision_at_best": prec_opt, "recall_at_best": rec_opt, "f1_at_best": f1_opt,
     }
 
 
@@ -301,7 +290,7 @@ if __name__ == "__main__":
     warnings.filterwarnings("ignore")
 
     logger.info("=" * 60)
-    logger.info("开始模型训练（平衡版：避亏 + 开仓）")
+    logger.info("开始模型训练（基线版：标准 XGBoost）")
     logger.info("=" * 60)
 
     # 1. 加载数据
@@ -314,46 +303,29 @@ if __name__ == "__main__":
     # 2. 时间序列切分
     X_train, X_val, y_train, y_val = time_series_split(X, y, df, VAL_RATIO)
 
-    # 3. 训练模型（含亏损惩罚 - 平衡版配置）
-    # df_train_partition: 与 time_series_split 内部逻辑对齐，取时序前 80% 的原始行（含宏观特征）
-    sort_idx    = np.argsort(df["trade_date"].values)
-    split_point = int(len(df) * (1 - VAL_RATIO))
-    df_train_partition = df.iloc[sort_idx[:split_point]]
-
+    # 3. 训练模型
     xgb_model = SectorHeatXGBModel(model_save_path=MODEL_SAVE_PATH)
+    xgb_model.train(X_train, X_val, y_train, y_val, feature_cols)
 
-    # ========== 亏损惩罚配置（临时中间值，待 Optuna 搜索后替换） ==========
-    # 权重设计说明：
-    #   正样本权重 = class_balance_ratio（由 sample_weight 内部计算，≈ neg/pos，cap 4.0）
-    #   负样本权重 = loss_weight_multiplier × severity_tier
-    #   scale_pos_weight = 1.0（类别平衡全由 sample_weight 承担，避免双重叠加）
+    # [回退] 亏损惩罚回测表现不佳，暂停使用。保留代码以备后续优化后重新启用。
+    # ========== 亏损惩罚配置（已停用） ==========
+    # sort_idx    = np.argsort(df["trade_date"].values)
+    # split_point = int(len(df) * (1 - VAL_RATIO))
+    # df_train_partition = df.iloc[sort_idx[:split_point]]
     #
-    # 当前值为手工估算的中间点，精确最优值由 learnEngine/factor_search.py 自动搜索确定。
-    config = RiskPenaltyConfig.for_strategy_model()
-
-    config.loss_weight_multiplier = 1.5
-    config.high_risk_env_extra_multiplier = 1.15
-
-    config.loss_severity_tiers = (
-        (-0.07, 1.8),   # 跌停级（<-7%）：重亏，需要模型重点关注
-        (-0.03, 1.4),   # 中亏（-3%~-7%）
-        ( 0.00, 1.1),   # 小亏（0~-3%）
-        ( 0.03, 1.0),   # 微赚但未达标：中性
-    )
-
-    logger.info("=" * 60)
-    logger.info("【平衡版配置】已加载：")
-    logger.info(f"  loss_weight_multiplier = {config.loss_weight_multiplier}")
-    logger.info(f"  high_risk_env_extra = {config.high_risk_env_extra_multiplier}")
-    logger.info(f"  loss_severity_tiers = {config.loss_severity_tiers}")
-    logger.info("=" * 60)
-
-    train_with_risk_penalty(
-        xgb_model, X_train, X_val, y_train, y_val, feature_cols,
-        df_train=df_train_partition,
-        label_col=TARGET_LABEL,
-        config=config,
-    )
+    # config = RiskPenaltyConfig.for_strategy_model()
+    # config.loss_weight_multiplier = 1.5
+    # config.high_risk_env_extra_multiplier = 1.15
+    # config.loss_severity_tiers = (
+    #     (-0.07, 1.8),
+    #     (-0.03, 1.4),
+    #     ( 0.00, 1.1),
+    #     ( 0.03, 1.0),
+    # )
+    # train_with_risk_penalty(
+    #     xgb_model, X_train, X_val, y_train, y_val, feature_cols,
+    #     df_train=df_train_partition, label_col=TARGET_LABEL, config=config,
+    # )
 
     # 4. 详细评估
     metrics = evaluate_model(xgb_model.model, X_val, y_val, feature_cols)

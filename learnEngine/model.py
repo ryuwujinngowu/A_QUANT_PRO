@@ -106,24 +106,29 @@ class SectorHeatXGBModel:
         return self.model
 
     def save_model(self):
-        """保存训练好的模型到本地（使用 XGBoost 官方稳定格式）"""
+        """保存训练好的模型到本地（pickle 格式，与策略层 pickle.load 兼容）"""
         if self.model is None:
             logger.error("模型还未训练，无法保存")
             return
-        # 使用 XGBoost 原生 save_model，替代 pickle
-        self.model.save_model(self.model_save_path)
+        import pickle as _pkl
+        with open(self.model_save_path, "wb") as f:
+            _pkl.dump(self.model, f)
         logger.info(f"模型已保存到：{self.model_save_path}")
 
-    def load_model(self):
-        """加载本地保存的模型，用于策略里的预测（使用 XGBoost 官方稳定格式）"""
+        # 同时保存 XGBoost 原生 JSON 格式（供调试/版本比对）
+        json_path = self.model_save_path.rsplit(".", 1)[0] + ".json"
         try:
-            # 【修改3】修复 load_model 逻辑：XGBClassifier.load_model 需先初始化空模型，且兼容版本
-            # 原逻辑没问题，但补充版本兼容的兜底逻辑，彻底消除警告
-            self.model = xgb.XGBClassifier()
-            # 强制设置 verbosity=0，避免加载时输出冗余信息
-            self.model.set_params(verbosity=0)
-            # 加载官方格式的模型文件（.json）
-            self.model.load_model(self.model_save_path)
+            self.model.save_model(json_path)
+            logger.info(f"JSON 副本已保存到：{json_path}")
+        except Exception:
+            pass
+
+    def load_model(self):
+        """加载本地保存的模型（pickle 格式）"""
+        import pickle as _pkl
+        try:
+            with open(self.model_save_path, "rb") as f:
+                self.model = _pkl.load(f)
             logger.info("模型加载成功！")
             return self.model
         except Exception as e:

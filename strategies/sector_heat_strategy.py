@@ -8,7 +8,7 @@
        → XGBoost predict_proba 排序选出 Top-K
        → 收盘价（'close'）尾盘买入
 
-  D+1：开盘卖出（sell_type='open'），持股不超过 1 个交易日
+  D+2：开盘卖出（sell_type='open'），持股不超过 1 个交易日
 
 过滤逻辑与 dataset.py 完全对齐，保证训练/推断口径一致。
 """
@@ -36,12 +36,13 @@ from utils.common_tools import (
     ensure_limit_list_ths_data,
 )
 from utils.log_utils import logger
-from risk_penalty_core import (
-    RiskPenaltyConfig,
-    should_filter_high_risk_stock,
-    should_stop_loss,        # 预留：D+1开盘执行层调用（当前策略层仅引入，由执行引擎使用）
-    calc_strategy_weight_discount,
-)
+# [回退] 亏损惩罚功能回测表现不佳，暂时停用，保留代码以备后续优化后重新启用
+# from risk_penalty_core import (
+#     RiskPenaltyConfig,
+#     should_filter_high_risk_stock,
+#     should_stop_loss,
+#     calc_strategy_weight_discount,
+# )
 
 # 与 dataset.py 对齐的低流动性阈值（单位：千元）
 _MIN_AMOUNT = 10_000   # 1000 万元
@@ -85,8 +86,8 @@ class SectorHeatStrategy(BaseStrategy):
 
         # 持仓跟踪配置：D+1 短线策略 -5% 固定止损 + 8% 止盈
         self._tracker_config = TrackerConfig(
-            stop_loss_pct=-0.05,         # -5% 止损（短线策略止损线较紧）
-            take_profit_pct=0.08,        # +8% 止盈
+            stop_loss_pct=-0.50,         # -5% = -0.05 止损（短线策略止损线较紧）
+            take_profit_pct=10,        # +8% = 0.08 止盈
             trailing_stop_pct=None,      # 短线不启用移动止损
             max_hold_days=None,          # 由策略自身的 D+1 逻辑控制
         )

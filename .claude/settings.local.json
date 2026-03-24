@@ -41,7 +41,10 @@
       "Bash(venv/bin/python -c \":*)",
       "Bash(kill %%)",
       "Bash(venv/bin/python main.py)",
-      "Bash(echo \"EXIT:$?\")"
+      "Bash(echo \"EXIT:$?\")",
+      "Bash(xargs grep:*)",
+      "Bash(xxd model/sector_heat_xgb_model.pkl)",
+      "Bash(python -c \"print\\(''hello''\\)\")"
     ]
   },
   "spinnerTipsEnabled": true,
