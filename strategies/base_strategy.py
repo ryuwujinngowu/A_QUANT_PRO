@@ -16,7 +16,7 @@ from config.config import (
 )
 import pandas as pd
 from utils.common_tools import  calc_limit_up_price, calc_limit_down_price
-from backtest.stop_loss_engine import StopLossConfig
+from position_tracker import TrackerConfig
 
 
 class BaseStrategy(ABC):
@@ -82,21 +82,20 @@ class BaseStrategy(ABC):
         """
         return calc_limit_down_price(ts_code, pre_close)
 
-    # ========== 止损止盈配置接口（子类按需重写） ==========
-    def get_stop_loss_config(self) -> Optional[StopLossConfig]:
+    # ========== 持仓跟踪配置接口（子类按需重写） ==========
+    def get_tracker_config(self) -> Optional[TrackerConfig]:
         """
-        返回止损止盈配置。默认返回 None（不启用止损引擎）。
-        子类重写此方法以声明自己的止损规则，引擎会在日循环中自动执行。
+        返回持仓跟踪配置。默认返回 None（使用模块默认值：-8%止损 +10%止盈）。
+        子类重写此方法以声明自己的止损止盈规则。
 
         示例::
 
-            def get_stop_loss_config(self):
-                return StopLossConfig(
-                    enabled=True,
-                    fixed_stop_loss_pct=-0.08,   # -8% 固定止损
-                    take_profit_pct=0.15,         # +15% 止盈
-                    trailing_stop_pct=0.05,       # 盘中最高回撤 5% 触发
-                    max_hold_days=10,             # 最多持仓 10 天
+            def get_tracker_config(self):
+                return TrackerConfig(
+                    stop_loss_pct=-0.05,     # -5% 固定止损
+                    take_profit_pct=0.08,    # +8% 止盈
+                    trailing_stop_pct=0.05,  # 盘中最高回撤 5% 触发
+                    max_hold_days=10,        # 最多持仓 10 天
                 )
         """
         return None
