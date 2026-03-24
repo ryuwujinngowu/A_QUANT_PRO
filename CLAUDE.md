@@ -1,7 +1,8 @@
 # a_quant 项目记忆文档
 
-> 最后更新：2026-03-22
+> 最后更新：2026-03-24
 > 分支：`claude/check-latest-commit-y3f6a`
+> **新增**: Regime-Strategy 分层模型架构（完整 ROADMAP.md 已生成）
 
 ---
 
@@ -22,6 +23,46 @@
 - 不需要重复配置仓库地址和分支名称
 
 ---
+
+## 新架构说明（2026-03-24）
+
+### Regime-Strategy 分层模型核心设计
+
+**核心目标**: 极简、清晰的数据流，Regime 给出风险信号 → Strategy 动态分配权重 → 输出最终买入信号
+
+**两层架构**:
+
+1. **Regime 层（市场天气预报）**
+   - 输入：T 日市场全局特征（limit_up/down 数、指数涨跌、板块轮动速度）
+   - 输出：Regime ∈ {BULL(0), BEAR(1), CHOPPY(2)} + 置信度
+   - 标签：T+1 当日收盘数据生成（无未来函数）
+   - 样本权重：极端行情 ×2，致命误判（预测BULL实际BEAR）×3
+   - 模型：XGBoost 三分类 + Temperature Scaling 校准
+
+2. **Strategy 层（选股）**
+   - 输入：T 日个股特征 + Regime 分类
+   - 输出：3 个独立的 Strategy 子模型（分别在 BULL/BEAR/CHOPPY 数据上训练）
+   - 权重分配：
+     - BULL: short_d1(30%) / short_d2(35%) / short_d3(35%)
+     - BEAR: short_d1(50%) / short_d2(30%) / short_d3(20%)
+     - CHOPPY: short_d1(40%) / short_d2(35%) / short_d3(25%)
+   - 置信度调整：confidence < 65% → 所有权重 ×0.7
+   - 融合方式：3 个模型的概率按权重加权平均
+
+3. **实盘决策链**
+   - T 日收盘：推理 Regime + Strategy 权重 → 生成候选池
+   - T+1 09:45：观察开盘 15 分钟信号（量价）→ 最终决策（HOLD/STOP）
+
+**关键数据流（无未来函数）**:
+- Regime 标签：用 T+1 收盘数据定义，但特征来自 T 日及之前
+- Strategy 标签：用 T+1 全天收益定义（label1），但特征来自 T 日及之前
+- 时序拆分：都是 80% train / 20% val，严格时间轴对齐
+
+**样本权重嵌入位置**:
+- Regime 层：XGBoost 的 sample_weight 参数（加权多分类损失）
+- Strategy 层：XGBoost 的 sample_weight 参数（加权二分类损失）
+
+**详细任务拆解**: 见 `ROADMAP.md`（6 个阶段，23 个具体任务）
 
 ---
 
