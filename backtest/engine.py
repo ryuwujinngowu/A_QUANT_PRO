@@ -309,4 +309,12 @@ class MultiStockBacktestEngine:
         # 附加详细数据（原有逻辑完全不变）
         self.result["net_value_df"] = net_value_df
         self.result["trade_df"] = trade_df
+
+        # ── 【绘图层】回测结束后自动生成交互式 HTML 报告 ──
+        try:
+            from charts.backtest_chart import generate_backtest_report
+            generate_backtest_report(self.result)
+        except Exception as e:
+            logger.warning(f"[Chart] 图表生成失败（不影响回测结果）: {e}")
+
         return self.result
