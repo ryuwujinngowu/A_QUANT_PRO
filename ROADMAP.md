@@ -40,8 +40,11 @@
 ---
 
 #### M1.2: 改造 dataset.py 生成 regime 标签列
-- **现状**: dataset.py 生成 label1/label2（个股标签）
-- **改造**: 在 CSV 中新增 `regime` 列（全局标签，每天一个值）
+
+> 🔄 **基础架构已就绪（master 已改造）**：dataset.py 已引入 `ProcessedDatesManager`（幂等断点续跑）、`DataSetAssembler`（数据校验清洗）、`LabelEngine`（标签生成）。剩余工作仅是在主循环中插入 `label_regime()` 调用并写入 `regime` 列。
+
+- **现状**: dataset.py 骨架已重构，生成 label1/label2（个股标签）
+- **改造**: 在 CSV 中新增 `regime` 列（全局标签，每天一个值）和 `label_raw_return` 列（原始连续收益率）
 - **具体改动**:
   - 在 `dataset.py` 的主循环中，每日调用 `label_regime(market_stats)` 生成标签
   - 将标签列添加到 CSV，与特征并列
@@ -55,26 +58,40 @@
 
 ---
 
-#### M1.3: 设计 Regime 训练集的样本加权策略
-- **目标**: 通过加权，让模型学到"极端行情和误判都很关键"
-- **权重规则**（写成函数 `compute_regime_sample_weight(row, regime_label) -> float`）:
-  ```python
-  # 极端行情（limit_up > 80 或 limit_down > 20）
-  if limit_up_count > 80 OR limit_down_count > 20:
-      weight = 2.0
+#### ~~M1.3: 设计 Regime 训练集的样本加权策略~~
 
-  # 致命误判：预测BULL但实际BEAR（反向操作风险最大）
-  if predicted_regime == 0 AND true_regime == 1:
-      weight = 3.0
+> ✅ **已由 `risk_penalty_core.py` 覆盖，且实现更完整，无需单独建文件。**
+>
+> `risk_penalty_core.generate_sample_weights()` 实现了三层叠加权重：
+> 1. 基础层：亏损样本 × `loss_weight_multiplier`（默认 3.0，Regime 预设可用 `for_regime_model()`）
+> 2. 市场环境层：高风险行情（跌停 > 阈值 或 指数跌 > 阈值）× `high_risk_env_extra_multiplier`（实现了原"极端行情 ×2"逻辑）
+> 3. 分级惩罚层：依赖 `label_raw_return` 列，按亏损幅度分级（需先完成 N1 任务）
+>
+> ⚠️ **注意**：原规划中"致命误判（预测BULL实际BEAR）×3"在训练时无法获得预测值，已等价替换为"高风险市场环境下亏损样本额外加权"，语义一致但实现合规。
+>
+> **接入方式**（M2.1 训练时直接用）：
+> ```python
+> from risk_penalty_core import train_with_risk_penalty, RiskPenaltyConfig
+> config = RiskPenaltyConfig.for_regime_model()
+> train_with_risk_penalty(regime_model, X_train, X_val, y_train, y_val, feature_cols, df_train, config=config)
+> ```
 
-  # 其他情况
-  else:
-      weight = 1.0
-  ```
+- ~~**验收标准**:~~
+  - ~~[ ] 新建文件 `learnEngine/objectives/regime_sample_weight.py`~~
+  - ~~[ ] 函数签名、文档、单元测试完整~~
+  - [x] 统计样本权重分布 → `risk_penalty_core.py` 训练时自动输出权重范围 & 均值日志
+
+---
+
+#### N1: 补全 `label_raw_return` 列（新增，M1.4 前置）
+- **背景**: `risk_penalty_core.generate_sample_weights()` 检测到 `label_raw_return` 列时启用"分级惩罚"（按亏损幅度分层），否则降级为统一惩罚。master 的 `LabelEngine` 目前只生成 label1/label2（0/1 二值），未输出原始收益率。
+- **改造**: 在 `LabelEngine.generate_single_date()` 中额外计算并返回 `label_raw_return` 列
+  - `label_raw_return = (D+1_close - D+1_open) / D+1_open`（浮点数，如 -0.032）
+  - dataset.py 的 CSV 输出中同步包含此列
 - **验收标准**:
-  - [ ] 新建文件 `learnEngine/objectives/regime_sample_weight.py`
-  - [ ] 函数签名、文档、单元测试完整
-  - [ ] 统计样本权重分布（平均值、中位数、max），验证权重合理
+  - [ ] `train_dataset_final.csv` 新增 `label_raw_return` 列（float，非 0/1）
+  - [ ] 确认 `risk_penalty_core` 训练日志出现"启用分级惩罚模式"而非"使用统一惩罚"
+  - [ ] `label_raw_return` 值域在 [-0.2, 0.2] 之间（超出为异常数据）
 
 ---
 
@@ -187,31 +204,24 @@
 
 ---
 
-#### M3.2: 设计 Strategy 的风险敏感样本加权
-- **目标**: 高风险行情下的预测错误要更重地惩罚
-- **权重规则**（写成函数 `compute_strategy_sample_weight(row, regime, label1) -> float`）:
-  ```python
-  # 高风险行情（BEAR 或 CHOPPY 阶段）
-  if regime in [1, 2]:  # BEAR or CHOPPY
-      if label1 == 0:  # 预测错（应该涨但跌了）
-          weight = 2.0
-      else:
-          weight = 1.0
+#### ~~M3.2: 设计 Strategy 的风险敏感样本加权~~
 
-  # 低风险行情（BULL 阶段）
-  elif regime == 0:  # BULL
-      if label1 == 0:  # 负样本在牛市中也要重视（可能是高风险个股）
-          weight = 1.5
-      else:
-          weight = 1.0
+> ✅ **已由 `risk_penalty_core.py` 覆盖，无需单独建文件。**
+>
+> `generate_sample_weights()` 的"市场环境层"已实现 BEAR/CHOPPY 行情下亏损样本额外加权，与原规划语义一致。
+>
+> **M3.3 训练时的接入方式**（每个 Regime 子集分别调用，使用 `for_strategy_model()` 预设）：
+> ```python
+> config = RiskPenaltyConfig.for_strategy_model()
+> w_bull   = generate_sample_weights(df_train_bull,   config=config)
+> w_bear   = generate_sample_weights(df_train_bear,   config=config)
+> w_choppy = generate_sample_weights(df_train_choppy, config=config)
+> ```
 
-  return weight
-  ```
-- **新建文件**: `learnEngine/objectives/strategy_sample_weight.py`
-- **验收标准**:
-  - [ ] 函数实现完整
-  - [ ] 单元测试（至少 3 个 case）
-  - [ ] 样本权重统计输出
+- ~~**验收标准**:~~
+  - ~~[ ] 新建文件 `learnEngine/objectives/strategy_sample_weight.py`~~
+  - ~~[ ] 单元测试（至少 3 个 case）~~
+  - [x] 样本权重统计 → `risk_penalty_core.py` 训练时自动输出
 
 ---
 
@@ -226,19 +236,35 @@
 
 ---
 
+#### N2: 因子有效性预筛选（新增，M3.3 后 / M4.2 前置）
+- **背景**: master 新增了 `learnEngine/factor_ic.py`，可计算每个特征的 IC 均值、ICIR、t 统计量。在 3 个 Strategy 子集上分别训练前，应先剔除无效因子，避免噪声特征干扰模型。
+- **步骤**:
+  1. 对全量训练集（或 BULL/BEAR/CHOPPY 三个子集分别）跑 `calc_factor_ic_report()`
+  2. 剔除 `|ICIR| < 0.3` 且 `p_value > 0.05` 的弱因子
+  3. 保留有效因子列表，写入 `learnEngine/datasets/selected_features.json`
+  4. M4.2 训练时加载此列表，仅用筛选后的特征列
+- **验收标准**:
+  - [ ] `factor_ic_report.csv` 生成，含所有因子的 IC/ICIR/p_value
+  - [ ] 筛选后剩余因子数 >= 5（若 < 5 则放宽阈值，避免欠拟合）
+  - [ ] BULL/BEAR/CHOPPY 三个子集的有效因子可能不同，分别保存
+
+---
+
 ### **Phase 4: Strategy 模型训练**
 
 **任务序号**: `M4.1 ~ M4.2`
 
-#### M4.1: 构建 BaseModel 抽象基类
-- **目标**: 为 RegimeModel 和 StrategyModel 提供统一接口
-- **新建文件**: `learnEngine/models/base_model.py`
-  - 类: `BaseModel(ABC)`
-  - 抽象方法: `train()`, `predict()`, `predict_proba()`, `save_model()`, `load_model()`
-  - 通用方法: `get_feature_importance()` 等
+#### M4.1: ~~构建 BaseModel 抽象基类~~ → 复用 SectorHeatXGBModel 风格（简化）
+
+> ⚡ **简化决策**：master 的 `SectorHeatXGBModel`（`learnEngine/model.py`）已包含完整的 train/predict/save/load 接口，且参数经过实战调优。RegimeModel 和 StrategyModel 直接参照其风格实现，不引入 ABC 抽象基类（避免过度设计）。
+>
+> **调整**：跳过 `base_model.py`，直接实现两个独立的 Model 类，接口签名保持一致即可。
+
+- **新建文件**: `learnEngine/models/regime_model.py`（参照 `model.py` 风格，三分类）
 - **验收标准**:
-  - [ ] 抽象类定义完整，可继承
-  - [ ] RegimeModel 改为继承 BaseModel
+  - [ ] `RegimeModel` 实现 `train()`, `predict_with_confidence()`, `save()`, `load()`
+  - [ ] 模型保存格式 `.json`（与 master model.py 保持一致）
+  - ~~[ ] RegimeModel 改为继承 BaseModel~~（不再需要）
 
 ---
 
@@ -497,21 +523,38 @@ M6: Agent 集成
 
 ## 📝 进度追踪（每次迭代后更新）
 
+### 已完成（master 分支，2026-03-24 前）
+
+- [x] `risk_penalty_core.py` 全链路亏损惩罚模块（覆盖 M1.3 + M3.2）
+- [x] `learnEngine/label.py` → `LabelEngine`（标签口径统一：D+1 open 买 / D+1 close 卖）
+- [x] `learnEngine/dataset.py` 重构（ProcessedDatesManager 幂等 + DataSetAssembler 校验）
+- [x] `learnEngine/factor_ic.py` → 因子 IC 分析工具（支持 IC_mean / ICIR / t 检验）
+- [x] `learnEngine/model.py` → SectorHeatXGBModel 参数调优（max_depth 4→3，early_stopping 50→20，格式 pkl→json）
+
 ### Iteration 1 (2026-03-24 ~ ?)
-- [ ] M1.1 - M1.4: Regime 标签 & 训练集（计划 1 天）
-- [ ] M2.1 - M2.3: Regime 模型 & 校准（计划 1 天）
-- [ ] M3.1 - M3.3: Strategy 训练集拆分（计划 1 天）
-- [ ] M4.1 - M4.2: Strategy 模型训练（计划 1 天）
+- [ ] **N1**: label_raw_return 列（LabelEngine 补全，M1.4 前置）
+- [ ] **M1.1**: `learnEngine/labels/regime_label.py` + 单元测试
+- [ ] **M1.2**: dataset.py 插入 `regime` 列（骨架已就绪，仅需接入 label_regime()）
+- [ ] **M1.4**: `learnEngine/dataset_regime.py`（整合，调用 risk_penalty_core）
+- [ ] **M2.1**: `learnEngine/models/regime_model.py`（三分类，参照 model.py 风格）
+- [ ] **M2.2**: 温度校准（ECE < 5%）
+- [ ] **M2.3**: `learnEngine/train_regime.py` + 历史推理 CSV
 
 ### Iteration 2
-- [ ] M5.1 - M5.4: 实盘推理模块（计划 1.5 天）
-- [ ] M6.1 - M6.3: Agent 集成 & 回测（计划 2 天）
+- [ ] **M3.1**: `learnEngine/dataset_strategy.py`（Regime 分层）
+- [ ] **M3.3**: `learnEngine/dataset_strategy_final.py`（三子集 + risk_penalty_core 权重）
+- [ ] **N2**: 因子 IC 预筛选（factor_ic.py 跑报告，剔除弱因子，输出 selected_features.json）
+- [ ] **M4.2**: `learnEngine/models/strategy_model.py` + `learnEngine/train_strategy.py`（3 个子模型）
+
+### Iteration 3
+- [ ] **M5.1 - M5.4**: 实盘推理模块
+- [ ] **M6.1 - M6.3**: Agent 集成 & 回测验证
 
 ### Post-Launch
 - [ ] 生产环境监控
-- [ ] 根据实盘效果微调权重和规则
+- [ ] 根据实盘效果微调 risk_penalty_core 的分级惩罚参数
 
 ---
 
-**当前状态**: 待开始 (准备完毕)
+**当前状态**: Iteration 1 进行中
 **最后更新**: 2026-03-24
