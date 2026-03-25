@@ -198,6 +198,28 @@ def get_overview(start_date: Optional[str] = None, end_date: Optional[str] = Non
 
 
 # ── Short-line ─────────────────────────────────────────────────────────────────
+@app.get("/api/short/latest")
+def get_short_latest(agent_id: str = Query(...)):
+    """返回该 agent 最近一条有效信号记录（含持仓明细）"""
+    rows = query("""
+        SELECT trade_date, signal_stock_detail, next_day_stock_detail,
+               next_day_avg_close_return, intraday_avg_return
+        FROM agent_daily_profit_stats
+        WHERE agent_id = %s
+          AND (reserve_str_1 IS NULL OR reserve_str_1 NOT LIKE '[ERR]%%')
+        ORDER BY trade_date DESC LIMIT 1
+    """, [agent_id])
+    if not rows:
+        return None
+    r = rows[0]
+    r["trade_date"] = str(r["trade_date"])
+    r["signal_stock_detail"] = _parse_json(r.get("signal_stock_detail"))
+    r["next_day_stock_detail"] = _parse_json(r.get("next_day_stock_detail"))
+    r["next_day_avg_close_return"] = _to_float(r.get("next_day_avg_close_return"))
+    r["intraday_avg_return"] = _to_float(r.get("intraday_avg_return"))
+    return r
+
+
 @app.get("/api/short/daily")
 def get_short_daily(
     agent_id: str = Query(...),
