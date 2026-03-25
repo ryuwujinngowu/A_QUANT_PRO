@@ -102,14 +102,85 @@ class BaseStrategy(ABC):
 
     # ========== 可选扩展方法（子类按需重写） ==========
     def get_strategy_info(self) -> Dict[str, any]:
-        """
-        获取策略完整信息（用于回测结果记录）
-        :return: 包含名称、参数的字典
-        """
+        """获取策略完整信息（用于回测结果记录）"""
         return {
             "strategy_name": self.strategy_name,
             "strategy_params": self.strategy_params
         }
+
+    def get_params_summary(self) -> str:
+        """
+        生成策略参数的可读摘要字符串，用于回测结果 CSV 的「策略参数」列。
+        各子类无需重写，字段按 strategy_params 中实际存在的 key 自动输出。
+        """
+        import os
+        p = self.strategy_params
+        parts = []
+
+        # 模型版本（从路径提取文件名去掉前缀和后缀）
+        if "model_path" in p:
+            ver = os.path.basename(str(p["model_path"])).replace(".pkl", "")
+            ver = ver.replace("sector_heat_xgb_", "")
+            parts.append(f"模型:{ver}")
+
+        # 买卖点
+        if "sell_type" in p:
+            parts.append(f"卖点:{p['sell_type']}")
+
+        # TopK
+        if "buy_top_k" in p:
+            parts.append(f"TopK:{p['buy_top_k']}")
+
+        # 概率阈值
+        if "min_prob" in p:
+            parts.append(f"阈值:{p['min_prob']}")
+
+        # 低吸幅度
+        if "dip_pct" in p:
+            parts.append(f"低吸幅:{int(p['dip_pct'] * 100)}%")
+
+        # 拉涨幅度
+        if "surge_amp_pct" in p:
+            parts.append(f"拉涨幅:{int(p['surge_amp_pct'] * 100)}%")
+
+        # 时间窗口
+        if "window_start" in p and "window_end" in p:
+            parts.append(f"时间窗:{p['window_start']}-{p['window_end']}")
+
+        # 分钟切片
+        if "slice_minutes" in p:
+            parts.append(f"切片:{p['slice_minutes']}min")
+
+        # 其他未识别参数（遍历兜底，跳过已处理和内部参数）
+        _handled = {"model_path", "sell_type", "buy_top_k", "min_prob", "load_minute",
+                    "dip_pct", "surge_amp_pct", "window_start", "window_end", "slice_minutes"}
+        for k, v in p.items():
+            if k not in _handled:
+                parts.append(f"{k}:{v}")
+
+        # 止损止盈（从 TrackerConfig 读取）
+        tc = self.get_tracker_config()
+        if tc is not None:
+            def _fmt_pct(val, is_loss=False):
+                if val is None:
+                    return "无"
+                # 超大值视为禁用（止损<=-50% 或 止盈>=500%）
+                if is_loss and val <= -0.5:
+                    return "禁用"
+                if not is_loss and val >= 5:
+                    return "禁用"
+                sign = "+" if val > 0 else ""
+                return f"{sign}{round(val * 100, 1)}%"
+            parts.append(f"止损:{_fmt_pct(tc.stop_loss_pct, is_loss=True)}")
+            parts.append(f"止盈:{_fmt_pct(tc.take_profit_pct, is_loss=False)}")
+            if tc.trailing_stop_pct is not None:
+                parts.append(f"移动止损:{_fmt_pct(tc.trailing_stop_pct)}")
+            if tc.max_hold_days is not None:
+                parts.append(f"最长持仓:{tc.max_hold_days}天")
+        else:
+            parts.append("止损:-8%(默认) | 止盈:+10%(默认)")
+
+        return " | ".join(parts) if parts else "-"
 
     def clear_signal(self) -> None:
         """清空卖出信号（通用方法，子类可直接调用）"""

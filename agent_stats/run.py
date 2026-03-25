@@ -19,7 +19,7 @@ Python    : python3.8
   python3.8 agent_stats/run.py --mode daily
 
 # 2. 首次部署 / 新 agent 历史补全（全量模式，不传 --mode 默认 full）
-  python3.8 agent_stats/run.py --start-date 2024-10-01
+  python3.8 agent_stats/run.py --start-date 2026-01-01
 
 # 3. 重跑指定 agent（策略逻辑更新后重算历史）
   python3.8 agent_stats/run.py --reset-agent morning_limit_up,afternoon_limit_up --reset-from 2024-10-01

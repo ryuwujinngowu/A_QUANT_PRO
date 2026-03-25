@@ -15,159 +15,133 @@
     6. 保存模型
 """
 
+import json
 import os
 import sys
 import warnings
-from fnmatch import fnmatch
 
 import numpy as np
 import pandas as pd
 from sklearn.metrics import (
     accuracy_score, roc_auc_score, precision_score, recall_score,
-    classification_report, confusion_matrix, precision_recall_curve, f1_score,
+    classification_report, confusion_matrix,
 )
-from typing import List
 
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 
 from learnEngine.model import SectorHeatXGBModel
-# [回退] 亏损惩罚功能回测表现不佳，暂时停用，保留代码以备后续优化后重新启用
-# from risk_penalty_core import train_with_risk_penalty, RiskPenaltyConfig
+import learnEngine.train_config as cfg
 from utils.log_utils import logger
 
 
 # ============================================================
-# 可配置参数
+# 可配置参数（详细配置见 learnEngine/train_config.py）
 # ============================================================
-# 数据集路径（与 dataset.py OUTPUT_CSV_PATH 保持一致）
-TRAIN_CSV_PATH   = os.path.join(os.getcwd(), "learnEngine", "datasets", "train_dataset_final.csv")
+TRAIN_CSV_PATH    = cfg.TRAIN_CSV_PATH
+MODEL_VERSION     = cfg.MODEL_VERSION
+TARGET_LABEL      = cfg.TARGET_LABEL
+VAL_RATIO         = cfg.VAL_RATIO
+EXCLUDE_COLS      = cfg.EXCLUDE_COLS
 
-# 模型版本号（与 dataset.py FACTOR_VERSION 保持一致，修改因子时两处同步更新）
-MODEL_VERSION    = "v4.0"  # [回退] 去除亏损惩罚后恢复基线版本号
-_MODEL_DIR       = os.path.join(os.getcwd(), "model")
-# 版本化存档：每次训练生成独立文件，不覆盖历史模型
-MODEL_SAVE_PATH  = os.path.join(_MODEL_DIR, f"sector_heat_xgb_{MODEL_VERSION}.pkl")
-# 稳定路径：策略/回测统一加载此文件，train.py 训练完后自动同步覆盖
-MODEL_LATEST_PATH = os.path.join(_MODEL_DIR, "sector_heat_xgb_latest.pkl")  # 【修改2】改回 .pkl，保持兼容
-
-TARGET_LABEL     = "label1"       # 训练目标：label1 (日内 5% 收益) 或 label2 (隔夜高开)
-VAL_RATIO        = 0.2            # 验证集占比（按时间序列尾部切分）
-
-# 需要排除的非特征列（主键 + 标签 + 辅助信息）
-EXCLUDE_COLS = [
-    "stock_code", "trade_date",
-    "label1", "label2",
-    "label_raw_return",   # D+1实际收益率，仅用于样本权重生成，不作为训练特征
-    "sector_name", "top3_sectors",
-]
-
-# 因子过滤模式（fnmatch 通配符）：匹配到的列将被排除在训练特征之外
-# 修改此处即可在不重新生成 CSV 的情况下切换因子组合，无需重跑 dataset.py
-EXCLUDE_PATTERNS: List[str] = [
-    # ===== 原始价格类：无跨股可比性，归一化信息已由 bias/ma_slope 携带 =====
-    "stock_open_*",
-    "stock_high_*",
-    "stock_low_*",
-    "stock_close_*",
-    "ma5",
-    "ma10",
-    # "ma13",  # 保留：旧模型使用，对趋势判断有增量
-
-    # ===== 全 NaN / 无数据因子 =====
-    "market_*",     # 市场宏观类：全为 NaN，完全无预测力
-    "sector_id",    # 板块分类 ID：ICIR≈0
-
-    # ===== d1-d4 滞后因子 =====
-    "*_d[1-4]",     # 仅 d0 当日因子有效，d1-d4 预测力严重衰减
-
-    # ===== 冗余因子 =====
-    "bias5",        # 与 bias13 高度相关
-    "bias10",       # 与 bias13 高度相关
-    "pos_5d",       # 与 pos_20d 高度相关
-    "index_*",      # 指数涨跌幅：与 market_* 同源，训练集中全 NaN
-
-    # ===== 以下因子保留给模型/factor_search 自动判断 =====
-    # 注释 = 保留（旧模型使用，对 AUC/Recall 有贡献）
-    # 'sector_avg_profit_*',
-    # 'sector_avg_loss_*',
-    # 'stock_sector_20d_rank',
-    # 'stock_vol_ratio_*',
-    # 'ma_align',
-    # 'from_high_20d',
-    # 'stock_vwap_dev_*',
-
-    # ===== 低 ICIR 因子（旧模型也排除） =====
-    "stock_pct_chg_*",          # 涨跌幅原始值
-    "stock_hdi_*",              # HDI 持股难度
-    "stock_profit_*",           # 盈利情绪分（与 max_dd 高度相关）
-    "stock_seal_times_*",       # 涨停封板次数
-    "stock_break_times_*",      # 涨停打开次数
-    # "stock_lift_times_*",     # 保留：旧模型使用
-    "stock_trend_r2_*",         # 趋势拟合
-    "stock_cpr_*",              # K 线比率
-    "stock_candle_*",           # K 线形态
-    # "stock_gap_return_*",     # 保留：旧模型使用
-    # "stock_lower_shadow_*",   # 保留：旧模型使用
-    "stock_red_time_ratio_*",
-    "stock_float_profit_time_ratio_*",
-    "stock_red_session_pm_ratio_*",
-    "stock_float_session_pm_ratio_*",
-]
+_MODEL_DIR        = cfg.MODEL_DIR
+MODEL_SAVE_PATH   = os.path.join(_MODEL_DIR, f"sector_heat_xgb_{MODEL_VERSION}.pkl")
+MODEL_LATEST_PATH = os.path.join(_MODEL_DIR, "sector_heat_xgb_latest.pkl")
 
 
 # ============================================================
 # 数据加载与预处理
 # ============================================================
+def _load_selector_result(json_path: str, all_cols) -> tuple:
+    """
+    从 factor_selector.py 输出的 JSON 加载最优因子列表 + Optuna 最优超参。
+
+    :return: (available_features: list, override_params: dict | None)
+             override_params=None 表示 JSON 无超参信息（降级到 base_params）
+    """
+    if not os.path.exists(json_path):
+        return [], None
+    try:
+        with open(json_path, encoding="utf-8") as f:
+            data = json.load(f)
+
+        selected  = data.get("selected_features", [])
+        available = [c for c in selected if c in set(all_cols)]
+        missing   = [c for c in selected if c not in set(all_cols)]
+        if missing:
+            logger.warning(f"selected_features.json 中 {len(missing)} 个因子在 CSV 中不存在，已忽略: {missing[:5]}...")
+        logger.info(f"从 selected_features.json 加载 {len(available)} 个最优因子")
+
+        # 读取 Optuna 搜到的最优 XGBoost 超参（含 scale_pos_weight）
+        xgb_params = data.get("xgb_params", {})
+        metrics    = data.get("metrics", {})
+        spw        = metrics.get("scale_pos_weight")
+        override   = None
+        if xgb_params:
+            override = dict(xgb_params)
+            if spw is not None:
+                override["scale_pos_weight"] = spw
+                logger.info(f"Optuna 最优超参已加载 | scale_pos_weight={spw:.2f} | "
+                            f"max_depth={xgb_params.get('max_depth')} | "
+                            f"lr={xgb_params.get('learning_rate', '?'):.3f}")
+
+        return available, override
+    except Exception as e:
+        logger.warning(f"加载 selected_features.json 失败 ({e})，降级为全量因子+base_params 模式")
+        return [], None
+
+
 def load_and_prepare(csv_path: str, target_label: str):
     """
-    加载训练集 CSV 并预处理
+    加载训练集 CSV 并预处理。
 
-    :return: (X, y, feature_cols, df) — 特征矩阵、标签、特征列名、原始 DataFrame
+    特征选择优先级：
+      1. 若 cfg.SELECTED_FEATURES_PATH 存在（factor_selector.py 输出）→ 使用最优因子子集 + Optuna超参
+      2. 否则 → 使用 CSV 中全部数值型因子（排除 EXCLUDE_COLS）
+
+    :return: (X, y, feature_cols, df, override_params)
     """
     if not os.path.exists(csv_path):
-        raise FileNotFoundError(f"训练集文件不存在: {csv_path}\n请先运行 python learnEngine/dataset.py 生成训练集")
+        raise FileNotFoundError(
+            f"训练集文件不存在: {csv_path}\n"
+            "请先运行 python learnEngine/dataset.py 生成训练集"
+        )
 
     df = pd.read_csv(csv_path)
     logger.info(f"加载训练集: {csv_path} | 行数: {len(df)} | 列数: {len(df.columns)}")
 
-    # 检查标签列
     if target_label not in df.columns:
-        raise ValueError(f"目标标签列 '{target_label}' 不存在于训练集中，可用列: {df.columns.tolist()}")
+        raise ValueError(f"目标标签列 '{target_label}' 不存在，可用列: {df.columns.tolist()}")
 
-    # 删除标签缺失的行
     before = len(df)
     df = df.dropna(subset=[target_label])
     if len(df) < before:
         logger.info(f"删除 {target_label} 缺失行: {before - len(df)}")
 
-    # 去重
     dup = df.duplicated(subset=["stock_code", "trade_date"]).sum()
     if dup > 0:
         df = df.drop_duplicates(subset=["stock_code", "trade_date"])
         logger.info(f"移除重复行: {dup}")
 
-    # 分离特征与标签
-    feature_cols = [c for c in df.columns if c not in EXCLUDE_COLS]
-    # 仅保留数值型列
-    feature_cols = [c for c in feature_cols if pd.api.types.is_numeric_dtype(df[c])]
+    # 所有候选数值因子（排除固定非特征列）
+    all_numeric = [
+        c for c in df.columns
+        if c not in EXCLUDE_COLS and pd.api.types.is_numeric_dtype(df[c])
+    ]
 
-    # EXCLUDE_PATTERNS 过滤（fnmatch 通配符，不影响 CSV 生成）
-    if EXCLUDE_PATTERNS:
-        feature_cols = [c for c in feature_cols
-                        if not any(fnmatch(c, pat) for pat in EXCLUDE_PATTERNS)]
-        logger.info(f"EXCLUDE_PATTERNS 过滤后特征列数: {len(feature_cols)}")
+    # 优先使用 factor_selector 搜出的最优子集 + Optuna 超参
+    selected, override_params = _load_selector_result(cfg.SELECTED_FEATURES_PATH, all_numeric)
+    if selected:
+        feature_cols = selected
+        logger.info(f"[模式] factor_selector 最优子集，{len(feature_cols)} 个因子")
+    else:
+        feature_cols = all_numeric
+        logger.info(f"[模式] 全量因子（未找到 selected_features.json），{len(feature_cols)} 个因子")
 
-    X = df[feature_cols].copy()
+    X = df[feature_cols].fillna(0).replace([np.inf, -np.inf], 0)
     y = df[target_label].astype(int).values
 
-    # 缺失值填 0（与 DataSetAssembler 一致）
-    X = X.fillna(0)
-
-    # inf 替换为 0
-    X = X.replace([np.inf, -np.inf], 0)
-
     logger.info(f"特征列数: {len(feature_cols)} | 正样本率: {y.mean():.2%}")
-    return X, y, feature_cols, df
+    return X, y, feature_cols, df, override_params
 
 
 # ============================================================
@@ -206,6 +180,20 @@ def time_series_split(X, y, df, val_ratio: float):
 # ============================================================
 # 详细评估
 # ============================================================
+def _precision_at_k(y_true, y_proba, top_k_pct: float) -> tuple:
+    """
+    Precision@K：取预测概率最高的前 top_k_pct 比例样本，计算其中正样本率。
+    直接对应实盘行为：只买置信度最高的那批票，看实际胜率。
+
+    :return: (precision_at_k, top_k_count, top_k_positives)
+    """
+    k = max(1, int(len(y_true) * top_k_pct))
+    top_idx = np.argsort(y_proba)[-k:]
+    top_labels = np.array(y_true)[top_idx]
+    pak = top_labels.mean()
+    return pak, k, int(top_labels.sum())
+
+
 def evaluate_model(model, X_val, y_val, feature_cols):
     """输出详细评估指标"""
     y_pred  = model.predict(X_val)
@@ -216,6 +204,9 @@ def evaluate_model(model, X_val, y_val, feature_cols):
     precision = precision_score(y_val, y_pred, zero_division=0)
     recall    = recall_score(y_val, y_pred, zero_division=0)
 
+    # Precision@K（与 factor_selector 目标函数对齐）
+    pak, k, k_pos = _precision_at_k(y_val, y_proba, cfg.TOP_K_PCT)
+
     logger.info("=" * 60)
     logger.info("模型评估结果")
     logger.info("=" * 60)
@@ -223,6 +214,7 @@ def evaluate_model(model, X_val, y_val, feature_cols):
     logger.info(f"  AUC:                {auc:.4f}")
     logger.info(f"  精确率 (Precision): {precision:.4f}")
     logger.info(f"  召回率 (Recall):    {recall:.4f}")
+    logger.info(f"  Precision@{cfg.TOP_K_PCT:.0%}:      {pak:.4f}  (Top-{k} 样本中正例 {k_pos} 个)")
     logger.info("")
 
     # 混淆矩阵
@@ -278,8 +270,7 @@ def evaluate_model(model, X_val, y_val, feature_cols):
 
     return {
         "accuracy": acc, "auc": auc, "precision": precision, "recall": recall,
-        # "best_threshold": float(best_threshold),
-        # "precision_at_best": prec_opt, "recall_at_best": rec_opt, "f1_at_best": f1_opt,
+        "precision_at_k": pak, "top_k_pct": cfg.TOP_K_PCT,
     }
 
 
@@ -293,8 +284,8 @@ if __name__ == "__main__":
     logger.info("开始模型训练（基线版：标准 XGBoost）")
     logger.info("=" * 60)
 
-    # 1. 加载数据
-    X, y, feature_cols, df = load_and_prepare(TRAIN_CSV_PATH, TARGET_LABEL)
+    # 1. 加载数据（同时读取 Optuna 最优超参）
+    X, y, feature_cols, df, override_params = load_and_prepare(TRAIN_CSV_PATH, TARGET_LABEL)
 
     if len(X) < 50:
         logger.error(f"训练集样本不足（{len(X)} 行），至少需要 50 行，请扩大日期范围重新生成训练集")
@@ -303,9 +294,10 @@ if __name__ == "__main__":
     # 2. 时间序列切分
     X_train, X_val, y_train, y_val = time_series_split(X, y, df, VAL_RATIO)
 
-    # 3. 训练模型
+    # 3. 训练模型（若有 Optuna 最优超参则直接使用，否则降级到 base_params）
     xgb_model = SectorHeatXGBModel(model_save_path=MODEL_SAVE_PATH)
-    xgb_model.train(X_train, X_val, y_train, y_val, feature_cols)
+    xgb_model.train(X_train, X_val, y_train, y_val, feature_cols,
+                    override_params=override_params)
 
     # [回退] 亏损惩罚回测表现不佳，暂停使用。保留代码以备后续优化后重新启用。
     # ========== 亏损惩罚配置（已停用） ==========
@@ -339,5 +331,5 @@ if __name__ == "__main__":
     logger.info("=" * 60)
     logger.info(f"训练完成！版本化模型: {MODEL_SAVE_PATH}")
     logger.info(f"  训练集: {len(X_train)} 行 | 验证集: {len(X_val)} 行")
-    logger.info(f"  AUC: {metrics['auc']:.4f} | Precision: {metrics['precision']:.4f} | Recall: {metrics['recall']:.4f}")
+    logger.info(f"  AUC: {metrics['auc']:.4f} | Precision: {metrics['precision']:.4f} | Precision@{metrics['top_k_pct']:.0%}: {metrics['precision_at_k']:.4f}")
     logger.info("=" * 60)

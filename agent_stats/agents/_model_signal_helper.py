@@ -31,17 +31,18 @@ from utils.common_tools import (
     ensure_limit_list_ths_data,
 )
 from utils.log_utils import logger
+from utils.xgb_compat import safe_predict_proba
 
 # ── 策略参数（与 sector_heat_strategy.py 保持一致）──────────────────────────
 _BUY_TOP_K = 6        # 每日最多信号数
-_MIN_PROB  = 0.6       # 最低买入概率阈值
+_MIN_PROB  = 0.50      # 最低买入概率阈值（v5.2 AUC-first 模型概率分布更保守，降低阈值）
 _MIN_AMOUNT = 10_000   # 低流动性阈值（千元，= 1000 万元）
 _LOAD_MINUTE = True    # 特征计算是否加载分钟线（与训练口径一致）
 
 # 模型路径（与 sector_heat_strategy.py 一致）
 _MODEL_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-    "model", "sector_heat_xgb_model.pkl",
+    "model", "sector_heat_xgb_v5.2_auc_first.pkl",
 )
 
 # 模块级单例（避免每个 agent 各自加载一份模型和特征引擎）
@@ -61,6 +62,8 @@ def _ensure_model():
     try:
         with open(_MODEL_PATH, "rb") as f:
             _model = pickle.load(f)
+        if not hasattr(_model, "use_label_encoder"):
+            _model.use_label_encoder = False
         if not hasattr(_model, "feature_names_in_"):
             logger.error("[model_signal] 模型缺少 feature_names_in_ 属性")
             _model = None
@@ -257,7 +260,7 @@ def get_model_signal_stocks(
             .fillna(0)
             .replace([np.inf, -np.inf], 0)
         )
-        probs = model.predict_proba(X)[:, 1]
+        probs = safe_predict_proba(model, X)[:, 1]
         feature_df = feature_df.copy()
         feature_df["_prob"] = probs
     except Exception as e:

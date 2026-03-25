@@ -36,6 +36,7 @@ from utils.common_tools import (
     ensure_limit_list_ths_data,
 )
 from utils.log_utils import logger
+from utils.xgb_compat import safe_predict_proba
 # [回退] 亏损惩罚功能回测表现不佳，暂时停用，保留代码以备后续优化后重新启用
 # from risk_penalty_core import (
 #     RiskPenaltyConfig,
@@ -67,7 +68,7 @@ class SectorHeatStrategy(BaseStrategy):
             "load_minute": True,     # 是否加载分钟线（保证特征与训练口径一致）
             "model_path": os.path.join(
                 os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                "model", "sector_heat_xgb_model.pkl",
+                "model", "sector_heat_xgb_v5.2_auc_first.pkl",
             ),
         }
 
@@ -86,8 +87,8 @@ class SectorHeatStrategy(BaseStrategy):
 
         # 持仓跟踪配置：D+1 短线策略 -5% 固定止损 + 8% 止盈
         self._tracker_config = TrackerConfig(
-            stop_loss_pct=-0.50,         # -5% = -0.05 止损（短线策略止损线较紧）
-            take_profit_pct=10,        # +8% = 0.08 止盈
+            stop_loss_pct=-0.05,         # -5% 止损（短线策略止损线较紧）
+            take_profit_pct=0.08,        # +8% 止盈
             trailing_stop_pct=None,      # 短线不启用移动止损
             max_hold_days=None,          # 由策略自身的 D+1 逻辑控制
         )
@@ -236,7 +237,7 @@ class SectorHeatStrategy(BaseStrategy):
                 .fillna(0)
                 .replace([np.inf, -np.inf], 0)
             )
-            probs = self._model.predict_proba(X)[:, 1]
+            probs = safe_predict_proba(self._model, X)[:, 1]
             feature_df = feature_df.copy()
             feature_df["_prob"] = probs
         except Exception as e:
@@ -315,6 +316,8 @@ class SectorHeatStrategy(BaseStrategy):
         try:
             with open(path, "rb") as f:
                 self._model = pickle.load(f)
+            if not hasattr(self._model, "use_label_encoder"):
+                self._model.use_label_encoder = False
             if not hasattr(self._model, "feature_names_in_"):
                 logger.error(
                     "模型缺少 feature_names_in_ 属性。"

@@ -25,7 +25,7 @@ class BacktestMetrics:
                  strategy_name: str = "未知策略",
                  backtest_start_date: str = "",
                  backtest_end_date: str = "",
-                 strategy_params: Optional[Dict] = None,
+                 strategy_params: Optional[str] = None,
                  benchmark_daily_return: Optional[pd.Series] = None):
         """
         初始化回测指标类
@@ -35,7 +35,7 @@ class BacktestMetrics:
         :param strategy_name: 策略名称
         :param backtest_start_date: 回测开始日期
         :param backtest_end_date: 回测结束日期
-        :param strategy_params: 策略参数字典
+        :param strategy_params: 策略参数摘要字符串（由 BaseStrategy.get_params_summary() 生成）
         :param benchmark_daily_return: 基准日收益率（如沪深300，用于信息比率）
         """
         # 严格参数校验（保留日志提示）
@@ -53,7 +53,7 @@ class BacktestMetrics:
         self.strategy_name = strategy_name
         self.backtest_start_date = backtest_start_date
         self.backtest_end_date = backtest_end_date
-        self.strategy_params = strategy_params or {}
+        self.strategy_params = strategy_params or "-"
         self.benchmark_daily_return = benchmark_daily_return
 
         # 计算日收益率（填充首日NaN为0）
@@ -202,7 +202,7 @@ class BacktestMetrics:
         """核心：将回测结果写入CSV文件（内聚在metrics中）"""
         # 整合策略参数（便于存储）
         record_data = metrics.copy()
-        record_data["策略参数"] = str(self.strategy_params)
+        record_data["策略参数"] = self.strategy_params
         record_data["记录时间"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         # 转为DataFrame

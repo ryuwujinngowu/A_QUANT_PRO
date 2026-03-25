@@ -45,7 +45,18 @@
       "Bash(xargs grep:*)",
       "Bash(xxd model/sector_heat_xgb_model.pkl)",
       "Bash(python -c \"print\\(''hello''\\)\")",
-      "Bash(find /Users/liusonghao/PycharmProjects/A_QUANT_PRO/A_QUANT_PRO/learnEngine -type f \\\\\\(-name *.json -o -name *.csv -o -name *.txt \\\\\\))"
+      "Bash(find /Users/liusonghao/PycharmProjects/A_QUANT_PRO/A_QUANT_PRO/learnEngine -type f \\\\\\(-name *.json -o -name *.csv -o -name *.txt \\\\\\))",
+      "Bash(source .venv/bin/activate)",
+      "Bash(venv/bin/python learnEngine/factor_selector.py --stage 12 2>&1)",
+      "Bash(venv/bin/python learnEngine/factor_selector.py --stage 3 --n-trials 50)",
+      "Bash(venv/bin/python learnEngine/factor_selector.py --stage all --n-trials 200)",
+      "Bash(venv/bin/python -c \"\nimport json\nwith open\\('learnEngine/search_results/selected_features.json'\\) as f:\n    d = json.load\\(f\\)\nprint\\('=== 最优超参 ==='\\)\nfor k,v in d['xgb_params'].items\\(\\):\n    print\\(f'  {k}: {v}'\\)\nprint\\(f'  scale_pos_weight: {d[\\\\\"metrics\\\\\"][\\\\\"scale_pos_weight\\\\\"]}'\\)\nprint\\(f'\\\\n=== 指标 ==='\\)\nprint\\(f'  AUC: {d[\\\\\"metrics\\\\\"][\\\\\"auc\\\\\"]:.4f}'\\)\nprint\\(f'  Precision@30%: {d[\\\\\"metrics\\\\\"][\\\\\"precision_at_k\\\\\"]:.4f}'\\)\nprint\\(f'  n_trials: {d[\\\\\"metrics\\\\\"][\\\\\"n_trials_done\\\\\"]}'\\)\nprint\\(f'\\\\n=== 因子数量 ==='\\)\nprint\\(f'  Stage1 剔除: {len\\(d[\\\\\"stage1_removed\\\\\"]\\)}'\\)\nprint\\(f'  Stage2 剔除: {len\\(d[\\\\\"stage2_removed\\\\\"]\\)}'\\)\nprint\\(f'  入选: {d[\\\\\"feature_count\\\\\"]}'\\)\nprint\\(f'\\\\n=== 入选因子 ==='\\)\nfor f in d['selected_features']:\n    print\\(f'  {f}'\\)\n\")",
+      "Bash(venv/bin/python learnEngine/factor_selector.py --stage all --n-trials 400)",
+      "Bash(venv/bin/python learnEngine/factor_selector.py --stage 3 --n-trials 400)",
+      "Bash(ls:*)",
+      "Bash(venv/bin/python -c \"import xgboost; print\\(''venv xgboost:'', xgboost.__version__\\)\")",
+      "Bash(/Users/liusonghao/PycharmProjects/a_quant/.venv/bin/python -c \"import xgboost; print\\('a_quant venv xgboost:', xgboost.__version__\\)\")",
+      "Bash(venv/bin/python -c \"\nimport sys; sys.path.insert\\(0, '.'\\)\nfrom strategies.sector_heat_strategy import SectorHeatStrategy\ns = SectorHeatStrategy\\(\\)\nprint\\(s.get_params_summary\\(\\)\\)\n\")"
     ]
   },
   "spinnerTipsEnabled": true,

@@ -56,19 +56,43 @@ class SectorHeatXGBModel:
             "verbosity": 0,
         }
 
-    def train(self, X_train, X_val, y_train, y_val, feature_cols: list):
-        """训练模型，动态计算 scale_pos_weight，启用 early stopping"""
-        # ── 动态计算正负样本比（解决 A 股标签高度不平衡问题）──────────────
+    def train(self, X_train, X_val, y_train, y_val, feature_cols: list,
+              override_params: dict = None):
+        """
+        训练模型。
+
+        :param override_params: 若提供，则完全替换 base_params（供 factor_selector 把
+                                Optuna 搜到的最优超参传入）。未提供时保持原逻辑：
+                                动态计算 scale_pos_weight，其余用 base_params。
+        """
         pos = int(y_train.sum())
         neg = int(len(y_train) - pos)
-        scale_pos_weight = round(neg / pos, 2) if pos > 0 else 1.0
-        scale_pos_weight = min(scale_pos_weight,4.0)  # 【修改2】补充空格，优化可读性（非必需）
-        logger.info(
-            f"训练集样本分布 | 正样本(买入):{pos} 负样本:{neg} "
-            f"→ scale_pos_weight={scale_pos_weight}"
-        )
 
-        params = {**self.base_params, "scale_pos_weight": scale_pos_weight}
+        if override_params:
+            # Optuna 已搜出最优超参（含 scale_pos_weight），直接使用
+            params = {
+                "objective":            "binary:logistic",
+                "eval_metric":          "auc",
+                "early_stopping_rounds": 20,
+                "n_jobs":               -1,
+                "random_state":         42,
+                "verbosity":            0,
+                **override_params,
+            }
+            logger.info(
+                f"训练集样本分布 | 正样本(买入):{pos} 负样本:{neg} "
+                f"→ scale_pos_weight={params.get('scale_pos_weight', '?')} [Optuna最优]"
+            )
+        else:
+            # 未提供外部超参：动态计算 scale_pos_weight，其余用 base_params
+            scale_pos_weight = round(neg / pos, 2) if pos > 0 else 1.0
+            scale_pos_weight = min(scale_pos_weight, 4.0)
+            logger.info(
+                f"训练集样本分布 | 正样本(买入):{pos} 负样本:{neg} "
+                f"→ scale_pos_weight={scale_pos_weight}"
+            )
+            params = {**self.base_params, "scale_pos_weight": scale_pos_weight}
+
         self.model = xgb.XGBClassifier(**params)
 
         # ── 训练（eval_set 用于 early stopping 监控 AUC）──────────────────

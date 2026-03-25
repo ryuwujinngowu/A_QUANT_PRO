@@ -297,7 +297,8 @@ class MultiStockBacktestEngine:
             trade_df=trade_df,
             strategy_name=self.strategy.strategy_name,
             backtest_start_date=self.start_date,
-            backtest_end_date=self.end_date
+            backtest_end_date=self.end_date,
+            strategy_params=self.strategy.get_params_summary(),
         )
         self.result = metrics.calc_all_metrics()
 
