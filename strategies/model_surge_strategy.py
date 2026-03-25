@@ -44,7 +44,7 @@ from utils.xgb_compat import safe_predict_proba
 
 # 与 agent 保持一致
 _BUY_TOP_K = 6
-_MIN_PROB = 0.50
+_MIN_PROB = 0.60
 _MIN_AMOUNT = 10_000
 _LOAD_MINUTE = True
 _MODEL_PATH = os.path.join(
@@ -86,8 +86,8 @@ class ModelSurgeStrategy(BaseStrategy):
 
         # 持仓跟踪配置：短线 -5% 止损 + 8% 止盈
         self._tracker_config = TrackerConfig(
-            stop_loss_pct=-0.5,   # 故意设高，不做动态止损
-            take_profit_pct=10,   # 故意设高，不做动态止盈
+            stop_loss_pct=None,   # 故意设高，不做动态止损
+            take_profit_pct=None,   # 故意设高，不做动态止盈
             trailing_stop_pct=None,
             max_hold_days=None,
         )

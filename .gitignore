@@ -1,5 +1,6 @@
 # 1. 忽略单个文件（精确路径）
 /config/.env
+/a_quant_dashboard/.env
 .idea/
 .idea/workspace.xml
 tests/
@@ -15,3 +16,4 @@ fileserver.py
 /sql/
 CLAUDE.md
 /.claude/
+a_quant_dashboard/.env.example

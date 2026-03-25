@@ -811,25 +811,25 @@ if __name__ == "__main__":
 # """===================== 分钟线接口（fetch_stk_mins）专项测试用例 ====================="""
 #
 #
-    # try:
-    #     # 全局配置：显示所有列，方便查看返回结果
-    #     pd.set_option('display.max_columns', None)
-    #     pd.set_option('display.width', None)
-    # #
-    #     logger.info("===== 测试1：有效股票+完整交易日分钟线（1min） =====")
-    #     # 测试标的：000001.SZ（平安银行，确保有数据）
-    #     # 测试日期：2026-01-05（你的回测日期，交易日）
-    #     mins_df_1 = data_fetcher.fetch_stk_mins(
-    #         ts_code="302132.SZ",
-    #         freq="1min",
-    #         start_date="2025-02-17 09:25:00",
-    #         end_date="2025-02-17 15:00:00"
-    #     )
-    #     logger.info(f"✅ 有效股票分钟线获取成功，行数：{len(mins_df_1)}")
-    #     logger.info(f"返回字段：{mins_df_1.columns.tolist()}")
-    #     logger.info(f"前5行数据：\n{mins_df_1.head()}")
-    # except Exception as e:
-    #     logger.error(f"❌ 分钟线接口测试崩溃，核心错误：{str(e)}", exc_info=True)
+    try:
+        # 全局配置：显示所有列，方便查看返回结果
+        pd.set_option('display.max_columns', None)
+        pd.set_option('display.width', None)
+    #
+        logger.info("===== 测试1：有效股票+完整交易日分钟线（1min） =====")
+        # 测试标的：000001.SZ（平安银行，确保有数据）
+        # 测试日期：2026-01-05（你的回测日期，交易日）
+        mins_df_1 = data_fetcher.fetch_stk_mins(
+            ts_code="603729.SH",
+            freq="1min",
+            start_date="2026-02-09 09:25:00",
+            end_date="2026-02-09 15:00:00"
+        )
+        logger.info(f"✅ 有效股票分钟线获取成功，行数：{len(mins_df_1)}")
+        logger.info(f"返回字段：{mins_df_1.columns.tolist()}")
+        logger.info(f"前5行数据：\n{mins_df_1.head()}")
+    except Exception as e:
+        logger.error(f"❌ 分钟线接口测试崩溃，核心错误：{str(e)}", exc_info=True)
 
 
     # logger.info("===== 测试：获取交易日历数据 =====")
@@ -869,25 +869,25 @@ if __name__ == "__main__":
     # else:
     #     print("未获取到数据，请检查Token/股票代码/日期是否正确")
 
-    df = data_fetcher.fetch_limit_list_ths(
-        trade_date="20241104",  # 核心测试日期：2024年11月04日
-        ts_code=None,  # 不指定个股，获取当日全市场涨跌停数据
-        limit_type="涨停池",  # 测试中文参数映射（也可试 "U"/"跌停池"/"炸板池"）
-        market="SZ"  # 测试深交所数据（也可试 "SH"/"BJ"）
-    )
+    # df = data_fetcher.fetch_limit_list_ths(
+    #     trade_date="20241104",  # 核心测试日期：2024年11月04日
+    #     ts_code=None,  # 不指定个股，获取当日全市场涨跌停数据
+    #     limit_type="涨停池",  # 测试中文参数映射（也可试 "U"/"跌停池"/"炸板池"）
+    #     market="SZ"  # 测试深交所数据（也可试 "SH"/"BJ"）
+    # )
 
-    # 2. 打印结果验证
-    if not df.empty:
-        print("\n===== 获取到的20241104涨跌停数据 =====")
-        print(f"数据形状：{df.shape}")  # 行数×列数
-        print("\n前5行数据：")
-        print(df.head())
-        print("\n数据字段：", df.columns.tolist())
-        # 额外验证：limit_type 中文映射是否生效
-        if "limit_type" in df.columns:
-            print(f"\n涨跌停类型分布：\n{df['limit_type'].value_counts()}")
-    else:
-        print("未获取到数据，请检查Token/交易日/市场参数是否正确")
+    # # 2. 打印结果验证
+    # if not df.empty:
+    #     print("\n===== 获取到的20241104涨跌停数据 =====")
+    #     print(f"数据形状：{df.shape}")  # 行数×列数
+    #     print("\n前5行数据：")
+    #     print(df.head())
+    #     print("\n数据字段：", df.columns.tolist())
+    #     # 额外验证：limit_type 中文映射是否生效
+    #     if "limit_type" in df.columns:
+    #         print(f"\n涨跌停类型分布：\n{df['limit_type'].value_counts()}")
+    # else:
+    #     print("未获取到数据，请检查Token/交易日/市场参数是否正确")
 
 
     # =================== 测试：获取交易详细信息数据 =====")

@@ -1,0 +1,1154 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>A Quant Pro · 策略监控台</title>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
+<style>
+/* ── Reset & Base ── */
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg0:#070c14;--bg1:#0d1525;--bg2:#111b2e;--bg3:#162040;
+  --border:#1a2744;--border2:#223366;
+  --accent:#38bdf8;--accent2:#818cf8;--accent3:#f472b6;
+  --pos:#10b981;--neg:#ef4444;--pos-dim:#065f46;--neg-dim:#7f1d1d;
+  --text1:#e2e8f0;--text2:#94a3b8;--text3:#475569;
+  --shadow:0 4px 24px rgba(0,0,0,.6);
+  --radius:8px;--sidebar-w:220px;--topbar-h:56px;
+}
+html,body{height:100%;overflow:hidden;background:var(--bg0);color:var(--text1);font-family:'PingFang SC','Microsoft YaHei',sans-serif;font-size:13px}
+::-webkit-scrollbar{width:5px;height:5px}
+::-webkit-scrollbar-track{background:var(--bg1)}
+::-webkit-scrollbar-thumb{background:var(--border2);border-radius:3px}
+
+/* ── Layout ── */
+#app{display:flex;height:100vh}
+#sidebar{width:var(--sidebar-w);min-width:var(--sidebar-w);background:var(--bg1);border-right:1px solid var(--border);display:flex;flex-direction:column;overflow:hidden}
+#main{flex:1;display:flex;flex-direction:column;min-width:0;overflow:hidden}
+#topbar{height:var(--topbar-h);min-height:var(--topbar-h);background:var(--bg1);border-bottom:1px solid var(--border);display:flex;align-items:center;padding:0 20px;gap:12px;z-index:10}
+#content{flex:1;overflow-y:auto;padding:20px;background:var(--bg0)}
+
+/* ── Sidebar ── */
+.sidebar-logo{padding:18px 16px 12px;border-bottom:1px solid var(--border)}
+.sidebar-logo .logo-title{font-size:15px;font-weight:700;background:linear-gradient(135deg,var(--accent),var(--accent2));-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.sidebar-logo .logo-sub{font-size:11px;color:var(--text3);margin-top:2px}
+.nav-section{padding:10px 0}
+.nav-section-title{padding:6px 16px;font-size:10px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.08em}
+.nav-item{display:flex;align-items:center;gap:8px;padding:7px 16px;cursor:pointer;color:var(--text2);transition:all .15s;border-left:2px solid transparent;user-select:none}
+.nav-item:hover{color:var(--text1);background:var(--bg2)}
+.nav-item.active{color:var(--accent);background:rgba(56,189,248,.07);border-left-color:var(--accent)}
+.nav-item .nav-icon{width:14px;text-align:center;flex-shrink:0;font-size:12px}
+.nav-item .nav-badge{margin-left:auto;background:var(--bg3);color:var(--text3);font-size:10px;padding:1px 6px;border-radius:10px}
+.nav-item.active .nav-badge{background:rgba(56,189,248,.15);color:var(--accent)}
+.nav-group-header{display:flex;align-items:center;gap:8px;padding:7px 16px;cursor:pointer;color:var(--text2);user-select:none;font-size:12px;font-weight:600}
+.nav-group-header:hover{color:var(--text1)}
+.nav-group-header .arrow{margin-left:auto;transition:transform .2s;font-size:10px}
+.nav-group-header.open .arrow{transform:rotate(90deg)}
+.nav-sub{overflow:hidden;max-height:0;transition:max-height .3s ease}
+.nav-sub.open{max-height:400px}
+.nav-sub .nav-item{padding-left:32px;font-size:12px}
+
+/* ── Topbar ── */
+.topbar-title{font-size:13px;color:var(--text2);flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.topbar-title strong{color:var(--text1)}
+.date-presets{display:flex;gap:4px}
+.date-btn{padding:4px 10px;border:1px solid var(--border);background:var(--bg2);color:var(--text2);border-radius:5px;cursor:pointer;font-size:11px;transition:all .15s}
+.date-btn:hover{border-color:var(--accent);color:var(--accent)}
+.date-btn.active{border-color:var(--accent);background:rgba(56,189,248,.1);color:var(--accent)}
+.date-input-wrap{display:flex;align-items:center;gap:6px}
+.date-input-wrap input[type=date]{background:var(--bg2);border:1px solid var(--border);color:var(--text2);padding:4px 8px;border-radius:5px;font-size:11px;outline:none}
+.date-input-wrap input[type=date]:focus{border-color:var(--accent)}
+.date-input-wrap span{color:var(--text3)}
+.refresh-btn{padding:5px 14px;background:linear-gradient(135deg,#1d4ed8,#7c3aed);color:#fff;border:none;border-radius:5px;cursor:pointer;font-size:12px;transition:opacity .15s}
+.refresh-btn:hover{opacity:.85}
+
+/* ── Cards ── */
+.cards-row{display:grid;gap:14px;margin-bottom:20px}
+.cards-4{grid-template-columns:repeat(4,1fr)}
+.cards-3{grid-template-columns:repeat(3,1fr)}
+.card{background:var(--bg1);border:1px solid var(--border);border-radius:var(--radius);padding:16px;position:relative;overflow:hidden}
+.card::before{content:'';position:absolute;top:0;left:0;right:0;height:2px}
+.card.accent::before{background:linear-gradient(90deg,var(--accent),var(--accent2))}
+.card.pos::before{background:linear-gradient(90deg,var(--pos),#059669)}
+.card.neg::before{background:linear-gradient(90deg,var(--neg),#b91c1c)}
+.card.purple::before{background:linear-gradient(90deg,var(--accent2),var(--accent3))}
+.card-label{font-size:11px;color:var(--text3);font-weight:500;letter-spacing:.04em}
+.card-value{font-size:26px;font-weight:700;margin:6px 0 2px;line-height:1;font-variant-numeric:tabular-nums}
+.card-value.pos{color:var(--pos)}
+.card-value.neg{color:var(--neg)}
+.card-sub{font-size:11px;color:var(--text3)}
+
+/* ── Charts ── */
+.charts-grid{display:grid;gap:14px;margin-bottom:20px}
+.charts-2{grid-template-columns:1fr 1fr}
+.charts-3{grid-template-columns:2fr 1fr 1fr}
+.charts-6040{grid-template-columns:3fr 2fr}
+.chart-card{background:var(--bg1);border:1px solid var(--border);border-radius:var(--radius);padding:16px}
+.chart-title{font-size:12px;font-weight:600;color:var(--text2);margin-bottom:12px;display:flex;align-items:center;gap:6px}
+.chart-title::before{content:'';width:3px;height:12px;background:var(--accent);border-radius:2px;display:inline-block}
+.chart-body{width:100%}
+
+/* ── Table ── */
+.table-card{background:var(--bg1);border:1px solid var(--border);border-radius:var(--radius);margin-bottom:20px;overflow:hidden}
+.table-header{padding:12px 16px;display:flex;align-items:center;gap:10px;border-bottom:1px solid var(--border)}
+.table-header .title{font-size:12px;font-weight:600;color:var(--text2);flex:1}
+.table-wrap{overflow-x:auto;max-height:380px;overflow-y:auto}
+table{width:100%;border-collapse:collapse;font-size:12px}
+th{position:sticky;top:0;background:var(--bg2);color:var(--text3);font-weight:600;padding:8px 12px;text-align:left;white-space:nowrap;font-size:11px;letter-spacing:.04em}
+td{padding:7px 12px;border-bottom:1px solid var(--border);color:var(--text2);white-space:nowrap}
+tr:hover td{background:var(--bg2)}
+.badge{display:inline-block;padding:2px 7px;border-radius:4px;font-size:10px;font-weight:600}
+.badge-pos{background:rgba(16,185,129,.15);color:var(--pos)}
+.badge-neg{background:rgba(239,68,68,.15);color:var(--neg)}
+.badge-open{background:rgba(56,189,248,.12);color:var(--accent)}
+.badge-closed{background:rgba(148,163,184,.12);color:var(--text3)}
+.badge-err{background:rgba(239,68,68,.1);color:#fca5a5}
+.val-pos{color:var(--pos)}
+.val-neg{color:var(--neg)}
+.detail-btn{padding:2px 8px;background:var(--bg3);border:1px solid var(--border2);color:var(--accent);border-radius:4px;cursor:pointer;font-size:10px;transition:all .15s}
+.detail-btn:hover{background:rgba(56,189,248,.15)}
+
+/* ── Overview table ── */
+.overview-table td:first-child{color:var(--text1);font-weight:600}
+
+/* ── Loading / Empty ── */
+.loading-wrap,.empty-wrap{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;padding:60px 20px;color:var(--text3)}
+.spinner{width:32px;height:32px;border:3px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* ── Modal (position detail) ── */
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:100;display:flex;align-items:center;justify-content:center;animation:fadeIn .15s}
+@keyframes fadeIn{from{opacity:0}to{opacity:1}}
+.modal{background:var(--bg1);border:1px solid var(--border2);border-radius:10px;width:680px;max-width:95vw;max-height:85vh;overflow:hidden;display:flex;flex-direction:column;box-shadow:var(--shadow)}
+.modal-head{padding:16px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px}
+.modal-head .close{margin-left:auto;cursor:pointer;color:var(--text3);font-size:18px;line-height:1;padding:2px 6px;border-radius:4px}
+.modal-head .close:hover{color:var(--text1);background:var(--bg3)}
+.modal-body{flex:1;overflow-y:auto;padding:16px 20px}
+
+/* ── Scrollable content ── */
+#content > *{animation:slideUp .2s ease}
+@keyframes slideUp{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+
+/* ── Responsive adjustments ── */
+@media(max-width:1100px){.cards-4{grid-template-columns:repeat(2,1fr)}.charts-3{grid-template-columns:1fr}}
+@media(max-width:800px){.charts-2,.charts-6040{grid-template-columns:1fr}}
+
+/* ── Mobile (≤768px) ── */
+@media(max-width:768px){
+  /* Sidebar 变为 fixed overlay，默认隐藏在左侧 */
+  #sidebar{
+    position:fixed;top:0;left:0;bottom:0;z-index:60;
+    width:260px;min-width:260px;
+    transform:translateX(-100%);
+    transition:transform .28s cubic-bezier(.4,0,.2,1);
+    box-shadow:4px 0 24px rgba(0,0,0,.6);
+  }
+  #sidebar.mob-open{transform:translateX(0)}
+
+  /* 遮罩层 */
+  #sidebar-mask{
+    display:none;position:fixed;inset:0;z-index:59;
+    background:rgba(0,0,0,.55);
+    animation:fadeIn .2s;
+  }
+  #sidebar-mask.visible{display:block}
+
+  /* Main 占满全宽 */
+  #app{display:block;height:100vh}
+  #main{height:100vh;display:flex;flex-direction:column}
+
+  /* Topbar：精简 */
+  #topbar{padding:0 12px;gap:8px}
+  .date-presets{display:none}          /* 日期预设按钮隐藏 */
+  .date-input-wrap{display:none}       /* 日期输入框隐藏 */
+  #mob-date-row{display:flex}          /* 移动端日期行显示 */
+
+  /* 汉堡按钮 */
+  #hamburger{display:flex}
+
+  /* Cards 最多两列 */
+  .cards-4{grid-template-columns:1fr 1fr}
+  .cards-3{grid-template-columns:1fr 1fr}
+
+  /* Chart 高度适当缩小 */
+  .chart-body[style*="height:260px"]{height:200px!important}
+  .chart-body[style*="height:240px"]{height:190px!important}
+  .chart-body[style*="height:220px"]{height:180px!important}
+  .chart-body[style*="height:180px"]{height:160px!important}
+
+  /* Content padding 缩小 */
+  #content{padding:12px}
+  .cards-row{gap:8px;margin-bottom:14px}
+  .charts-grid{gap:8px;margin-bottom:14px}
+  .card{padding:12px}
+  .card-value{font-size:20px}
+
+  /* Modal 全屏 */
+  .modal{width:100%;max-width:100%;max-height:92vh;border-radius:10px 10px 0 0;position:fixed;bottom:0;left:0}
+  .modal-overlay{align-items:flex-end}
+}
+
+/* 移动端日期行（默认隐藏，仅移动端显示） */
+#mob-date-row{
+  display:none;align-items:center;gap:6px;
+  padding:6px 12px;background:var(--bg1);border-bottom:1px solid var(--border);
+  font-size:11px;color:var(--text3);
+}
+#mob-date-row input[type=date]{
+  background:var(--bg2);border:1px solid var(--border);color:var(--text2);
+  padding:3px 6px;border-radius:5px;font-size:11px;outline:none;flex:1;
+}
+#mob-date-row .mob-presets{display:flex;gap:4px}
+#mob-date-row .date-btn{padding:3px 8px;font-size:11px}
+
+/* 汉堡按钮默认隐藏，移动端显示 */
+#hamburger{
+  display:none;align-items:center;justify-content:center;
+  width:36px;height:36px;cursor:pointer;flex-shrink:0;
+  border:1px solid var(--border);border-radius:6px;
+  color:var(--text2);font-size:18px;background:var(--bg2);
+  transition:all .15s;
+}
+#hamburger:hover{color:var(--accent);border-color:var(--accent)}
+</style>
+</head>
+<body>
+<div id="sidebar-mask" onclick="closeSidebar()"></div>
+<div id="app">
+  <!-- Sidebar -->
+  <aside id="sidebar">
+    <div class="sidebar-logo">
+      <div class="logo-title">▲ A QUANT PRO</div>
+      <div class="logo-sub">策略监控台 v1.0</div>
+    </div>
+    <div style="flex:1;overflow-y:auto">
+      <div class="nav-section">
+        <div class="nav-section-title">主视图</div>
+        <div class="nav-item active" onclick="navigate('overview')" id="nav-overview">
+          <span class="nav-icon">◈</span> 全局概览
+        </div>
+      </div>
+      <div class="nav-section">
+        <div class="nav-group-header open" id="grp-short" onclick="toggleGroup('short')">
+          <span style="font-size:12px">◆</span> 短线策略 <span class="arrow">▶</span>
+        </div>
+        <div class="nav-sub open" id="sub-short"></div>
+      </div>
+      <div class="nav-section">
+        <div class="nav-group-header open" id="grp-long" onclick="toggleGroup('long')">
+          <span style="font-size:12px">◇</span> 长线策略 <span class="arrow">▶</span>
+        </div>
+        <div class="nav-sub open" id="sub-long"></div>
+      </div>
+    </div>
+    <div style="padding:12px 16px;border-top:1px solid var(--border);font-size:10px;color:var(--text3)">
+      <div id="clock"></div>
+      <div style="margin-top:2px">数据源：Aliyun RDS</div>
+    </div>
+  </aside>
+
+  <!-- Main -->
+  <div id="main">
+    <!-- Topbar -->
+    <div id="topbar">
+      <div id="hamburger" onclick="toggleSidebar()">☰</div>
+      <div class="topbar-title" id="topbar-title"><strong>全局概览</strong></div>
+      <div class="date-presets">
+        <div class="date-btn" onclick="setPreset(30)">1M</div>
+        <div class="date-btn active" onclick="setPreset(90)">3M</div>
+        <div class="date-btn" onclick="setPreset(180)">6M</div>
+        <div class="date-btn" onclick="setPreset(365)">1Y</div>
+      </div>
+      <div class="date-input-wrap">
+        <input type="date" id="dt-start" onchange="onDateChange()">
+        <span>→</span>
+        <input type="date" id="dt-end" onchange="onDateChange()">
+      </div>
+      <button class="refresh-btn" onclick="refresh()">↺</button>
+    </div>
+    <!-- 移动端日期控制行 -->
+    <div id="mob-date-row">
+      <div class="mob-presets">
+        <div class="date-btn" onclick="setPreset(30)">1M</div>
+        <div class="date-btn" onclick="setPreset(90)">3M</div>
+        <div class="date-btn" onclick="setPreset(180)">6M</div>
+        <div class="date-btn" onclick="setPreset(365)">1Y</div>
+      </div>
+      <input type="date" id="mob-dt-start" onchange="onMobDateChange()">
+      <span>→</span>
+      <input type="date" id="mob-dt-end" onchange="onMobDateChange()">
+    </div>
+    <!-- Content -->
+    <div id="content">
+      <div class="loading-wrap"><div class="spinner"></div><div>正在加载...</div></div>
+    </div>
+  </div>
+</div>
+
+<!-- Modal -->
+<div class="modal-overlay" id="modal" style="display:none" onclick="closeModal(event)">
+  <div class="modal" onclick="e=>e.stopPropagation()">
+    <div class="modal-head">
+      <div id="modal-title" style="font-weight:600;font-size:14px"></div>
+      <div class="close" onclick="closeModal()">✕</div>
+    </div>
+    <div class="modal-body" id="modal-body"></div>
+  </div>
+</div>
+
+<script>
+// ══════════════════════════════════════════════════════════════════
+//  State
+// ══════════════════════════════════════════════════════════════════
+const S = {
+  view: 'overview',
+  agentId: null,
+  agentType: null,
+  start: '',
+  end: '',
+  agents: { short: [], long: [] },
+  activeCharts: [],          // echarts instances to dispose/resize
+};
+
+// ══════════════════════════════════════════════════════════════════
+//  Boot
+// ══════════════════════════════════════════════════════════════════
+async function boot() {
+  setPreset(90, false);
+  updateClock();
+  setInterval(updateClock, 1000);
+  try {
+    S.agents = await apiFetch('/api/agents');
+    buildNav();
+    navigate('overview');
+  } catch(e) {
+    showContent(`<div class="loading-wrap"><div style="color:var(--neg);font-size:14px">⚠ 无法连接数据库：${e.message}</div></div>`);
+  }
+}
+
+function updateClock() {
+  document.getElementById('clock').textContent = new Date().toLocaleString('zh-CN',{hour12:false});
+}
+
+// ══════════════════════════════════════════════════════════════════
+//  Navigation
+// ══════════════════════════════════════════════════════════════════
+function buildNav() {
+  const shorts = document.getElementById('sub-short');
+  const longs  = document.getElementById('sub-long');
+  shorts.innerHTML = S.agents.short.map(a => navItem(a,'short')).join('');
+  longs.innerHTML  = S.agents.long.map(a  => navItem(a,'long')).join('');
+}
+
+function navItem(a, type) {
+  const badge = type === 'short' ? 'T+1' : (a.id.includes('switch') ? '10D' : a.id.includes('breakout') ? '60D' : '90D');
+  return `<div class="nav-item" id="nav-${a.id}" onclick="navigate('${type}:${a.id}')">
+    <span class="nav-icon">${type==='short'?'▸':'▷'}</span>
+    <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis" title="${a.desc}">${a.name}</span>
+    <span class="nav-badge">${badge}</span>
+  </div>`;
+}
+
+function toggleGroup(g) {
+  const hdr = document.getElementById('grp-'+g);
+  const sub = document.getElementById('sub-'+g);
+  hdr.classList.toggle('open');
+  sub.classList.toggle('open');
+}
+
+function navigate(view) {
+  // 移动端：导航后自动收起 sidebar
+  if (window.innerWidth <= 768) closeSidebar();
+
+  document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
+  S.activeCharts.forEach(c => c.dispose());
+  S.activeCharts = [];
+  S.view = view;
+
+  if (view === 'overview') {
+    document.getElementById('nav-overview').classList.add('active');
+    document.getElementById('topbar-title').innerHTML = '<strong>全局概览</strong>';
+    renderOverview();
+  } else {
+    const [type, agentId] = view.split(':');
+    S.agentType = type;
+    S.agentId = agentId;
+    const el = document.getElementById('nav-'+agentId);
+    if (el) el.classList.add('active');
+    const meta = S.agents[type].find(a=>a.id===agentId);
+    document.getElementById('topbar-title').innerHTML =
+      `<span style="color:var(--text3)">${type==='short'?'短线':'长线'} /</span> <strong>${meta?.name||agentId}</strong>`;
+    type === 'short' ? renderShort(agentId) : renderLong(agentId);
+  }
+}
+
+// 移动端 sidebar 开关
+function toggleSidebar() {
+  const sb   = document.getElementById('sidebar');
+  const mask = document.getElementById('sidebar-mask');
+  const isOpen = sb.classList.contains('mob-open');
+  if (isOpen) {
+    sb.classList.remove('mob-open');
+    mask.classList.remove('visible');
+  } else {
+    sb.classList.add('mob-open');
+    mask.classList.add('visible');
+  }
+}
+function closeSidebar() {
+  document.getElementById('sidebar').classList.remove('mob-open');
+  document.getElementById('sidebar-mask').classList.remove('visible');
+}
+
+function refresh() {
+  navigate(S.view);
+}
+
+// ══════════════════════════════════════════════════════════════════
+//  Date range
+// ══════════════════════════════════════════════════════════════════
+function setPreset(days, doRefresh=true) {
+  const end = new Date();
+  const start = new Date();
+  start.setDate(start.getDate() - days);
+  S.end   = fmtDate(end);
+  S.start = fmtDate(start);
+  const label = days===30?'1M':days===90?'3M':days===180?'6M':'1Y';
+  // 同步所有日期输入框（桌面 + 移动端）
+  ['dt-start','mob-dt-start'].forEach(id => { const el=document.getElementById(id); if(el) el.value=S.start; });
+  ['dt-end','mob-dt-end'].forEach(id =>   { const el=document.getElementById(id); if(el) el.value=S.end; });
+  document.querySelectorAll('.date-btn').forEach(el => {
+    el.classList.toggle('active', el.textContent === label);
+  });
+  if (doRefresh) refresh();
+}
+
+function onDateChange() {
+  S.start = document.getElementById('dt-start').value;
+  S.end   = document.getElementById('dt-end').value;
+  document.getElementById('mob-dt-start').value = S.start;
+  document.getElementById('mob-dt-end').value   = S.end;
+  document.querySelectorAll('.date-btn').forEach(el => el.classList.remove('active'));
+  refresh();
+}
+
+function onMobDateChange() {
+  S.start = document.getElementById('mob-dt-start').value;
+  S.end   = document.getElementById('mob-dt-end').value;
+  document.getElementById('dt-start').value = S.start;
+  document.getElementById('dt-end').value   = S.end;
+  document.querySelectorAll('.date-btn').forEach(el => el.classList.remove('active'));
+  refresh();
+}
+
+function fmtDate(d) {
+  return d.toISOString().slice(0,10);
+}
+
+// ══════════════════════════════════════════════════════════════════
+//  API
+// ══════════════════════════════════════════════════════════════════
+async function apiFetch(url) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+function apiUrl(path, extra={}) {
+  const p = { start_date: S.start, end_date: S.end, ...extra };
+  return path + '?' + new URLSearchParams(p).toString();
+}
+
+// ══════════════════════════════════════════════════════════════════
+//  DOM helpers
+// ══════════════════════════════════════════════════════════════════
+function showContent(html) {
+  document.getElementById('content').innerHTML = html;
+}
+
+function mkChart(id, option, height=260) {
+  const el = document.getElementById(id);
+  if (!el) return null;
+  el.style.height = height + 'px';
+  const chart = echarts.init(el, 'dark');
+  chart.setOption({ backgroundColor:'transparent', ...option });
+  S.activeCharts.push(chart);
+  return chart;
+}
+
+window.addEventListener('resize', () => S.activeCharts.forEach(c => c.resize()));
+
+// ══════════════════════════════════════════════════════════════════
+//  ECharts base options
+// ══════════════════════════════════════════════════════════════════
+const GRID = { top:36, bottom:40, left:54, right:16, containLabel:false };
+const AXIS_STYLE = { axisLine:{lineStyle:{color:'#1a2744'}}, splitLine:{lineStyle:{color:'#1a2744',type:'dashed'}}, axisLabel:{color:'#64748b',fontSize:10} };
+const TOOLTIP_STYLE = { backgroundColor:'#0d1525', borderColor:'#1a2744', textStyle:{color:'#e2e8f0',fontSize:12} };
+
+function dateAxis(data) {
+  return { type:'category', data, boundaryGap:true, ...AXIS_STYLE, axisLabel:{...AXIS_STYLE.axisLabel, formatter:v=>v.slice(5)} };
+}
+function valueAxis(fmt='') {
+  return { type:'value', ...AXIS_STYLE, axisLabel:{...AXIS_STYLE.axisLabel, formatter: fmt ? v=>v+fmt : undefined} };
+}
+
+// ══════════════════════════════════════════════════════════════════
+//  Color helpers
+// ══════════════════════════════════════════════════════════════════
+function retColor(v) { return v >= 0 ? '#10b981' : '#ef4444'; }
+function retColors(arr) { return arr.map(v => retColor(v)); }
+
+function fmt2(v) { return v == null ? '--' : (v>=0?'+':'')+v.toFixed(2)+'%'; }
+function fmtN(v,d=2) { return v == null ? '--' : v.toFixed(d); }
+
+// ══════════════════════════════════════════════════════════════════
+//  ── OVERVIEW ─────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════
+async function renderOverview() {
+  showContent('<div class="loading-wrap"><div class="spinner"></div><div>加载中...</div></div>');
+  try {
+    const data = await apiFetch(apiUrl('/api/overview'));
+    showContent(buildOverviewHTML(data));
+    renderOverviewCharts(data);
+  } catch(e) {
+    showContent(`<div class="loading-wrap"><div style="color:var(--neg)">加载失败：${e.message}</div></div>`);
+  }
+}
+
+function buildOverviewHTML(data) {
+  const shortBest = data.short.reduce((best,a) => (!best || (a.avg_return||0)>(best.avg_return||0)) ? a : best, null);
+  const totalSignals = data.short.reduce((s,a)=>s+(a.total_days||0),0);
+  const avgWin = data.short.length ? (data.short.reduce((s,a)=>s+(a.win_rate||0),0)/data.short.length).toFixed(1) : '--';
+  const totalOpen = data.long.reduce((s,a)=>s+(a.open_positions||0),0);
+
+  return `
+  <div class="cards-row cards-4">
+    <div class="card accent">
+      <div class="card-label">短线信号总天数</div>
+      <div class="card-value">${totalSignals}</div>
+      <div class="card-sub">跨 ${data.short.length} 个策略</div>
+    </div>
+    <div class="card pos">
+      <div class="card-label">短线平均胜率</div>
+      <div class="card-value pos">${avgWin}%</div>
+      <div class="card-sub">各策略胜率均值</div>
+    </div>
+    <div class="card purple">
+      <div class="card-label">最优短线策略</div>
+      <div class="card-value" style="font-size:18px">${shortBest ? (S.agents.short.find(a=>a.id===shortBest.agent_id)?.name||shortBest.agent_id) : '--'}</div>
+      <div class="card-sub">${shortBest ? fmt2(shortBest.avg_return)+' 均收益' : ''}</div>
+    </div>
+    <div class="card accent">
+      <div class="card-label">长线持仓中</div>
+      <div class="card-value">${totalOpen}</div>
+      <div class="card-sub">跨 ${data.long.length} 个策略</div>
+    </div>
+  </div>
+
+  <div class="charts-grid charts-6040">
+    <div class="chart-card">
+      <div class="chart-title">各短线策略累计收益（T+1 收盘）</div>
+      <div class="chart-body" id="ov-cum" style="height:260px"></div>
+    </div>
+    <div class="chart-card">
+      <div class="chart-title">短线策略平均日收益对比</div>
+      <div class="chart-body" id="ov-bar" style="height:260px"></div>
+    </div>
+  </div>
+
+  <!-- Short summary table -->
+  <div class="table-card">
+    <div class="table-header"><div class="title">◆ 短线策略汇总</div></div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr>
+          <th>策略</th><th>有效天数</th><th>胜率</th><th>均收益</th>
+          <th>最高单日</th><th>最低单日</th><th>均最大溢价</th><th>均最大回撤</th>
+        </tr></thead>
+        <tbody>
+          ${data.short.map(a=>{
+            const meta = S.agents.short.find(x=>x.id===a.agent_id);
+            return `<tr class="overview-table">
+              <td><span style="cursor:pointer;color:var(--accent)" onclick="navigate('short:${a.agent_id}')">${meta?.name||a.agent_id}</span></td>
+              <td>${a.total_days}</td>
+              <td><span class="badge ${a.win_rate>=50?'badge-pos':'badge-neg'}">${a.win_rate}%</span></td>
+              <td class="${a.avg_return>=0?'val-pos':'val-neg'}">${fmt2(a.avg_return)}</td>
+              <td class="val-pos">${fmt2(a.max_return)}</td>
+              <td class="val-neg">${fmt2(a.min_return)}</td>
+              <td class="val-pos">${fmt2(a.avg_max_premium)}</td>
+              <td class="val-neg">${fmt2(a.avg_max_drawdown)}</td>
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Long summary table -->
+  <div class="table-card">
+    <div class="table-header"><div class="title">◇ 长线策略汇总</div></div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr>
+          <th>策略</th><th>总持仓</th><th>持仓中</th><th>已平仓</th>
+          <th>胜率</th><th>均收益</th><th>均持仓天数</th>
+        </tr></thead>
+        <tbody>
+          ${data.long.map(a=>{
+            const meta = S.agents.long.find(x=>x.id===a.agent_id);
+            return `<tr class="overview-table">
+              <td><span style="cursor:pointer;color:var(--accent)" onclick="navigate('long:${a.agent_id}')">${meta?.name||a.agent_id}</span></td>
+              <td>${a.total_positions}</td>
+              <td><span class="badge badge-open">${a.open_positions}</span></td>
+              <td>${a.closed_positions}</td>
+              <td><span class="badge ${a.win_rate>=50?'badge-pos':'badge-neg'}">${a.win_rate}%</span></td>
+              <td class="${(a.avg_return||0)>=0?'val-pos':'val-neg'}">${fmt2(a.avg_return)}</td>
+              <td>${fmtN(a.avg_days,1)} 天</td>
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table>
+    </div>
+  </div>`;
+}
+
+function renderOverviewCharts(data) {
+  // Multi-line cumulative return
+  const agentIds = Object.keys(data.trend);
+  const allDates = [...new Set(agentIds.flatMap(id => data.trend[id].map(d=>d.date)))].sort();
+  const COLORS = ['#38bdf8','#818cf8','#f472b6','#34d399','#fbbf24','#f87171','#a78bfa','#6ee7b7'];
+
+  const series = agentIds.map((id, i) => {
+    const byDate = Object.fromEntries(data.trend[id].map(d=>[d.date, d.return]));
+    let cum = 0;
+    const cumVals = allDates.map(d => {
+      if (byDate[d] != null) cum += byDate[d];
+      return parseFloat(cum.toFixed(2));
+    });
+    const meta = S.agents.short.find(a=>a.id===id);
+    return {
+      name: meta?.name || id,
+      type: 'line', smooth: true, symbol:'none',
+      lineStyle: { width: 1.5 },
+      itemStyle: { color: COLORS[i%COLORS.length] },
+      data: cumVals,
+    };
+  });
+
+  mkChart('ov-cum', {
+    tooltip: { trigger:'axis', ...TOOLTIP_STYLE, formatter: params =>
+      params[0].axisValue + params.map(p=>`<br/><span style="color:${p.color}">●</span> ${p.seriesName}: ${p.value>=0?'+':''}${p.value}%`).join('')
+    },
+    legend: { data: series.map(s=>s.name), bottom:0, textStyle:{color:'#64748b',fontSize:10}, icon:'circle', itemWidth:8 },
+    grid: { ...GRID, bottom:50 },
+    xAxis: dateAxis(allDates),
+    yAxis: { ...valueAxis('%'), axisLabel:{...AXIS_STYLE.axisLabel, formatter:v=>v+'%'} },
+    series,
+  }, 260);
+
+  // Bar: avg return per agent
+  const shortData = data.short.sort((a,b)=>(b.avg_return||0)-(a.avg_return||0));
+  mkChart('ov-bar', {
+    tooltip: { trigger:'axis', ...TOOLTIP_STYLE },
+    grid: { top:20, bottom:80, left:16, right:16, containLabel:true },
+    xAxis: {
+      type:'category',
+      data: shortData.map(a => S.agents.short.find(x=>x.id===a.agent_id)?.name || a.agent_id),
+      axisLabel: { color:'#64748b', fontSize:10, rotate:30, interval:0 },
+      axisLine: { lineStyle:{ color:'#1a2744' } },
+    },
+    yAxis: { ...valueAxis('%'), axisLabel:{...AXIS_STYLE.axisLabel, formatter:v=>v+'%'} },
+    series: [{
+      type:'bar', barMaxWidth:36,
+      data: shortData.map(a => ({ value: a.avg_return, itemStyle:{color: retColor(a.avg_return)} })),
+      label: { show:true, position:'top', color:'#94a3b8', fontSize:10, formatter:p=>(p.value>=0?'+':'')+p.value+'%' },
+    }],
+  }, 260);
+}
+
+// ══════════════════════════════════════════════════════════════════
+//  ── SHORT ────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════
+async function renderShort(agentId) {
+  showContent('<div class="loading-wrap"><div class="spinner"></div><div>加载中...</div></div>');
+  try {
+    const rows = await apiFetch(apiUrl('/api/short/daily', { agent_id: agentId }));
+    if (!rows.length) { showContent('<div class="empty-wrap">⚡ 该时段暂无数据</div>'); return; }
+    showContent(buildShortHTML(rows, agentId));
+    renderShortCharts(rows);
+  } catch(e) {
+    showContent(`<div class="loading-wrap"><div style="color:var(--neg)">加载失败：${e.message}</div></div>`);
+  }
+}
+
+function buildShortHTML(rows, agentId) {
+  const valid = rows.filter(r => !r.has_error && r.next_day_avg_close_return != null);
+  const wins = valid.filter(r => r.next_day_avg_close_return > 0);
+  const winRate = valid.length ? (wins.length/valid.length*100).toFixed(1) : '--';
+  const avgRet = valid.length ? (valid.reduce((s,r)=>s+r.next_day_avg_close_return,0)/valid.length).toFixed(2) : null;
+  const bestDay = valid.length ? valid.reduce((b,r)=>r.next_day_avg_close_return>b.next_day_avg_close_return?r:b) : null;
+
+  const meta = S.agents.short.find(a=>a.id===agentId);
+  return `
+  <div class="cards-row cards-4">
+    <div class="card accent">
+      <div class="card-label">有效信号天数</div>
+      <div class="card-value">${valid.length}</div>
+      <div class="card-sub">共 ${rows.length} 天记录</div>
+    </div>
+    <div class="card ${parseFloat(winRate)>=50?'pos':'neg'}">
+      <div class="card-label">胜率（T+1收盘）</div>
+      <div class="card-value ${parseFloat(winRate)>=50?'pos':'neg'}">${winRate}%</div>
+      <div class="card-sub">${wins.length} 胜 / ${valid.length-wins.length} 负</div>
+    </div>
+    <div class="card ${avgRet>=0?'pos':'neg'}">
+      <div class="card-label">平均日收益</div>
+      <div class="card-value ${avgRet>=0?'pos':'neg'}">${fmt2(parseFloat(avgRet))}</div>
+      <div class="card-sub">T+1 收盘均值</div>
+    </div>
+    <div class="card purple">
+      <div class="card-label">最佳交易日</div>
+      <div class="card-value pos" style="font-size:18px">${bestDay ? fmt2(bestDay.next_day_avg_close_return) : '--'}</div>
+      <div class="card-sub">${bestDay?.trade_date||''}</div>
+    </div>
+  </div>
+
+  <div class="charts-grid charts-2">
+    <div class="chart-card">
+      <div class="chart-title">T+1 每日收益（收盘 vs 开盘溢价）</div>
+      <div class="chart-body" id="s-daily" style="height:260px"></div>
+    </div>
+    <div class="chart-card">
+      <div class="chart-title">累计收益曲线</div>
+      <div class="chart-body" id="s-cum" style="height:260px"></div>
+    </div>
+  </div>
+  <div class="charts-grid charts-3">
+    <div class="chart-card">
+      <div class="chart-title">收益分布直方图</div>
+      <div class="chart-body" id="s-hist" style="height:220px"></div>
+    </div>
+    <div class="chart-card">
+      <div class="chart-title">最大溢价 vs 最大回撤</div>
+      <div class="chart-body" id="s-extreme" style="height:220px"></div>
+    </div>
+    <div class="chart-card">
+      <div class="chart-title">开盘溢价 vs 收盘收益散点</div>
+      <div class="chart-body" id="s-scatter" style="height:220px"></div>
+    </div>
+  </div>
+
+  <div class="table-card">
+    <div class="table-header">
+      <div class="title">每日信号记录</div>
+      <div style="font-size:11px;color:var(--text3)">${meta?.desc||''}</div>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr>
+          <th>日期</th><th>信号数</th><th>日内均收益</th>
+          <th>开盘溢价</th><th>收盘收益</th><th>最大溢价</th><th>最大回撤</th>
+          <th>首次转绿(分)</th><th>状态</th>
+        </tr></thead>
+        <tbody>
+          ${rows.slice().reverse().map(r=>shortRow(r)).join('')}
+        </tbody>
+      </table>
+    </div>
+  </div>`;
+}
+
+function shortRow(r) {
+  const ok = !r.has_error && r.next_day_avg_close_return != null;
+  return `<tr>
+    <td>${r.trade_date}</td>
+    <td>${r.signal_count || '--'}</td>
+    <td class="${r.intraday_avg_return>=0?'val-pos':'val-neg'}">${fmt2(r.intraday_avg_return)}</td>
+    <td class="${r.next_day_avg_open_premium>=0?'val-pos':'val-neg'}">${fmt2(r.next_day_avg_open_premium)}</td>
+    <td class="${r.next_day_avg_close_return>=0?'val-pos':'val-neg'}">${ok ? fmt2(r.next_day_avg_close_return) : '--'}</td>
+    <td class="val-pos">${fmt2(r.next_day_avg_max_premium)}</td>
+    <td class="val-neg">${fmt2(r.next_day_avg_max_drawdown)}</td>
+    <td>${r.next_day_avg_red_minute != null ? r.next_day_avg_red_minute+'min' : '--'}</td>
+    <td>${r.has_error ? '<span class="badge badge-err">ERROR</span>' : ok ? '<span class="badge badge-pos">✓</span>' : '<span class="badge badge-closed">待更新</span>'}</td>
+  </tr>`;
+}
+
+function renderShortCharts(rows) {
+  const valid = rows.filter(r => r.next_day_avg_close_return != null && !r.has_error);
+  const dates = valid.map(r => r.trade_date);
+  const closeRets = valid.map(r => r.next_day_avg_close_return);
+  const openPrem  = valid.map(r => r.next_day_avg_open_premium || 0);
+
+  // Daily bar (close return) + open premium line
+  mkChart('s-daily', {
+    tooltip: { trigger:'axis', ...TOOLTIP_STYLE,
+      formatter: params => {
+        const d = params[0].axisValue;
+        return params.map(p=>`${p.marker} ${p.seriesName}: ${p.value>=0?'+':''}${p.value}%`).join('<br/>');
+      }
+    },
+    legend: { data:['T+1收盘','开盘溢价'], bottom:0, textStyle:{color:'#64748b',fontSize:10}, icon:'circle', itemWidth:8 },
+    grid: { ...GRID, bottom:50 },
+    xAxis: dateAxis(dates),
+    yAxis: { ...valueAxis('%'), axisLabel:{...AXIS_STYLE.axisLabel, formatter:v=>v+'%'} },
+    series: [
+      { name:'T+1收盘', type:'bar', barMaxWidth:16,
+        data: closeRets.map(v=>({ value:v, itemStyle:{color:retColor(v)} })) },
+      { name:'开盘溢价', type:'line', smooth:true, symbol:'none',
+        lineStyle:{color:'#f472b6',width:1.5}, itemStyle:{color:'#f472b6'},
+        data: openPrem },
+    ],
+  }, 260);
+
+  // Cumulative
+  let cum = 0;
+  const cumVals = valid.map(r => { cum += r.next_day_avg_close_return; return parseFloat(cum.toFixed(2)); });
+  mkChart('s-cum', {
+    tooltip: { trigger:'axis', ...TOOLTIP_STYLE, formatter: p => `${p[0].axisValue}<br/>${p[0].value>=0?'+':''}${p[0].value}%` },
+    grid: { ...GRID },
+    xAxis: dateAxis(dates),
+    yAxis: { ...valueAxis('%'), axisLabel:{...AXIS_STYLE.axisLabel, formatter:v=>v+'%'} },
+    series: [{
+      type:'line', smooth:true, symbol:'none',
+      lineStyle:{ width:2, color:'#38bdf8' },
+      areaStyle:{ color:{ type:'linear', x:0,y:0,x2:0,y2:1, colorStops:[
+        {offset:0, color:'rgba(56,189,248,.25)'}, {offset:1, color:'rgba(56,189,248,.02)'}
+      ]}},
+      itemStyle:{ color:'#38bdf8' },
+      data: cumVals,
+      markLine:{ silent:true, data:[{yAxis:0}], lineStyle:{color:'#1a2744',type:'dashed'} },
+    }],
+  }, 260);
+
+  // Histogram
+  const buckets = {};
+  closeRets.forEach(v => {
+    const b = Math.floor(v / 0.5) * 0.5;
+    buckets[b] = (buckets[b] || 0) + 1;
+  });
+  const bKeys = Object.keys(buckets).map(Number).sort((a,b)=>a-b);
+  mkChart('s-hist', {
+    tooltip: { trigger:'axis', ...TOOLTIP_STYLE },
+    grid: { top:20, bottom:40, left:40, right:10 },
+    xAxis: { type:'category', data: bKeys.map(k=>k.toFixed(1)+'%'), ...AXIS_STYLE,
+      axisLabel:{...AXIS_STYLE.axisLabel, rotate:30, interval:0} },
+    yAxis: { type:'value', ...AXIS_STYLE, name:'次', nameTextStyle:{color:'#475569',fontSize:10} },
+    series: [{ type:'bar', barMaxWidth:20,
+      data: bKeys.map(k=>({ value:buckets[k], itemStyle:{color:retColor(k)} })) }],
+  }, 220);
+
+  // Max premium vs max drawdown
+  const maxP = valid.map(r => r.next_day_avg_max_premium || 0);
+  const maxD = valid.map(r => r.next_day_avg_max_drawdown || 0);
+  mkChart('s-extreme', {
+    tooltip: { trigger:'axis', ...TOOLTIP_STYLE },
+    legend: { data:['最大溢价','最大回撤'], bottom:0, textStyle:{color:'#64748b',fontSize:10}, icon:'circle', itemWidth:8 },
+    grid: { ...GRID, bottom:50 },
+    xAxis: dateAxis(dates),
+    yAxis: { ...valueAxis('%'), axisLabel:{...AXIS_STYLE.axisLabel, formatter:v=>v+'%'} },
+    series: [
+      { name:'最大溢价', type:'line', smooth:true, symbol:'none',
+        lineStyle:{color:'#10b981',width:1.5}, itemStyle:{color:'#10b981'}, data:maxP },
+      { name:'最大回撤', type:'line', smooth:true, symbol:'none',
+        lineStyle:{color:'#ef4444',width:1.5}, itemStyle:{color:'#ef4444'}, data:maxD },
+    ],
+  }, 220);
+
+  // Scatter: open premium vs close return
+  const scatterData = valid.map(r => [r.next_day_avg_open_premium||0, r.next_day_avg_close_return, r.trade_date]);
+  mkChart('s-scatter', {
+    tooltip: { trigger:'item', ...TOOLTIP_STYLE,
+      formatter: p => `${p.data[2]}<br/>开盘溢价: ${fmt2(p.data[0])}<br/>收盘收益: ${fmt2(p.data[1])}` },
+    grid: { top:20, bottom:36, left:50, right:10 },
+    xAxis: { type:'value', name:'开盘溢价%', ...AXIS_STYLE, nameTextStyle:{color:'#475569',fontSize:10} },
+    yAxis: { type:'value', name:'收盘%', ...AXIS_STYLE, nameTextStyle:{color:'#475569',fontSize:10} },
+    series: [{
+      type:'scatter', symbolSize:6,
+      data: scatterData,
+      itemStyle:{ color: p => retColor(p.data[1]), opacity:0.75 },
+    }],
+  }, 220);
+}
+
+// ══════════════════════════════════════════════════════════════════
+//  ── LONG ─────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════
+async function renderLong(agentId) {
+  showContent('<div class="loading-wrap"><div class="spinner"></div><div>加载中...</div></div>');
+  try {
+    const [positions, agg] = await Promise.all([
+      apiFetch(apiUrl('/api/long/positions', { agent_id: agentId })),
+      apiFetch(apiUrl('/api/long/aggregate', { agent_id: agentId })),
+    ]);
+    if (!positions.length) { showContent('<div class="empty-wrap">⚡ 该时段暂无持仓数据</div>'); return; }
+    showContent(buildLongHTML(positions, agentId));
+    renderLongCharts(positions, agg);
+  } catch(e) {
+    showContent(`<div class="loading-wrap"><div style="color:var(--neg)">加载失败：${e.message}</div></div>`);
+  }
+}
+
+function buildLongHTML(positions, agentId) {
+  const closed = positions.filter(p => p.status === 1);
+  const open   = positions.filter(p => p.status === 0);
+  const wins   = closed.filter(p => (p.period_return||0) > 0);
+  const winRate = closed.length ? (wins.length/closed.length*100).toFixed(1) : '--';
+  const avgRet  = closed.length ? (closed.reduce((s,p)=>s+(p.period_return||0),0)/closed.length).toFixed(2) : null;
+  const avgDays = closed.length ? (closed.reduce((s,p)=>s+(p.trading_days||0),0)/closed.length).toFixed(1) : '--';
+
+  const meta = S.agents.long.find(a=>a.id===agentId);
+  return `
+  <div class="cards-row cards-4">
+    <div class="card accent">
+      <div class="card-label">总持仓数</div>
+      <div class="card-value">${positions.length}</div>
+      <div class="card-sub">${open.length} 持仓中 / ${closed.length} 已平仓</div>
+    </div>
+    <div class="card ${parseFloat(winRate)>=50?'pos':'neg'}">
+      <div class="card-label">胜率（已平仓）</div>
+      <div class="card-value ${parseFloat(winRate)>=50?'pos':'neg'}">${winRate}%</div>
+      <div class="card-sub">${wins.length} 盈利 / ${closed.length-wins.length} 亏损</div>
+    </div>
+    <div class="card ${parseFloat(avgRet)>=0?'pos':'neg'}">
+      <div class="card-label">均收益（已平仓）</div>
+      <div class="card-value ${parseFloat(avgRet)>=0?'pos':'neg'}">${fmt2(parseFloat(avgRet))}</div>
+      <div class="card-sub">含手续费约 -0.15%</div>
+    </div>
+    <div class="card purple">
+      <div class="card-label">平均持仓天数</div>
+      <div class="card-value">${avgDays}</div>
+      <div class="card-sub">交易日</div>
+    </div>
+  </div>
+
+  <div class="charts-grid charts-2">
+    <div class="chart-card">
+      <div class="chart-title">持仓收益 vs 持仓天数（散点）</div>
+      <div class="chart-body" id="l-scatter" style="height:260px"></div>
+    </div>
+    <div class="chart-card">
+      <div class="chart-title">平仓收益分布</div>
+      <div class="chart-body" id="l-hist" style="height:260px"></div>
+    </div>
+  </div>
+  <div class="charts-grid charts-2">
+    <div class="chart-card">
+      <div class="chart-title">风险收益图（最大浮盈 vs 最大浮亏）</div>
+      <div class="chart-body" id="l-risk" style="height:240px"></div>
+    </div>
+    <div class="chart-card">
+      <div class="chart-title">已平仓累计权益曲线（按平仓日排序）</div>
+      <div class="chart-body" id="l-equity" style="height:240px"></div>
+    </div>
+  </div>
+
+  <div class="table-card">
+    <div class="table-header">
+      <div class="title">持仓明细</div>
+      <div style="font-size:11px;color:var(--text3)">${meta?.desc||''}</div>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr>
+          <th>买入日</th><th>股票</th><th>买价</th><th>卖出日</th><th>卖价</th>
+          <th>收益</th><th>天数</th><th>最大浮盈</th><th>最大回撤</th><th>状态</th><th>详情</th>
+        </tr></thead>
+        <tbody>
+          ${positions.map(p => longRow(p)).join('')}
+        </tbody>
+      </table>
+    </div>
+  </div>`;
+}
+
+function longRow(p) {
+  const retCls = (p.period_return||0) >= 0 ? 'val-pos' : 'val-neg';
+  return `<tr>
+    <td>${p.buy_date}</td>
+    <td><span style="color:var(--text1)">${p.stock_name||p.ts_code}</span><br><span style="color:var(--text3);font-size:10px">${p.ts_code}</span></td>
+    <td>${fmtN(p.buy_price)}</td>
+    <td>${p.sell_date||'--'}</td>
+    <td>${fmtN(p.sell_price)}</td>
+    <td class="${retCls}">${p.status===1 ? fmt2(p.period_return) : '--'}</td>
+    <td>${p.trading_days != null ? p.trading_days+'天' : '--'}</td>
+    <td class="val-pos">${fmt2(p.max_floating_profit)}</td>
+    <td class="val-neg">${fmt2(p.max_drawdown)}</td>
+    <td>${p.status===0
+      ? '<span class="badge badge-open">持仓中</span>'
+      : `<span class="badge ${(p.period_return||0)>=0?'badge-pos':'badge-neg'}">${(p.period_return||0)>=0?'盈利':'亏损'}</span>`
+    }</td>
+    <td><button class="detail-btn" onclick="openPositionDetail(${p.id})">查看</button></td>
+  </tr>`;
+}
+
+function renderLongCharts(positions, agg) {
+  const closed = positions.filter(p => p.status === 1 && p.period_return != null);
+
+  // Scatter: return vs days
+  const scData = closed.map(p => [p.trading_days||0, p.period_return, p.stock_name||p.ts_code, p.buy_date]);
+  mkChart('l-scatter', {
+    tooltip: { trigger:'item', ...TOOLTIP_STYLE,
+      formatter: p => `${p.data[2]} (${p.data[3]})<br/>持仓: ${p.data[0]}天<br/>收益: ${fmt2(p.data[1])}` },
+    grid: { top:20, bottom:36, left:56, right:10 },
+    xAxis: { type:'value', name:'持仓天数', ...AXIS_STYLE, nameTextStyle:{color:'#475569',fontSize:10} },
+    yAxis: { type:'value', name:'收益%', ...AXIS_STYLE, nameTextStyle:{color:'#475569',fontSize:10} },
+    series: [{
+      type:'scatter', symbolSize: p => Math.max(5, Math.min(18, Math.abs(p[1])*1.5)),
+      data: scData,
+      itemStyle:{ color: p => retColor(p.data[1]), opacity:0.8 },
+    }],
+  }, 260);
+
+  // Histogram
+  if (closed.length) {
+    const rets = closed.map(p => p.period_return);
+    const min = Math.floor(Math.min(...rets) / 2) * 2;
+    const max = Math.ceil(Math.max(...rets) / 2) * 2;
+    const buckets = {};
+    for (let b = min; b <= max; b += 2) buckets[b] = 0;
+    rets.forEach(v => { const b = Math.floor(v/2)*2; if(b in buckets) buckets[b]++; });
+    const bKeys = Object.keys(buckets).map(Number).sort((a,b)=>a-b);
+    mkChart('l-hist', {
+      tooltip: { trigger:'axis', ...TOOLTIP_STYLE },
+      grid: { top:20, bottom:40, left:40, right:10 },
+      xAxis: { type:'category', data: bKeys.map(k=>k+'%'), ...AXIS_STYLE,
+        axisLabel:{...AXIS_STYLE.axisLabel, rotate:30, interval:1} },
+      yAxis: { type:'value', ...AXIS_STYLE },
+      series: [{ type:'bar', barMaxWidth:24,
+        data: bKeys.map(k=>({ value:buckets[k], itemStyle:{color:retColor(k)} })) }],
+    }, 260);
+  }
+
+  // Risk chart: max_floating_profit vs max_drawdown
+  const riskData = closed.map(p => [p.max_floating_profit||0, p.max_drawdown||0, p.period_return, p.stock_name||p.ts_code]);
+  mkChart('l-risk', {
+    tooltip: { trigger:'item', ...TOOLTIP_STYLE,
+      formatter: p => `${p.data[3]}<br/>最大浮盈: +${fmtN(p.data[0])}%<br/>最大回撤: ${fmtN(p.data[1])}%<br/>最终收益: ${fmt2(p.data[2])}` },
+    grid: { top:20, bottom:36, left:56, right:10 },
+    xAxis: { type:'value', name:'最大浮盈%', min:0, ...AXIS_STYLE, nameTextStyle:{color:'#475569',fontSize:10} },
+    yAxis: { type:'value', name:'最大回撤%', ...AXIS_STYLE, nameTextStyle:{color:'#475569',fontSize:10} },
+    series: [{
+      type:'scatter', symbolSize:7,
+      data: riskData,
+      itemStyle:{ color: p => retColor(p.data[2]), opacity:0.75 },
+    }],
+  }, 240);
+
+  // Equity curve (closed, sorted by sell_date)
+  const sorted = closed.filter(p=>p.sell_date).sort((a,b)=>a.sell_date>b.sell_date?1:-1);
+  let eq = 0;
+  const eqDates = [], eqVals = [];
+  sorted.forEach(p => {
+    eq += p.period_return;
+    eqDates.push(p.sell_date);
+    eqVals.push(parseFloat(eq.toFixed(2)));
+  });
+  if (eqVals.length) {
+    mkChart('l-equity', {
+      tooltip: { trigger:'axis', ...TOOLTIP_STYLE, formatter: p => `${p[0].axisValue}<br/>累计: ${p[0].value>=0?'+':''}${p[0].value}%` },
+      grid: { ...GRID },
+      xAxis: dateAxis(eqDates),
+      yAxis: { ...valueAxis('%'), axisLabel:{...AXIS_STYLE.axisLabel, formatter:v=>v+'%'} },
+      series: [{
+        type:'line', smooth:true, symbol:'none',
+        lineStyle:{ width:2, color:'#818cf8' },
+        areaStyle:{ color:{ type:'linear', x:0,y:0,x2:0,y2:1, colorStops:[
+          {offset:0, color:'rgba(129,140,248,.25)'}, {offset:1, color:'rgba(129,140,248,.02)'}
+        ]}},
+        itemStyle:{ color:'#818cf8' },
+        data: eqVals,
+        markLine:{ silent:true, data:[{yAxis:0}], lineStyle:{color:'#1a2744',type:'dashed'} },
+      }],
+    }, 240);
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════
+//  Position Detail Modal
+// ══════════════════════════════════════════════════════════════════
+async function openPositionDetail(id) {
+  const modal = document.getElementById('modal');
+  modal.style.display = 'flex';
+  document.getElementById('modal-title').textContent = '持仓详情';
+  document.getElementById('modal-body').innerHTML = '<div class="loading-wrap"><div class="spinner"></div></div>';
+
+  try {
+    const p = await apiFetch(`/api/long/position/${id}`);
+    const retCls = (p.period_return||0) >= 0 ? 'val-pos' : 'val-neg';
+
+    let dailyChartHtml = '';
+    if (p.daily_detail && p.daily_detail.length) {
+      dailyChartHtml = `<div class="chart-card" style="margin-top:14px">
+        <div class="chart-title">每日持仓净值走势</div>
+        <div id="modal-chart" style="height:180px"></div>
+      </div>`;
+    }
+
+    document.getElementById('modal-title').textContent = `${p.stock_name||p.ts_code} · ${p.buy_date} 买入`;
+    document.getElementById('modal-body').innerHTML = `
+      <div class="cards-row cards-3" style="margin-bottom:14px">
+        <div class="card pos"><div class="card-label">最大浮盈</div><div class="card-value pos" style="font-size:20px">${fmt2(p.max_floating_profit)}</div></div>
+        <div class="card ${retCls==='val-pos'?'pos':'neg'}"><div class="card-label">最终收益</div><div class="card-value ${retCls}" style="font-size:20px">${p.status===1?fmt2(p.period_return):'持仓中'}</div></div>
+        <div class="card neg"><div class="card-label">最大回撤</div><div class="card-value neg" style="font-size:20px">${fmt2(p.max_drawdown)}</div></div>
+      </div>
+      <table style="width:100%;font-size:12px;margin-bottom:12px">
+        <tr><td style="color:var(--text3);padding:4px 0">股票代码</td><td>${p.ts_code}</td>
+            <td style="color:var(--text3);padding:4px 8px">持仓天数</td><td>${p.trading_days??'--'} 天</td></tr>
+        <tr><td style="color:var(--text3);padding:4px 0">买入价</td><td>${fmtN(p.buy_price)}</td>
+            <td style="color:var(--text3);padding:4px 8px">卖出价</td><td>${fmtN(p.sell_price)||'--'}</td></tr>
+        <tr><td style="color:var(--text3);padding:4px 0">买入日</td><td>${p.buy_date}</td>
+            <td style="color:var(--text3);padding:4px 8px">卖出日</td><td>${p.sell_date||'持仓中'}</td></tr>
+        <tr><td style="color:var(--text3);padding:4px 0">上涨天数</td><td class="val-pos">${p.up_days??'--'} 天</td>
+            <td style="color:var(--text3);padding:4px 8px">下跌天数</td><td class="val-neg">${p.down_days??'--'} 天</td></tr>
+      </table>
+      ${dailyChartHtml}`;
+
+    if (p.daily_detail && p.daily_detail.length) {
+      setTimeout(() => {
+        const el = document.getElementById('modal-chart');
+        if (!el) return;
+        el.style.height = '180px';
+        const mc = echarts.init(el, 'dark');
+        const dates = p.daily_detail.map(d => d.date);
+        const floats = p.daily_detail.map(d => parseFloat((d.float_pnl||0).toFixed(2)));
+        mc.setOption({
+          backgroundColor:'transparent',
+          tooltip:{ trigger:'axis', ...TOOLTIP_STYLE,
+            formatter: p => `${p[0].axisValue}<br/>浮动盈亏: ${p[0].value>=0?'+':''}${p[0].value}%` },
+          grid:{ top:20, bottom:30, left:54, right:10 },
+          xAxis:{ type:'category', data:dates, ...AXIS_STYLE,
+            axisLabel:{...AXIS_STYLE.axisLabel, formatter:v=>v.slice(5)} },
+          yAxis:{ type:'value', ...AXIS_STYLE, axisLabel:{...AXIS_STYLE.axisLabel, formatter:v=>v+'%'} },
+          series:[{
+            type:'line', smooth:true, symbol:'circle', symbolSize:4,
+            lineStyle:{color:'#f472b6',width:2},
+            areaStyle:{color:{type:'linear',x:0,y:0,x2:0,y2:1,colorStops:[
+              {offset:0,color:'rgba(244,114,182,.2)'},{offset:1,color:'rgba(244,114,182,.02)'}
+            ]}},
+            itemStyle:{color: p => retColor(p.value)},
+            data: floats,
+            markLine:{silent:true, data:[{yAxis:0}], lineStyle:{color:'#1a2744',type:'dashed'}},
+          }],
+        });
+      }, 50);
+    }
+  } catch(e) {
+    document.getElementById('modal-body').innerHTML =
+      `<div class="loading-wrap"><div style="color:var(--neg)">加载失败：${e.message}</div></div>`;
+  }
+}
+
+function closeModal(e) {
+  if (!e || e.target === document.getElementById('modal')) {
+    document.getElementById('modal').style.display = 'none';
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════
+//  Init
+// ══════════════════════════════════════════════════════════════════
+boot();
+</script>
+</body>
+</html>

@@ -17,7 +17,7 @@ def call_doubao_search_api(prompt: str) -> Dict:
     :return: 结构化响应 {"raw_text": "", "token_usage": {}, "error": None}
     """
     API_KEY = os.getenv('DOUBAO_API_KEY')
-    API_URL = os.getenv('API_URL')
+    API_URL = os.getenv('DOUBAO_API_URL')
     MODEL_ID = "bot-20260224232147-dfcct"
 
     headers = {
@@ -290,4 +290,4 @@ def update_all_stock_concept_tags(
 
 if __name__ == "__main__":
     #默认update= True，只做增量更新没有标签的股票。
-    update_all_stock_concept_tags(batch_size=20,update= False, ts_code=['002195.sz'])
+    update_all_stock_concept_tags(batch_size=20)

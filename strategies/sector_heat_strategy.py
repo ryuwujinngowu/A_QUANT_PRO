@@ -87,8 +87,8 @@ class SectorHeatStrategy(BaseStrategy):
 
         # 持仓跟踪配置：D+1 短线策略 -5% 固定止损 + 8% 止盈
         self._tracker_config = TrackerConfig(
-            stop_loss_pct=-0.05,         # -5% 止损（短线策略止损线较紧）
-            take_profit_pct=0.08,        # +8% 止盈
+            stop_loss_pct=None,         # -5% 止损（短线策略止损线较紧）
+            take_profit_pct=None,        # +8% 止盈
             trailing_stop_pct=None,      # 短线不启用移动止损
             max_hold_days=None,          # 由策略自身的 D+1 逻辑控制
         )

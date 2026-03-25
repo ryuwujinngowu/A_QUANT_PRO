@@ -40,14 +40,14 @@ from utils.xgb_compat import safe_predict_proba
 
 # 与 agent 保持一致
 _BUY_TOP_K = 6
-_MIN_PROB = 0.40
+_MIN_PROB = 0.60
 _MIN_AMOUNT = 10_000
 _LOAD_MINUTE = True
 _MODEL_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     "model", "sector_heat_xgb_v5.2_auc_first.pkl",
 )
-_DIP_PCT = 0.03  # 低吸触发阈值（跌幅 3%）
+_DIP_PCT = 0.04  # 低吸触发阈值（跌幅 3%）
 
 
 class ModelDipStrategy(BaseStrategy):
@@ -76,8 +76,8 @@ class ModelDipStrategy(BaseStrategy):
 
         # 持仓跟踪配置：短线 -5% 止损 + 8% 止盈
         self._tracker_config = TrackerConfig(
-            stop_loss_pct=-0.5,   #故意设高，不做动态止损
-            take_profit_pct=10,
+            stop_loss_pct=-0.03,
+            take_profit_pct=None,
             trailing_stop_pct=None,
             max_hold_days=None,
         )
