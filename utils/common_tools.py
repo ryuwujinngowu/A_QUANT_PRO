@@ -81,7 +81,7 @@ def sort_by_recent_gain(df: pd.DataFrame, trade_date: str, day_count: int = 20) 
     # 核心：仅拉2天数据，仅查询目标股票
     # ========================
     target_codes = df["ts_code"].unique().tolist()
-    logger.info(
+    logger.debug(
         f"【近{day_count}日涨幅】仅取2天数据：前第{required_days}天[{day_ago_str}] + 今日[{today_str}]，目标股票{len(target_codes)}只")
 
     # 第1次拉：前第N+1天的收盘价（仅查询目标股票）
@@ -104,7 +104,7 @@ def sort_by_recent_gain(df: pd.DataFrame, trade_date: str, day_count: int = 20) 
     df[gain_col] = (df["today_close"] / df[f"ago_{required_days}d_close"] - 1) * 100
     df = df.sort_values(gain_col, ascending=False).reset_index(drop=True)
 
-    logger.info(f"【近{day_count}日涨幅】排序完成：有效股票{len(df)}只，最高涨幅{df[gain_col].iloc[0]:.2f}%")
+    logger.debug(f"【近{day_count}日涨幅】排序完成：有效股票{len(df)}只，最高涨幅{df[gain_col].iloc[0]:.2f}%")
     return df
 
 
@@ -178,7 +178,7 @@ def filter_st_stocks(ts_code_list: List[str], trade_date: str) -> List[str]:
         normal_codes = [ts_code for ts_code in ts_code_list if ts_code not in st_code_set]
         # 5. 关键日志：明确过滤效果
         filter_count = len(ts_code_list) - len(normal_codes)
-        logger.info(
+        logger.debug(
             f"[filter_st_stocks] 交易日{trade_date} ST过滤完成 | "
             f"原始股票数：{len(ts_code_list)} | 剔除ST股数：{filter_count} | 剩余正常股票数：{len(normal_codes)}"
         )

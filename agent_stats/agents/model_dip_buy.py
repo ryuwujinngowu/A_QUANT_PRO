@@ -1,16 +1,16 @@
 """
 模型信号恐慌低吸买入（ModelDipBuyAgent）
 =========================================
-策略逻辑（已对齐引擎：D-1日选股，D日买入）
+策略逻辑（时序：D-1 日选股，D 日买入）
 --------
 跟踪 SectorHeatStrategy 模型输出的买入信号，D 日恐慌下跌时买入：
 
-1. D-1 日（trade_date）：调用模型完整选股流程，获取信号股列表
-2. D 日（trade_date+1）09:30-10:30 监测分钟线：
+1. D-1 日（trade_date 前一个交易日）：调用模型完整选股流程，获取信号股列表
+2. D 日（trade_date）09:30-10:30 监测分钟线：
    - 若任意 bar 的 low ≤ D 日开盘价 × (1 - DIP_PCT)（跌破开盘 3%）
    → 触发低吸信号，以 open × (1 - DIP_PCT) 为模拟买入价
 
-buy_price = D 日开盘价 × (1 - DIP_PCT)（恐慌坑位价）
+buy_price = D 日开盘价 × (1 - DIP_PCT)（恐慌坑位价，无未来函数）
 
 设计意图
 --------
@@ -18,6 +18,7 @@ buy_price = D 日开盘价 × (1 - DIP_PCT)（恐慌坑位价）
   - hot_sector_dip_buy：候选池来自板块 5 日涨幅排名
   - model_dip_buy：候选池来自 XGBoost 模型信号（sector_heat_strategy）
 用于衡量模型信号股在次日出现恐慌回调时低吸的胜率和赔率。
+与其他 agent 时序对齐：D-1 日生成候选池，D 日完成买入。
 """
 from typing import List, Dict
 
@@ -41,7 +42,7 @@ class ModelDipBuyAgent(BaseAgent):
     agent_desc = (
         "跟踪 SectorHeatStrategy 模型信号，D-1 日生成信号，D 日 09:30-10:30 内"
         "若价格触及开盘价 -3% 则模拟低吸买入。"
-        "参考 hot_sector_dip_buy 逻辑，候选池改为模型信号。"
+        "参考 hot_sector_dip_buy 逻辑，候选池改为模型信号，时序与其他 agent 对齐。"
     )
 
     def get_signal_stock_pool(
@@ -50,38 +51,41 @@ class ModelDipBuyAgent(BaseAgent):
         daily_data: pd.DataFrame,
         context: Dict,
     ) -> List[Dict]:
-        # ── 日期格式 ─────────────────────────────────────────────────────────
-        # trade_date = D-1 日（信号生成日）
+        # ── 日期格式（trade_date = D 日，即买入日）──────────────────────────
         if len(trade_date) == 8 and trade_date.isdigit():
             trade_date_dash = f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]}"
         else:
             trade_date_dash = trade_date
+        trade_date_8 = trade_date_dash.replace("-", "")
 
-        # ── 获取 D-1 日模型信号 ─────────────────────────────────────────────
-        signals = get_model_signal_stocks(trade_date_dash, daily_data, caller_agent_id=self.agent_id)
+        # ── 获取 D-1 日（信号生成日）────────────────────────────────────────
+        trade_dates = context.get("trade_dates", [])
+        if trade_date_dash not in trade_dates:
+            return []
+        idx = trade_dates.index(trade_date_dash)
+        if idx == 0:
+            logger.info(f"[{self.agent_id}][{trade_date}] 无 D-1 交易日，跳过")
+            return []
+        prev_date = trade_dates[idx - 1]  # D-1 日（YYYY-MM-DD）
+
+        # ── 获取 D-1 日日线并生成模型信号 ───────────────────────────────────
+        prev_daily = get_daily_kline_data(prev_date)
+        if prev_daily is None or prev_daily.empty:
+            logger.warning(f"[{self.agent_id}][{trade_date}] D-1({prev_date}) 日线为空，跳过")
+            return []
+
+        signals = get_model_signal_stocks(prev_date, prev_daily, caller_agent_id=self.agent_id)
         if not signals:
             return []
 
-        # ── 获取 D 日（D-1 的下一个交易日）────────────────────────────────────
-        trade_dates = context.get("trade_dates", [])
-        next_date = _get_next_trade_date(trade_dates, trade_date_dash)
-        if not next_date:
-            logger.warning(f"[{self.agent_id}][{trade_date}] 无法获取 D 日（D-1+1）交易日，跳过")
-            return []
-        next_date_8 = next_date.replace("-", "")
-
-        # ── 获取 D 日日线（取开盘价 / 前收价）────────────────────────────────
+        # ── 从 D 日日线（daily_data）取开盘价和前收价 ────────────────────────
         ts_codes = [s["ts_code"] for s in signals]
-        next_daily = get_daily_kline_data(next_date, ts_code_list=ts_codes)
-        if next_daily.empty:
-            logger.warning(f"[{self.agent_id}][{trade_date}] D 日({next_date}) 日线数据为空")
-            return []
+        name_map = {s["ts_code"]: s["stock_name"] for s in signals}
 
-        open_map      = {}
-        pre_close_map = {}
-        name_map      = {s["ts_code"]: s["stock_name"] for s in signals}
-
-        for _, row in next_daily.iterrows():
+        open_map:      Dict[str, float] = {}
+        pre_close_map: Dict[str, float] = {}
+        d_sub = daily_data[daily_data["ts_code"].isin(ts_codes)]
+        for _, row in d_sub.iterrows():
             ts = row["ts_code"]
             open_p = float(row.get("open", 0) or 0)
             if open_p <= 0:
@@ -89,33 +93,25 @@ class ModelDipBuyAgent(BaseAgent):
             open_map[ts] = open_p
             pre_close_map[ts] = float(row.get("pre_close", 0) or 0)
 
-        # ── 过滤一字板（D 日开盘即涨停封死，无法低吸）────────────────────────
+        # ── 过滤一字板（D 日 open ≈ 涨停价，无法低吸，仅用已知数据判断）────
         filtered_ts = []
         for ts in ts_codes:
             if ts not in open_map:
                 continue
-            open_p = open_map[ts]
+            open_p    = open_map[ts]
             pre_close = pre_close_map.get(ts, 0)
             if pre_close > 0:
                 limit_up = calc_limit_up_price(ts, pre_close)
-                low_p = 0
-                row_data = next_daily[next_daily["ts_code"] == ts]
-                if not row_data.empty:
-                    low_p = float(row_data.iloc[0].get("low", 0) or 0)
-                if (
-                    limit_up > 0
-                    and abs(open_p - limit_up) < 0.015
-                    and abs(low_p - limit_up) < 0.015
-                ):
-                    logger.debug(f"[{self.agent_id}][{trade_date}][{ts}] D 日一字板，跳过")
+                if limit_up > 0 and abs(open_p - limit_up) < 0.015:
+                    logger.debug(f"[{self.agent_id}][{trade_date}][{ts}] D 日开盘即涨停，跳过")
                     continue
             filtered_ts.append(ts)
 
         if not filtered_ts:
-            logger.info(f"[{self.agent_id}][{trade_date}] D 日一字板过滤后为空")
+            logger.info(f"[{self.agent_id}][{trade_date}] 一字板过滤后为空")
             return []
 
-        # ── 逐股检测 D 日恐慌低吸信号 ────────────────────────────────────────
+        # ── 逐股检测 D 日（trade_date）恐慌低吸信号 ─────────────────────────
         result = []
         for ts in filtered_ts:
             open_price = open_map[ts]
@@ -123,7 +119,7 @@ class ModelDipBuyAgent(BaseAgent):
 
             # 拉取 D 日分钟线
             try:
-                min_df = data_cleaner.get_kline_min_by_stock_date(ts, next_date_8)
+                min_df = data_cleaner.get_kline_min_by_stock_date(ts, trade_date_8)
             except TushareRateLimitAbort:
                 raise
             except Exception as e:
@@ -168,19 +164,8 @@ class ModelDipBuyAgent(BaseAgent):
                 )
 
         logger.info(
-            f"[{self.agent_id}][{trade_date}] D日({next_date}) 恐慌低吸 {len(result)} 只 "
-            f"（信号={len(signals)} 只，候选={len(filtered_ts)} 只）: "
+            f"[{self.agent_id}][{trade_date}] D日恐慌低吸 {len(result)} 只 "
+            f"（D-1信号={len(signals)} 只，候选={len(filtered_ts)} 只）: "
             + " | ".join(f"{s['ts_code']}(dip={s['buy_price']:.2f})" for s in result)
         )
         return result
-
-
-def _get_next_trade_date(trade_dates: List[str], trade_date: str) -> str:
-    """从交易日列表中找到 trade_date 的下一个交易日"""
-    try:
-        idx = trade_dates.index(trade_date)
-        if idx + 1 < len(trade_dates):
-            return trade_dates[idx + 1]
-    except ValueError:
-        pass
-    return ""

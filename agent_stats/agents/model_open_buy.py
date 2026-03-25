@@ -1,20 +1,19 @@
 """
 模型信号平铺开盘买入（ModelOpenBuyAgent）
 ==========================================
-策略逻辑
+策略逻辑（时序：D-1 日选股，D 日买入）
 --------
 跟踪 SectorHeatStrategy 模型输出的买入信号：
 
-1. D 日：调用模型完整选股流程，获取信号股列表
-2. D+1 日：以开盘价平铺买入所有信号股（模型输出几个就平铺几个）
+1. D-1 日（trade_date 前一个交易日）：调用模型完整选股流程，获取信号股列表
+2. D 日（trade_date）：以开盘价平铺买入所有信号股
 
-buy_price = D+1 开盘价，引擎 T+1 跟踪计算的 close_return 即为
-    (D+1 收盘 - D+1 开盘) / D+1 开盘 = D+1 日内收益率
+buy_price = D 日开盘价（已知数据，无未来函数）
 
 设计意图
 --------
-最简单的信号跟踪方式：次日开盘无条件买入。
-用于衡量模型信号在"次日开盘买"场景下的盈亏表现。
+最简单的信号跟踪方式：用 D-1 日模型信号，次日（D 日）开盘无条件买入。
+与 high_position_stock、mid_position_stock 等 agent 时序对齐。
 """
 from typing import List, Dict
 
@@ -30,8 +29,8 @@ class ModelOpenBuyAgent(BaseAgent):
     agent_id   = "model_open_buy"
     agent_name = "模型信号平铺开盘买入"
     agent_desc = (
-        "跟踪 SectorHeatStrategy 模型信号，D+1 日以开盘价平铺买入所有信号股。"
-        "buy_price=D+1 开盘价，close_return 即日内收益率。"
+        "跟踪 SectorHeatStrategy 模型信号，D-1 日生成信号，D 日以开盘价平铺买入所有信号股。"
+        "buy_price=D 日开盘价，无未来函数，与其他 agent 时序对齐。"
     )
 
     def get_signal_stock_pool(
@@ -40,36 +39,44 @@ class ModelOpenBuyAgent(BaseAgent):
         daily_data: pd.DataFrame,
         context: Dict,
     ) -> List[Dict]:
-        # ── 日期格式 ─────────────────────────────────────────────────────────
+        # ── 日期格式（trade_date = D 日）────────────────────────────────────
         if len(trade_date) == 8 and trade_date.isdigit():
             trade_date_dash = f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]}"
         else:
             trade_date_dash = trade_date
 
-        # ── 获取 D 日模型信号 ────────────────────────────────────────────────
-        signals = get_model_signal_stocks(trade_date_dash, daily_data, caller_agent_id=self.agent_id)
-        if not signals:
-            logger.info(f"[{self.agent_id}][{trade_date}] 模型无信号，跳过")
-            return []
-
-        # ── 获取 D+1 交易日 ──────────────────────────────────────────────────
+        # ── 获取 D-1 日（信号生成日）────────────────────────────────────────
         trade_dates = context.get("trade_dates", [])
-        next_date = _get_next_trade_date(trade_dates, trade_date_dash)
-        if not next_date:
-            logger.warning(f"[{self.agent_id}][{trade_date}] 无法获取 D+1 交易日，跳过")
+        if trade_date_dash not in trade_dates:
+            return []
+        idx = trade_dates.index(trade_date_dash)
+        if idx == 0:
+            logger.info(f"[{self.agent_id}][{trade_date}] 无 D-1 交易日，跳过")
+            return []
+        prev_date = trade_dates[idx - 1]  # D-1 日（YYYY-MM-DD）
+
+        # ── 获取 D-1 日日线 ──────────────────────────────────────────────────
+        prev_daily = get_daily_kline_data(prev_date)
+        if prev_daily is None or prev_daily.empty:
+            logger.warning(f"[{self.agent_id}][{trade_date}] D-1({prev_date}) 日线为空，跳过")
             return []
 
-        # ── 获取 D+1 日线（取开盘价）─────────────────────────────────────────
+        # ── 用 D-1 日数据获取模型信号（无未来函数）──────────────────────────
+        signals = get_model_signal_stocks(prev_date, prev_daily, caller_agent_id=self.agent_id)
+        if not signals:
+            logger.info(f"[{self.agent_id}][{trade_date}] D-1({prev_date}) 模型无信号，跳过")
+            return []
+
+        # ── 买入价 = D 日开盘价（daily_data 即 D 日数据）────────────────────
         ts_codes = [s["ts_code"] for s in signals]
-        next_daily = get_daily_kline_data(next_date, ts_code_list=ts_codes)
-        if next_daily.empty:
-            logger.warning(f"[{self.agent_id}][{trade_date}] D+1({next_date}) 日线数据为空，跳过")
-            return []
-
-        open_map = {row["ts_code"]: float(row["open"]) for _, row in next_daily.iterrows()}
         name_map = {s["ts_code"]: s["stock_name"] for s in signals}
+        d_sub = daily_data[daily_data["ts_code"].isin(ts_codes)]
+        open_map: Dict[str, float] = {}
+        for _, row in d_sub.iterrows():
+            open_p = float(row.get("open", 0) or 0)
+            if open_p > 0:
+                open_map[row["ts_code"]] = open_p
 
-        # ── 构建结果：buy_price = D+1 开盘价 ────────────────────────────────
         result = []
         for sig in signals:
             ts = sig["ts_code"]
@@ -83,18 +90,7 @@ class ModelOpenBuyAgent(BaseAgent):
             })
 
         logger.info(
-            f"[{self.agent_id}][{trade_date}] D+1({next_date}) 开盘买入 {len(result)} 只: "
+            f"[{self.agent_id}][{trade_date}] D-1({prev_date})信号→D({trade_date})开盘买 {len(result)} 只: "
             + " | ".join(f"{s['ts_code']}(open={s['buy_price']:.2f})" for s in result)
         )
         return result
-
-
-def _get_next_trade_date(trade_dates: List[str], trade_date: str) -> str:
-    """从交易日列表中找到 trade_date 的下一个交易日"""
-    try:
-        idx = trade_dates.index(trade_date)
-        if idx + 1 < len(trade_dates):
-            return trade_dates[idx + 1]
-    except ValueError:
-        pass
-    return ""

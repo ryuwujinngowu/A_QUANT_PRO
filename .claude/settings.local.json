@@ -44,7 +44,8 @@
       "Bash(echo \"EXIT:$?\")",
       "Bash(xargs grep:*)",
       "Bash(xxd model/sector_heat_xgb_model.pkl)",
-      "Bash(python -c \"print\\(''hello''\\)\")"
+      "Bash(python -c \"print\\(''hello''\\)\")",
+      "Bash(find /Users/liusonghao/PycharmProjects/A_QUANT_PRO/A_QUANT_PRO/learnEngine -type f \\\\\\(-name *.json -o -name *.csv -o -name *.txt \\\\\\))"
     ]
   },
   "spinnerTipsEnabled": true,

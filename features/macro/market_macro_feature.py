@@ -185,7 +185,7 @@ class MarketMacroFeature(BaseFeature):
             row["market_consec_5d_trend"] = 1.0
 
         feature_df = pd.DataFrame([row])
-        logger.info(
+        logger.debug(
             f"[市场宏观] {trade_date} 涨停:{row['market_limit_up_count']} "
             f"跌停:{row['market_limit_down_count']} "
             f"最高板:{row['market_max_consec_num']} "

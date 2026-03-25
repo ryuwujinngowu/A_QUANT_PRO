@@ -33,9 +33,9 @@ import pandas as pd
 from agent_stats.agent_base import BaseAgent
 from agent_stats.agents._position_stock_helpers import (
     BASE_PCT, HIGH_PCT, MIN_HIGH, LOOKBACK_DAYS,
-    build_gain_list, build_pre_close_map, is_yizi_limit_up, calc_buy_price,
+    build_gain_list, is_yizi_limit_up,
 )
-from utils.common_tools import calc_limit_up_price, get_kline_day_range, get_qfq_kline_range
+from utils.common_tools import calc_limit_up_price, get_daily_kline_data, get_kline_day_range, get_qfq_kline_range
 from utils.log_utils import logger
 
 # ── 中位股专用参数 ───────────────────────────────────────────────────────────
@@ -91,14 +91,31 @@ class MidPositionStockAgent(BaseAgent):
             logger.warning(f"[{self.agent_id}][{trade_date}] trade_date 不在 trade_dates 中")
             return []
         idx = trade_dates.index(trade_date)
-        if idx < LOOKBACK_DAYS:
-            logger.info(f"[{self.agent_id}][{trade_date}] 历史数据不足 {LOOKBACK_DAYS} 日，跳过")
+        # 需要 D-1 日，再加上 D-1 之前的 LOOKBACK_DAYS 历史
+        if idx < LOOKBACK_DAYS + 1:
+            logger.info(f"[{self.agent_id}][{trade_date}] 历史数据不足，跳过")
             return []
 
-        lookback_dates = trade_dates[idx - LOOKBACK_DAYS: idx + 1]
+        # ── 用 D-1 日数据选股（无未来函数）─────────────────────────────────
+        prev_date = trade_dates[idx - 1]  # D-1 日
+        prev_daily = get_daily_kline_data(prev_date)
+        if prev_daily is None or prev_daily.empty:
+            logger.warning(f"[{self.agent_id}][{trade_date}] D-1({prev_date}) 日线为空，跳过")
+            return []
 
-        pre_close_map = build_pre_close_map(daily_data, context)
-        gain_list, _ = build_gain_list(daily_data, st_set, trade_dates, trade_date)
+        # D-1 日的前收价（= D-2 日收盘，来自 D-1 的 pre_close 列）
+        prev_pre_close_map: Dict[str, float] = {}
+        if "pre_close" in prev_daily.columns:
+            for _, row in prev_daily.iterrows():
+                v = float(row.get("pre_close", 0) or 0)
+                if v > 0:
+                    prev_pre_close_map[row["ts_code"]] = v
+
+        # lookback_dates 基于 D-1（含 D-1，不含 D）
+        prev_idx = idx - 1
+        lookback_dates = trade_dates[prev_idx - LOOKBACK_DAYS: prev_idx + 1]
+
+        gain_list, _ = build_gain_list(prev_daily, st_set, trade_dates, prev_date)
 
         if not gain_list:
             logger.info(f"[{self.agent_id}][{trade_date}] 无有效股票可排序")
@@ -122,7 +139,7 @@ class MidPositionStockAgent(BaseAgent):
             logger.info(f"[{self.agent_id}][{trade_date}] 中位股候选池为空")
             return []
 
-        # 区间爆发过滤（动态门槛）
+        # 区间爆发过滤（动态门槛，基于 D-1 回看窗口，无未来函数）
         mid_date_idx  = len(lookback_dates) // 2
         key_dates     = [lookback_dates[0], lookback_dates[mid_date_idx], lookback_dates[-1]]
         key_dates_fmt = [d.replace("-", "") for d in key_dates]
@@ -154,16 +171,24 @@ class MidPositionStockAgent(BaseAgent):
             )
             return []
 
-        # 剔除一字板无开板 + 确定买入价
-        result = []
-        for ts_code, name, gain_20d, row in burst_passed:
-            pre_close = pre_close_map.get(ts_code, 0.0)
-            limit_up  = calc_limit_up_price(ts_code, pre_close) if pre_close > 0 else 0.0
+        # D 日 open map（买入价来源，无未来函数）
+        d_open_map: Dict[str, float] = {
+            row["ts_code"]: float(row.get("open", 0) or 0)
+            for _, row in daily_data.iterrows()
+        }
 
-            if is_yizi_limit_up(row, limit_up):
+        # 剔除 D-1 一字板无开板 + 确定 D 日买入价
+        result = []
+        for ts_code, name, gain_20d, prev_row in burst_passed:
+            pre_close = prev_pre_close_map.get(ts_code, 0.0)  # D-2 收盘 = D-1 前收
+            limit_up_d1 = calc_limit_up_price(ts_code, pre_close) if pre_close > 0 else 0.0
+
+            # 若 D-1 一字板无开板，今日可能继续封板，跳过
+            if is_yizi_limit_up(prev_row, limit_up_d1):
                 continue
 
-            buy_price = calc_buy_price(row, pre_close)
+            # 买入价 = D 日开盘价（已知数据）
+            buy_price = d_open_map.get(ts_code, 0.0)
             if buy_price <= 0:
                 continue
 
@@ -175,7 +200,7 @@ class MidPositionStockAgent(BaseAgent):
 
         logger.info(
             f"[{self.agent_id}][{trade_date}] 命中 {len(result)} 只"
-            f"（有效股={len(gain_list)}，基础池={base_n}，中位候选={len(mid_pool)}，"
+            f"（D-1有效股={len(gain_list)}，基础池={base_n}，中位候选={len(mid_pool)}，"
             f"爆发门槛={burst_threshold:.1%}，爆发通过={len(burst_passed)}，"
             f"剔除一字板后={len(result)}）"
         )

@@ -30,9 +30,9 @@ import pandas as pd
 from agent_stats.agent_base import BaseAgent
 from agent_stats.agents._position_stock_helpers import (
     BASE_PCT, HIGH_PCT, MIN_HIGH, LOOKBACK_DAYS,
-    build_gain_list, build_pre_close_map, is_yizi_limit_up, calc_buy_price,
+    build_gain_list, is_yizi_limit_up,
 )
-from utils.common_tools import calc_limit_up_price
+from utils.common_tools import calc_limit_up_price, get_daily_kline_data
 from utils.log_utils import logger
 
 
@@ -59,12 +59,27 @@ class HighPositionStockAgent(BaseAgent):
             logger.warning(f"[{self.agent_id}][{trade_date}] trade_date 不在 trade_dates 中")
             return []
         idx = trade_dates.index(trade_date)
-        if idx < LOOKBACK_DAYS:
-            logger.info(f"[{self.agent_id}][{trade_date}] 历史数据不足 {LOOKBACK_DAYS} 日，跳过")
+        # 需要 D-1 日，再加上 D-1 之前的 LOOKBACK_DAYS 历史
+        if idx < LOOKBACK_DAYS + 1:
+            logger.info(f"[{self.agent_id}][{trade_date}] 历史数据不足，跳过")
             return []
 
-        pre_close_map = build_pre_close_map(daily_data, context)
-        gain_list, _ = build_gain_list(daily_data, st_set, trade_dates, trade_date)
+        # ── 用 D-1 日数据选股（无未来函数）─────────────────────────────────
+        prev_date = trade_dates[idx - 1]  # D-1 日
+        prev_daily = get_daily_kline_data(prev_date)
+        if prev_daily is None or prev_daily.empty:
+            logger.warning(f"[{self.agent_id}][{trade_date}] D-1({prev_date}) 日线为空，跳过")
+            return []
+
+        # D-1 日的前收价（= D-2 日收盘，来自 D-1 的 pre_close 列）
+        prev_pre_close_map: Dict[str, float] = {}
+        if "pre_close" in prev_daily.columns:
+            for _, row in prev_daily.iterrows():
+                v = float(row.get("pre_close", 0) or 0)
+                if v > 0:
+                    prev_pre_close_map[row["ts_code"]] = v
+
+        gain_list, _ = build_gain_list(prev_daily, st_set, trade_dates, prev_date)
 
         if not gain_list:
             logger.info(f"[{self.agent_id}][{trade_date}] 无有效股票可排序")
@@ -78,16 +93,24 @@ class HighPositionStockAgent(BaseAgent):
         high_n = max(MIN_HIGH, int(len(base_pool) * HIGH_PCT))
         high_pool = base_pool[:high_n]
 
-        # 剔除一字板无开板 + 确定买入价
-        result = []
-        for ts_code, name, gain_20d, row in high_pool:
-            pre_close = pre_close_map.get(ts_code, 0.0)
-            limit_up  = calc_limit_up_price(ts_code, pre_close) if pre_close > 0 else 0.0
+        # D 日 open map（买入价来源，无未来函数）
+        d_open_map: Dict[str, float] = {
+            row["ts_code"]: float(row.get("open", 0) or 0)
+            for _, row in daily_data.iterrows()
+        }
 
-            if is_yizi_limit_up(row, limit_up):
+        # 剔除 D-1 一字板无开板（D-1 数据已知，无未来函数）+ 确定 D 日买入价
+        result = []
+        for ts_code, name, gain_20d, prev_row in high_pool:
+            pre_close = prev_pre_close_map.get(ts_code, 0.0)  # D-2 收盘 = D-1 前收
+            limit_up_d1 = calc_limit_up_price(ts_code, pre_close) if pre_close > 0 else 0.0
+
+            # 若 D-1 一字板无开板，今日可能继续封板，跳过
+            if is_yizi_limit_up(prev_row, limit_up_d1):
                 continue
 
-            buy_price = calc_buy_price(row, pre_close)
+            # 买入价 = D 日开盘价（已知数据）
+            buy_price = d_open_map.get(ts_code, 0.0)
             if buy_price <= 0:
                 continue
 
@@ -99,8 +122,8 @@ class HighPositionStockAgent(BaseAgent):
 
         logger.info(
             f"[{self.agent_id}][{trade_date}] 命中 {len(result)} 只"
-            f"（有效股={len(gain_list)}，基础池={base_n}，高位={high_n}，"
+            f"（D-1有效股={len(gain_list)}，基础池={base_n}，高位={high_n}，"
             f"剔除一字板后={len(result)}）"
-            f" | 高位股最大20日涨幅 {base_pool[0][2]:.1%}"
+            f" | D-1高位股最大20日涨幅 {base_pool[0][2]:.1%}"
         )
         return result

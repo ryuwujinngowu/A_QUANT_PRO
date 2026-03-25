@@ -48,10 +48,11 @@ import pandas as pd
 from agent_stats.long_agent_base import BaseLongAgent
 from agent_stats.agents._position_stock_helpers import (
     BASE_PCT, HIGH_PCT, MIN_HIGH, LOOKBACK_DAYS,
-    build_pre_close_map, calc_buy_price,
+    build_pre_close_map,
 )
 from features.ma_indicator import technical_features
 from utils.common_tools import (
+    calc_limit_up_price,
     get_daily_kline_data,
     get_kline_day_range,
     get_limit_list_ths,
@@ -425,7 +426,9 @@ class LongHighLowSwitchAgent(BaseLongAgent):
             logger.info(f"[{self.agent_id}][{trade_date}] 过滤后无候选股票")
             return []
 
-        # ── Step 7：买入价 ───────────────────────────────────────────────────
+        # ── Step 7：买入价（仅用 D 日已知数据：open 和 pre_close）────────────
+        # 不使用 D 日 close/high（只有 EOD 才知道），避免未来函数
+        # 判断逻辑：D 日 open ≈ 涨停价 → 排队买入（涨停价）；否则开盘价买入
         pre_close_map = build_pre_close_map(daily_data, context)
         daily_map: Dict[str, pd.Series] = {
             row["ts_code"]: row for _, row in daily_data.iterrows()
@@ -447,7 +450,17 @@ class LongHighLowSwitchAgent(BaseLongAgent):
             if pre_close <= 0:
                 pre_close = float(today_kline.get("pre_close", 0) or 0)
 
-            buy_price = calc_buy_price(today_kline, pre_close)
+            open_p = float(today_kline.get("open", 0) or 0)
+            if open_p <= 0:
+                continue
+
+            # D 日 open ≈ 涨停价 → 涨停价排队买入；否则开盘价买入
+            limit_up = calc_limit_up_price(ts_code, pre_close) if pre_close > 0 else 0.0
+            if limit_up > 0 and abs(open_p - limit_up) < 0.015:
+                buy_price = limit_up
+            else:
+                buy_price = open_p
+
             if buy_price <= 0:
                 continue
 

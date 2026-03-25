@@ -139,7 +139,7 @@ class FeatureDataBundle:
                 self.qfq_daily_grouped = (
                     all_df.groupby(["ts_code", "trade_date"]).first().to_dict(orient="index")
                 )
-            logger.info(
+            logger.debug(
                 f"[DataBundle] 前复权日线加载完成 | 记录数:{len(self.qfq_daily_grouped)}"
             )
         except Exception as e:
@@ -266,7 +266,7 @@ class FeatureDataBundle:
             self.macro_cache["limit_up_counts_5d"] = limit_up_counts_5d
             self.macro_cache["consec_max_5d"]      = consec_max_5d
 
-            logger.info(
+            logger.debug(
                 f"[DataBundle] 宏观数据加载完成 | "
                 f"涨停:{len(self.macro_cache['limit_up_df'])} "
                 f"跌停:{len(self.macro_cache['limit_down_df'])} "
