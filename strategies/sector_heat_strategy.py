@@ -64,7 +64,7 @@ class SectorHeatStrategy(BaseStrategy):
         self.strategy_params = {
             "buy_top_k":   6,        # 每日最多买入 N 只
             "sell_type":   "close",   # D+1 卖出类型：open=次日开盘，close=次日收盘
-            "min_prob":    0.6,      # 最低买入概率阈值（0 = 不过滤）
+            "min_prob":    0.65,      # 最低买入概率阈值（0 = 不过滤）
             "load_minute": True,     # 是否加载分钟线（保证特征与训练口径一致）
             "model_path": os.path.join(
                 os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -208,6 +208,20 @@ class SectorHeatStrategy(BaseStrategy):
             return {}
 
         # ── Step 3: 特征计算（与训练口径完全一致）────────────────────────────
+        # 实时模式：注入实时日线 + 实时分钟线，不走 DB 加载今日数据
+        is_realtime = daily_df is not None and not daily_df.empty
+        realtime_minute = None
+        if is_realtime and self.strategy_params.get("load_minute"):
+            try:
+                from data_realtime.realtime_fetcher import RealtimeFetcher
+                _fetcher = RealtimeFetcher()
+                realtime_minute = _fetcher.fetch_kline_min_daily_batch(
+                    target_ts_codes, freq="5MIN", max_workers=5
+                )
+                logger.info(f"{trade_date} 实时分钟线获取 {len(realtime_minute)}/{len(target_ts_codes)} 只")
+            except Exception as e:
+                logger.warning(f"{trade_date} 实时分钟线获取失败（跳过）: {e}")
+
         try:
             bundle = FeatureDataBundle(
                 trade_date=trade_date,
@@ -215,7 +229,10 @@ class SectorHeatStrategy(BaseStrategy):
                 sector_candidate_map=sector_candidate_map,
                 top3_sectors=top3_sectors,
                 adapt_score=adapt_score,
-                load_minute=self.strategy_params["load_minute"],
+                load_minute=self.strategy_params["load_minute"] and not is_realtime,
+                realtime_d0=daily_df if is_realtime else None,
+                realtime_minute=realtime_minute,
+                index_overrides=self.strategy_params.get("index_overrides"),
             )
             feature_df = self._feature_engine.run_single_date(bundle)
         except Exception as e:

@@ -53,12 +53,18 @@ class FeatureDataBundle:
             top3_sectors: List[str],
             adapt_score: float = 0.0,
             load_minute: bool = True,
+            realtime_d0: "pd.DataFrame | None" = None,
+            realtime_minute: "Dict[str, pd.DataFrame] | None" = None,
+            index_overrides: "Dict[str, float] | None" = None,
     ):
         self.trade_date = trade_date
         self.target_ts_codes = target_ts_codes
         self.sector_candidate_map = sector_candidate_map
         self.top3_sectors = top3_sectors
         self.adapt_score = adapt_score      # 透传给 SectorHeatFeature.calculate()
+        self._realtime_d0 = realtime_d0     # 盘中实时日线注入（pre-close 专用）
+        self._realtime_minute = realtime_minute  # 盘中实时分钟线 {ts_code: DataFrame}
+        self._index_overrides = index_overrides  # 指数涨幅强制覆盖 {"000001.SH": -1.5, ...}
 
         self.lookback_dates_5d: List[str] = []
         self.lookback_dates_20d: List[str] = []
@@ -69,10 +75,12 @@ class FeatureDataBundle:
 
         self._load_trade_dates()
         self._load_daily_data()
+        self._inject_realtime_d0()          # 用实时日线覆盖/补充今日数据
         self._load_qfq_data()
         self._load_macro_data()
         if load_minute:
             self._load_minute_data()
+        self._inject_realtime_minute()      # 用实时分钟线覆盖今日 minute_cache
 
     def _load_trade_dates(self):
         try:
@@ -114,6 +122,47 @@ class FeatureDataBundle:
         except Exception as e:
             logger.error(f"[DataBundle] 日线数据加载失败：{e}")
             raise
+
+    def _inject_realtime_d0(self):
+        """
+        将实时日线（rt_k）注入今日 daily_grouped，覆盖/补充 kline_day 中尚未落库的今日数据。
+        pre-close 场景专用：市场收盘前 DB 中没有今日数据，用实时快照代替。
+        """
+        if self._realtime_d0 is None or self._realtime_d0.empty:
+            return
+        try:
+            d0 = self._realtime_d0.copy()
+            # 过滤为候选股（减少内存）
+            if self.target_ts_codes:
+                d0 = d0[d0["ts_code"].isin(self.target_ts_codes)]
+            if d0.empty:
+                return
+            d0["trade_date"] = self.trade_date
+            d0["trade_date"] = d0["trade_date"].astype(str)
+            rt_grouped = d0.groupby(["ts_code", "trade_date"]).first().to_dict(orient="index")
+            # update：仅覆盖今日，不影响历史
+            self.daily_grouped.update(rt_grouped)
+            logger.info(f"[DataBundle] 实时日线注入完成 | 覆盖今日 {len(rt_grouped)} 只")
+        except Exception as e:
+            logger.warning(f"[DataBundle] 实时日线注入失败（跳过）：{e}")
+
+    def _inject_realtime_minute(self):
+        """
+        将 rt_min_daily 实时分钟线注入 minute_cache，覆盖今日数据。
+        key 格式与 _load_minute_data 完全一致：(ts_code, trade_date)
+        """
+        if not self._realtime_minute:
+            return
+        try:
+            count = 0
+            for ts_code, df in self._realtime_minute.items():
+                if df.empty:
+                    continue
+                self.minute_cache[(ts_code, self.trade_date)] = df
+                count += 1
+            logger.info(f"[DataBundle] 实时分钟线注入完成 | 覆盖今日 {count} 只")
+        except Exception as e:
+            logger.warning(f"[DataBundle] 实时分钟线注入失败（跳过）：{e}")
 
     def _load_qfq_data(self):
         """批量加载前复权日线（MA 计算专用，与 daily_grouped 结构相同）"""
@@ -277,6 +326,38 @@ class FeatureDataBundle:
             )
         except Exception as e:
             logger.warning(f"[DataBundle] 宏观数据加载异常（非致命）：{str(e)[:120]}")
+
+        # 指数涨幅强制覆盖（压测/盘中模拟专用）
+        if self._index_overrides:
+            self._apply_index_overrides()
+
+    def _apply_index_overrides(self):
+        """将 index_overrides 写入 macro_cache["index_df"]，覆盖 DB 中的涨幅数据。"""
+        try:
+            existing = self.macro_cache.get("index_df", pd.DataFrame())
+            # 构建覆盖行（保留 DB 中其他指数，只替换指定的）
+            rows = []
+            if not existing.empty and "ts_code" in existing.columns:
+                for _, row in existing.iterrows():
+                    code = row["ts_code"]
+                    pct  = self._index_overrides.get(code, row.get("pct_chg", 0))
+                    rows.append({"ts_code": code, "pct_chg": pct,
+                                 "trade_date": self.trade_date})
+                # 补上 overrides 中 DB 没有的指数
+                existing_codes = set(existing["ts_code"].tolist())
+                for code, pct in self._index_overrides.items():
+                    if code not in existing_codes:
+                        rows.append({"ts_code": code, "pct_chg": pct,
+                                     "trade_date": self.trade_date})
+            else:
+                for code, pct in self._index_overrides.items():
+                    rows.append({"ts_code": code, "pct_chg": pct,
+                                 "trade_date": self.trade_date})
+
+            self.macro_cache["index_df"] = pd.DataFrame(rows)
+            logger.info(f"[DataBundle] 指数覆盖: { {k: v for k, v in self._index_overrides.items()} }")
+        except Exception as e:
+            logger.warning(f"[DataBundle] 指数覆盖失败（跳过）：{e}")
 
     def _load_minute_data(self):
         """

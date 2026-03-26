@@ -32,7 +32,8 @@ default_exclude = [
 ]
 
 
-def sort_by_recent_gain(df: pd.DataFrame, trade_date: str, day_count: int = 20) -> pd.DataFrame:
+def sort_by_recent_gain(df: pd.DataFrame, trade_date: str, day_count: int = 20,
+                        today_df: "pd.DataFrame | None" = None) -> pd.DataFrame:
     """
     【通用任意天数涨幅排序】仅拉2天数据，性能最优
     计算标准（对齐行情软件）：
@@ -88,9 +89,16 @@ def sort_by_recent_gain(df: pd.DataFrame, trade_date: str, day_count: int = 20) 
     df_ago = get_daily_kline_data(day_ago_str, ts_code_list=target_codes)
     df_ago = df_ago[["ts_code", "close"]].rename(columns={"close": f"ago_{required_days}d_close"})
 
-    # 第2次拉：今日的收盘价（仅查询目标股票）
-    df_today = get_daily_kline_data(today_str, ts_code_list=target_codes)
-    df_today = df_today[["ts_code", "close"]].rename(columns={"close": "today_close"})
+    # 第2次拉：今日的收盘价（仅查询目标股票；传入 today_df 时跳过 DB 查询）
+    if today_df is not None and not today_df.empty:
+        df_today = today_df[today_df["ts_code"].isin(target_codes)][["ts_code", "close"]].copy()
+    else:
+        df_today = get_daily_kline_data(today_str, ts_code_list=target_codes)
+        if not df_today.empty:
+            df_today = df_today[["ts_code", "close"]]
+    if df_today.empty:
+        return df
+    df_today = df_today.rename(columns={"close": "today_close"})
 
     # 合并计算（无冗余筛选，因为get_daily_kline_data已过滤）
     df = df.merge(df_today, on="ts_code", how="left").merge(df_ago, on="ts_code", how="left")

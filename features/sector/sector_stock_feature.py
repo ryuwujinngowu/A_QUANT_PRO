@@ -231,9 +231,18 @@ class SectorStockFeature(BaseFeature):
             sector_ts_codes: List[str] = sector_d0_df["ts_code"].unique().tolist()
 
             # ---- 20 日涨幅排名 ----
+            # 从 daily_grouped 提取今日收盘（盘中实时注入时 DB 无今日数据）
+            _d0_rows = [
+                {"ts_code": ts, "close": float(vals.get("close", 0) or 0)}
+                for (ts, td), vals in daily_grouped.items()
+                if td == trade_date
+            ]
+            _today_df_for_rank = pd.DataFrame(_d0_rows) if _d0_rows else None
+
             rank_map, rank_median = {}, 0
             try:
-                sorted_df = sort_by_recent_gain(sector_d0_df, trade_date, day_count=20)
+                sorted_df = sort_by_recent_gain(sector_d0_df, trade_date, day_count=20,
+                                                today_df=_today_df_for_rank)
                 if not sorted_df.empty:
                     sorted_df = sorted_df.copy()
                     sorted_df["rank"] = range(1, len(sorted_df) + 1)

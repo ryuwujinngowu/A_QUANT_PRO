@@ -27,13 +27,13 @@ def main():
     #     end_date=END_DATE
     # )
 
-    # strategy = SectorHeatStrategy()
-    # engine = MultiStockBacktestEngine(
-    #     strategy=strategy,
-    #     init_capital=INIT_CAPITAL,
-    #     start_date=START_DATE,
-    #     end_date=END_DATE
-    # )
+    strategy = SectorHeatStrategy()
+    engine = MultiStockBacktestEngine(
+        strategy=strategy,
+        init_capital=INIT_CAPITAL,
+        start_date=START_DATE,
+        end_date=END_DATE
+    )
 
     # strategy = MultiLimitUpStrategy()
     # engine = MultiStockBacktestEngine(
@@ -44,13 +44,13 @@ def main():
     # )
 
 
-    strategy = ModelDipStrategy()
-    engine = MultiStockBacktestEngine(
-        strategy=strategy,
-        init_capital=INIT_CAPITAL,
-        start_date=START_DATE,
-        end_date=END_DATE
-    )
+    # strategy = ModelDipStrategy()
+    # engine = MultiStockBacktestEngine(
+    #     strategy=strategy,
+    #     init_capital=INIT_CAPITAL,
+    #     start_date=START_DATE,
+    #     end_date=END_DATE
+    # )
 
     # strategy = ModelSurgeStrategy()
     # engine = MultiStockBacktestEngine(
