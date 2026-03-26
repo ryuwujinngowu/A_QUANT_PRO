@@ -35,14 +35,14 @@ from utils.xgb_compat import safe_predict_proba
 
 # ── 策略参数（与 sector_heat_strategy.py 保持一致）──────────────────────────
 _BUY_TOP_K = 6        # 每日最多信号数
-_MIN_PROB  = 0.50      # 最低买入概率阈值（v5.2 AUC-first 模型概率分布更保守，降低阈值）
+_MIN_PROB  = 0.60      # 最低买入概率阈值
 _MIN_AMOUNT = 10_000   # 低流动性阈值（千元，= 1000 万元）
 _LOAD_MINUTE = True    # 特征计算是否加载分钟线（与训练口径一致）
 
-# 模型路径（与 sector_heat_strategy.py 一致）
+# 模型路径（老版模型，供 model_open_buy 使用）
 _MODEL_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-    "model", "sector_heat_xgb_v5.2_auc_first.pkl",
+    "model", "sector_heat_xgb_model.pkl",
 )
 
 # 模块级单例（避免每个 agent 各自加载一份模型和特征引擎）
