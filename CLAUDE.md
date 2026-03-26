@@ -1,8 +1,8 @@
 # a_quant 项目记忆文档
 
-> 最后更新：2026-03-24
-> 分支：`claude/check-latest-commit-y3f6a`
-> **新增**: Regime-Strategy 分层模型架构（完整 ROADMAP.md 已生成）
+> 最后更新：2026-03-26
+> 分支：`claude/review-feature-factors-b6CUx`
+> **新增**: 特征层全面 Review（因子覆盖 + 数据正确性 + stk_factor_pro 评估）
 
 ---
 
@@ -246,6 +246,70 @@
 21. **`has_recent_limit_up_batch` 错误兜底改中性值**：`conservative_on_error` 默认改 `False`
     - 原默认 `True`（异常返回全涨停）→ 训练数据正向偏差
     - 改为 `False`（异常返回全无涨停）→ 中性值，不引入虚假正样本
+
+### P6 特征层全面 Review（2026-03-26）
+
+#### stk_factor_pro 评估
+22. **StkFactorProFeature 评估结论：可安全启用**
+    - 装饰器 `@feature_registry.register("stk_factor_pro")` 已正确设置
+    - calculate() 返回 tuple，含 stock_code + trade_date，与 FeatureEngine 兼容
+    - 有 `ensure_stk_factor_pro_data()` 完整的 DB→API→DB 链路
+    - T 日截面特征，无未来函数风险；日期格式 yyyy-mm-dd 与全系统一致
+    - 充分利用 `data_bundle.daily_grouped` 预取 close（无额外 IO）
+    - **启用方式**：取消 `features/__init__.py:62` 的注释即可
+    - **输出列**（17列）：MACD(4) / KDJ(4) / RSI(4) / Bollinger(2) / BIAS(3) / CCI(1) / WR(1)
+
+#### 数据正确性：已发现的高/中风险问题
+
+**🔴 高风险（必须修复）：**
+- **label1 阈值代码与文档不符**：文档注释写 ≥5%，代码实际用 `d1_intra_return >= 0.03`（3%）
+  - 文件：`learnEngine/label.py:95`，需明确统一阈值并同步文档
+- **market_vol_ratio 自引用 bug**：`d0` 的量比 = `vol_d0 / mean(vol_d0~d4)`，分子自己参与分母均值计算
+  - 文件：`features/macro/market_macro_feature.py:141~149`
+  - 正确做法：d0 量比分母应为 `mean(vol_d1~d4)`，不含自身
+- **涨停基因过滤过于严格**：近10日未涨停股全部过滤，但实际沉默期后爆发的股同样有基因
+  - 文件：`learnEngine/dataset.py:434~435`
+  - 建议：改为分级过滤或延长回看窗口至30日
+
+**🟡 中风险（建议优化）：**
+- **adapt_score HHI 固定假设 bug**：`total_seats=25`（5天×5板块）是硬编码假设，实际每天板块数可能 <5
+  - 文件：`features/sector/sector_heat_feature.py:229`
+  - 修复：改为 `total_seats = sum(sector_appear_count.values())`（动态计算实际出现总次数）
+- **fillna(0) 语义混乱**：`pos_20d=NaN` 填 0 → 含义变为"20日最低点"（强看空信号），非中性值
+  - 文件：`learnEngine/dataset.py:142`
+  - 建议：各列显式定义中性值（pos_20d→0.5，bias→0，等）
+- **label2 D+2 停牌丢弃**：dropna 可能引入选择偏差（某些市场状态下 D+2 停牌概率非均匀）
+  - 文件：`learnEngine/label.py:101~107`
+  - 建议：D+2 停牌时保守填 label2=0，不丢弃样本
+
+#### 因子数学/ML问题
+
+**已确认的计算 bug：**
+- **candle_type 平盘分类错误**：`close==pre_close` 时 `is_up=False`，会被归入 -2（真阴）而非 0（平盘）
+  - 文件：`features/emotion/sei_feature.py`
+  - 修复：在判断前先检查 `abs(close-pre_close) < 1e-6`，返回 0
+- **SEI gap_coeff=20 过大**：gap_return 范围约 ±0.1，×20 = ±2，加百分化后 ±200 分 → 大量 clip 截断
+  - 实际调整项峰值远超基础分，严重压缩 SEI 在极端行情的区分度
+  - 建议降至 gap_coeff=5~8
+
+**ML 设计问题：**
+- d0~d4 共5日的时序列高度相关（同一股票连续上涨时 pct_chg_d0~d4 全正，约100-120列冗余）
+- adapt_score 作为全局标量广播：同日所有样本值相同 → XGBoost 无法做跨样本分裂，实际上只有"日期效应"
+- red_session_pm_ratio 的 -1（停牌标记）被当普通数值处理，与正常值 [0,1] 范围不兼容
+
+#### 缺失的因子维度（新因子构造方向）
+
+按优先级排序：
+
+| 优先级 | 维度 | 具体因子 | 数据来源 |
+|--------|------|--------|--------|
+| ⭐⭐⭐⭐⭐ | 资金流向 | 大单买入比、主力净流入、买卖比 | 分钟线解析 or 第三方 |
+| ⭐⭐⭐⭐⭐ | 时序动量 | 5日累计收益、d0-d1 加速度、5日波动率 | 已有日线数据推导 |
+| ⭐⭐⭐⭐ | 筹码分布 | MA20/MA60 位置比（bias20/bias60）、年度高低点位置 | 已有数据推导 |
+| ⭐⭐⭐⭐ | 换手率 | 日换手率、换手率5日加速度 | 日线 volume/流通股本 |
+| ⭐⭐⭐⭐ | 板块内多维排名 | 今日涨幅排名、今日量能排名、5日动量排名 | 已有数据推导 |
+| ⭐⭐⭐ | 市值控制 | 流通市值、市值/成交额比 | 日线 close×流通股本 |
+| ⭐⭐⭐ | K线形态 | 实体比、锤子线/上吊线识别 | 已有 OHLC 推导 |
 
 ### 历史修复（本会话前）
 - **日期格式 Bug**：DB 存储 `trade_date` 为 `YYYY-MM-DD`，代码比较用 `YYYYMMDD`，修复：`.astype(str).str.replace("-", "")`
