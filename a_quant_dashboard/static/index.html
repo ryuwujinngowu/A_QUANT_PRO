@@ -264,6 +264,7 @@ tr:hover td{background:var(--bg2)}
       <div id="hamburger" onclick="toggleSidebar()">☰</div>
       <div class="topbar-title" id="topbar-title"><strong>全局概览</strong></div>
       <div class="date-presets">
+        <div class="date-btn" onclick="setPreset(7)">7D</div>
         <div class="date-btn" onclick="setPreset(30)">1M</div>
         <div class="date-btn active" onclick="setPreset(90)">3M</div>
         <div class="date-btn" onclick="setPreset(180)">6M</div>
@@ -279,6 +280,7 @@ tr:hover td{background:var(--bg2)}
     <!-- 移动端日期控制行 -->
     <div id="mob-date-row">
       <div class="mob-presets">
+        <div class="date-btn" onclick="setPreset(7)">7D</div>
         <div class="date-btn" onclick="setPreset(30)">1M</div>
         <div class="date-btn" onclick="setPreset(90)">3M</div>
         <div class="date-btn" onclick="setPreset(180)">6M</div>
@@ -319,6 +321,7 @@ const S = {
   agents: { short: [], long: [] },
   activeCharts: [],
   barDays: 90,         // 平均收益柱状图时间段
+  shortRows: {},       // trade_date → row，供日期点击弹窗用
 };
 
 // ══════════════════════════════════════════════════════════════════
@@ -435,7 +438,7 @@ function setPreset(days, doRefresh=true) {
   start.setDate(start.getDate() - days);
   S.end   = fmtDate(end);
   S.start = fmtDate(start);
-  const label = days===30?'1M':days===90?'3M':days===180?'6M':'1Y';
+  const label = days===7?'7D':days===30?'1M':days===90?'3M':days===180?'6M':'1Y';
   // 同步所有日期输入框（桌面 + 移动端）
   ['dt-start','mob-dt-start'].forEach(id => { const el=document.getElementById(id); if(el) el.value=S.start; });
   ['dt-end','mob-dt-end'].forEach(id =>   { const el=document.getElementById(id); if(el) el.value=S.end; });
@@ -920,6 +923,9 @@ async function renderShort(agentId) {
   try {
     const rows = await apiFetch(apiUrl('/api/short/daily', { agent_id: agentId }));
     if (!rows.length) { showContent('<div class="empty-wrap">⚡ 该时段暂无数据</div>'); return; }
+    // 存入 S.shortRows 供日期点击弹窗使用
+    S.shortRows = {};
+    rows.forEach(r => S.shortRows[r.trade_date] = r);
     showContent(buildShortHTML(rows, agentId));
     renderShortCharts(rows);
   } catch(e) {
@@ -992,9 +998,9 @@ function buildShortHTML(rows, agentId) {
     <div class="table-wrap">
       <table>
         <thead><tr>
-          <th>日期</th><th>信号数</th><th>日内均收益</th>
+          <th>日期 ↗</th><th>信号数</th><th>日内均收益</th>
           <th>开盘溢价</th><th>收盘收益</th><th>最大溢价</th><th>最大回撤</th>
-          <th>首次转绿(分)</th><th>状态</th>
+          <th>首次转红(分)</th><th>首次转绿(分)</th><th>状态</th>
         </tr></thead>
         <tbody>
           ${rows.slice().reverse().map(r=>shortRow(r)).join('')}
@@ -1007,14 +1013,15 @@ function buildShortHTML(rows, agentId) {
 function shortRow(r) {
   const ok = !r.has_error && r.next_day_avg_close_return != null;
   return `<tr>
-    <td>${r.trade_date}</td>
+    <td style="cursor:pointer;color:var(--accent);text-decoration:underline dotted" onclick="openShortDayDetail('${r.trade_date}')">${r.trade_date}</td>
     <td>${r.signal_count || '--'}</td>
-    <td class="${r.intraday_avg_return>=0?'val-pos':'val-neg'}">${fmt2(r.intraday_avg_return)}</td>
-    <td class="${r.next_day_avg_open_premium>=0?'val-pos':'val-neg'}">${fmt2(r.next_day_avg_open_premium)}</td>
-    <td class="${r.next_day_avg_close_return>=0?'val-pos':'val-neg'}">${ok ? fmt2(r.next_day_avg_close_return) : '--'}</td>
+    <td class="${(r.intraday_avg_return||0)>=0?'val-pos':'val-neg'}">${fmt2(r.intraday_avg_return)}</td>
+    <td class="${(r.next_day_avg_open_premium||0)>=0?'val-pos':'val-neg'}">${fmt2(r.next_day_avg_open_premium)}</td>
+    <td class="${(r.next_day_avg_close_return||0)>=0?'val-pos':'val-neg'}">${ok ? fmt2(r.next_day_avg_close_return) : '--'}</td>
     <td class="val-pos">${fmt2(r.next_day_avg_max_premium)}</td>
     <td class="val-neg">${fmt2(r.next_day_avg_max_drawdown)}</td>
     <td>${r.next_day_avg_red_minute != null ? r.next_day_avg_red_minute+'min' : '--'}</td>
+    <td>${r.next_day_avg_profit_minute != null ? r.next_day_avg_profit_minute+'min' : '--'}</td>
     <td>${r.has_error ? '<span class="badge badge-err">ERROR</span>' : ok ? '<span class="badge badge-pos">✓</span>' : '<span class="badge badge-closed">待更新</span>'}</td>
   </tr>`;
 }
@@ -1122,42 +1129,41 @@ function renderShortCharts(rows) {
 async function renderLong(agentId) {
   showContent('<div class="loading-wrap"><div class="spinner"></div><div>加载中...</div></div>');
   try {
-    const [positions, agg] = await Promise.all([
+    const [positions, agg, summary] = await Promise.all([
       apiFetch(apiUrl('/api/long/positions', { agent_id: agentId })),
       apiFetch(apiUrl('/api/long/aggregate', { agent_id: agentId })),
+      apiFetch(apiUrl('/api/long/summary',   { agent_id: agentId })),
     ]);
-    if (!positions.length) { showContent('<div class="empty-wrap">⚡ 该时段暂无持仓数据</div>'); return; }
-    showContent(buildLongHTML(positions, agentId));
+    if (!summary.total) { showContent('<div class="empty-wrap">⚡ 该时段暂无持仓数据</div>'); return; }
+    showContent(buildLongHTML(positions, agg, summary, agentId));
     renderLongCharts(positions, agg);
   } catch(e) {
     showContent(`<div class="loading-wrap"><div style="color:var(--neg)">加载失败：${e.message}</div></div>`);
   }
 }
 
-function buildLongHTML(positions, agentId) {
-  const closed = positions.filter(p => p.status === 1);
-  const open   = positions.filter(p => p.status === 0);
-  const wins   = closed.filter(p => (p.period_return||0) > 0);
-  const winRate = closed.length ? (wins.length/closed.length*100).toFixed(1) : '--';
-  const avgRet  = closed.length ? (closed.reduce((s,p)=>s+(p.period_return||0),0)/closed.length).toFixed(2) : null;
-  const avgDays = closed.length ? (closed.reduce((s,p)=>s+(p.trading_days||0),0)/closed.length).toFixed(1) : '--';
+function buildLongHTML(positions, agg, summary, agentId) {
+  // 卡片统计来自后端全量统计，不受 positions LIMIT 影响
+  const winRate = summary.win_rate;
+  const avgRet  = summary.avg_return;
+  const avgDays = summary.avg_days != null ? summary.avg_days.toFixed(1) : '--';
 
   const meta = S.agents.long.find(a=>a.id===agentId);
   return `
   <div class="cards-row cards-4">
     <div class="card accent">
       <div class="card-label">总持仓数</div>
-      <div class="card-value">${positions.length}</div>
-      <div class="card-sub">${open.length} 持仓中 / ${closed.length} 已平仓</div>
+      <div class="card-value">${summary.total}</div>
+      <div class="card-sub">${summary.open} 持仓中 / ${summary.closed} 已平仓</div>
     </div>
-    <div class="card ${parseFloat(winRate)>=50?'pos':'neg'}">
+    <div class="card ${winRate>=50?'pos':'neg'}">
       <div class="card-label">胜率（已平仓）</div>
-      <div class="card-value ${parseFloat(winRate)>=50?'pos':'neg'}">${winRate}%</div>
-      <div class="card-sub">${wins.length} 盈利 / ${closed.length-wins.length} 亏损</div>
+      <div class="card-value ${winRate>=50?'pos':'neg'}">${winRate}%</div>
+      <div class="card-sub">${summary.win} 盈利 / ${summary.closed-summary.win} 亏损</div>
     </div>
-    <div class="card ${parseFloat(avgRet)>=0?'pos':'neg'}">
+    <div class="card ${avgRet>=0?'pos':'neg'}">
       <div class="card-label">均收益（已平仓）</div>
-      <div class="card-value ${parseFloat(avgRet)>=0?'pos':'neg'}">${fmt2(parseFloat(avgRet))}</div>
+      <div class="card-value ${avgRet>=0?'pos':'neg'}">${fmt2(avgRet)}</div>
       <div class="card-sub">含手续费约 -0.15%</div>
     </div>
     <div class="card purple">
@@ -1183,7 +1189,7 @@ function buildLongHTML(positions, agentId) {
       <div class="chart-body" id="l-risk" style="height:240px"></div>
     </div>
     <div class="chart-card">
-      <div class="chart-title">已平仓累计权益曲线（按平仓日排序）</div>
+      <div class="chart-title">每日操作累计权益（按买入日，中位收益叠加）</div>
       <div class="chart-body" id="l-equity" style="height:240px"></div>
     </div>
   </div>
@@ -1204,7 +1210,33 @@ function buildLongHTML(positions, agentId) {
         </tbody>
       </table>
     </div>
-  </div>`;
+  </div>
+
+  ${agg && agg.length ? `
+  <div class="table-card">
+    <div class="table-header">
+      <div class="title">◇ 已平仓批次统计（按买入日）</div>
+      <div style="font-size:10px;color:var(--text3)">同一买入日信号全部平仓后汇总</div>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr>
+          <th>买入日</th><th>平仓数</th><th>中位收益</th><th>最高</th><th>最低</th><th>均持仓天数</th>
+        </tr></thead>
+        <tbody>
+          ${agg.map(a=>`<tr>
+            <td style="color:var(--text2)">${a.trade_date}</td>
+            <td>${a.long_closed_count}</td>
+            <td class="${(a.long_median_return||0)>=0?'val-pos':'val-neg'}">${fmt2(a.long_median_return)}</td>
+            <td class="val-pos">${fmt2(a.long_max_return)}</td>
+            <td class="val-neg">${fmt2(a.long_min_return)}</td>
+            <td>${fmtN(a.long_avg_trading_days,1)} 天</td>
+          </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>
+  </div>` : ''}
+`;
 }
 
 function longRow(p) {
@@ -1280,13 +1312,16 @@ function renderLongCharts(positions, agg) {
     }],
   }, 240);
 
-  // Equity curve (closed, sorted by sell_date)
-  const sorted = closed.filter(p=>p.sell_date).sort((a,b)=>a.sell_date>b.sell_date?1:-1);
+  // 权益曲线：按买入日累计中位收益（agg 数据），体现每日操作模式的累积效果
+  // agg 中每行 = 该买入日所有持仓全部平仓后的汇总，median_return 代表典型单次操作收益
+  const sortedAgg = (agg || [])
+    .filter(a => a.long_median_return != null)
+    .sort((a,b) => a.trade_date > b.trade_date ? 1 : -1);
   let eq = 0;
   const eqDates = [], eqVals = [];
-  sorted.forEach(p => {
-    eq += p.period_return;
-    eqDates.push(p.sell_date);
+  sortedAgg.forEach(a => {
+    eq += a.long_median_return;
+    eqDates.push(a.trade_date);
     eqVals.push(parseFloat(eq.toFixed(2)));
   });
   if (eqVals.length) {
@@ -1382,6 +1417,55 @@ async function openPositionDetail(id) {
     document.getElementById('modal-body').innerHTML =
       `<div class="loading-wrap"><div style="color:var(--neg)">加载失败：${e.message}</div></div>`;
   }
+}
+
+// 短线日期点击弹窗：显示当日信号明细 + T+1 结果
+function openShortDayDetail(date) {
+  const r = S.shortRows[date];
+  if (!r) return;
+  document.getElementById('modal').style.display = 'flex';
+  document.getElementById('modal-title').textContent = `${date} · 操作记录`;
+
+  const signals  = r.signal_stock_detail?.stock_list || [];
+  const nextList = r.next_day_stock_detail?.stock_list || [];
+  const nextMap  = Object.fromEntries(nextList.map(s => [s.ts_code||s.code, s]));
+
+  const statsBar = `
+    <div style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:12px;font-size:12px;padding:10px 0;border-bottom:1px solid var(--border)">
+      <span style="color:var(--text3)">信号数: <strong style="color:var(--accent)">${signals.length}</strong></span>
+      ${r.intraday_avg_return!=null?`<span style="color:var(--text3)">日内均: <strong class="${r.intraday_avg_return>=0?'val-pos':'val-neg'}">${fmt2(r.intraday_avg_return)}</strong></span>`:''}
+      ${r.next_day_avg_open_premium!=null?`<span style="color:var(--text3)">T+1开盘溢价: <strong class="${r.next_day_avg_open_premium>=0?'val-pos':'val-neg'}">${fmt2(r.next_day_avg_open_premium)}</strong></span>`:''}
+      ${r.next_day_avg_close_return!=null?`<span style="color:var(--text3)">T+1收盘: <strong class="${r.next_day_avg_close_return>=0?'val-pos':'val-neg'}">${fmt2(r.next_day_avg_close_return)}</strong></span>`:''}
+      ${r.next_day_avg_max_premium!=null?`<span style="color:var(--text3)">最大溢价: <strong class="val-pos">${fmt2(r.next_day_avg_max_premium)}</strong></span>`:''}
+      ${r.next_day_avg_max_drawdown!=null?`<span style="color:var(--text3)">最大回撤: <strong class="val-neg">${fmt2(r.next_day_avg_max_drawdown)}</strong></span>`:''}
+    </div>`;
+
+  const tableHtml = signals.length ? `
+    <div class="table-wrap" style="max-height:400px">
+      <table>
+        <thead><tr><th>代码</th><th>名称</th><th>买入价</th><th>T+1开盘溢价</th><th>T+1收盘收益</th><th>最大溢价</th><th>最大回撤</th></tr></thead>
+        <tbody>
+          ${signals.map(s => {
+            const ns  = nextMap[s.ts_code||s.code] || {};
+            const ret = ns.close_return ?? ns.pct_chg ?? null;
+            const op  = ns.open_premium ?? null;
+            const mxP = ns.max_premium  ?? null;
+            const mxD = ns.max_drawdown ?? null;
+            return `<tr>
+              <td style="color:var(--text3)">${s.ts_code||s.code||'--'}</td>
+              <td style="color:var(--text1)">${s.stock_name||s.name||s.ts_code||'--'}</td>
+              <td>${fmtN(s.buy_price||s.price)}</td>
+              <td class="${op!=null?(op>=0?'val-pos':'val-neg'):''}">${op!=null?fmt2(op):'--'}</td>
+              <td class="${ret!=null?(ret>=0?'val-pos':'val-neg'):''}">${ret!=null?fmt2(ret):'--'}</td>
+              <td class="val-pos">${mxP!=null?fmt2(mxP):'--'}</td>
+              <td class="val-neg">${mxD!=null?fmt2(mxD):'--'}</td>
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table>
+    </div>` : '<div class="empty-wrap" style="padding:20px">当日无持仓明细</div>';
+
+  document.getElementById('modal-body').innerHTML = statsBar + tableHtml;
 }
 
 function closeModal(e) {

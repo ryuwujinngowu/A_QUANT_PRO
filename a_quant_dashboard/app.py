@@ -87,6 +87,29 @@ def _parse_json(v):
         return None
 
 
+def get_stock_names(ts_codes: list) -> dict:
+    """从 stock_basic 批量获取股票名称 {ts_code: name}"""
+    unique = list(set(str(t) for t in ts_codes if t))
+    if not unique:
+        return {}
+    try:
+        ph = ','.join(['%s'] * len(unique))
+        rows = query(f"SELECT ts_code, name FROM stock_basic WHERE ts_code IN ({ph})", unique)
+        return {r['ts_code']: r['name'] for r in rows}
+    except Exception:
+        return {}
+
+
+def _enrich_detail_names(detail, name_map: dict) -> None:
+    """就地填充 signal/next_day stock_detail 里 stock_list 的 stock_name"""
+    if not isinstance(detail, dict):
+        return
+    for s in detail.get('stock_list', []):
+        ts = s.get('ts_code') or s.get('code')
+        if ts and not s.get('stock_name') and name_map.get(ts):
+            s['stock_name'] = name_map[ts]
+
+
 # ── Agent 元数据 ───────────────────────────────────────────────────────────────
 AGENTS = {
     "short": [
@@ -217,6 +240,17 @@ def get_short_latest(agent_id: str = Query(...)):
     r["next_day_stock_detail"] = _parse_json(r.get("next_day_stock_detail"))
     r["next_day_avg_close_return"] = _to_float(r.get("next_day_avg_close_return"))
     r["intraday_avg_return"] = _to_float(r.get("intraday_avg_return"))
+    # 补充股票名称
+    all_ts = set()
+    for d in [r["signal_stock_detail"], r["next_day_stock_detail"]]:
+        if isinstance(d, dict):
+            for s in d.get("stock_list", []):
+                ts = s.get("ts_code") or s.get("code")
+                if ts:
+                    all_ts.add(ts)
+    name_map = get_stock_names(list(all_ts))
+    for d in [r["signal_stock_detail"], r["next_day_stock_detail"]]:
+        _enrich_detail_names(d, name_map)
     return r
 
 
@@ -264,6 +298,23 @@ def get_short_daily(
         r["next_day_stock_detail"] = _parse_json(r.get("next_day_stock_detail"))
         r["has_error"] = bool(r.get("reserve_str_1") and str(r["reserve_str_1"]).startswith("[ERR]"))
         result.append(r)
+
+    # 批量补充股票名称
+    all_ts: set = set()
+    for r in result:
+        for key in ["signal_stock_detail", "next_day_stock_detail"]:
+            d = r.get(key)
+            if isinstance(d, dict):
+                for s in d.get("stock_list", []):
+                    ts = s.get("ts_code") or s.get("code")
+                    if ts:
+                        all_ts.add(ts)
+    if all_ts:
+        name_map = get_stock_names(list(all_ts))
+        for r in result:
+            for key in ["signal_stock_detail", "next_day_stock_detail"]:
+                _enrich_detail_names(r.get(key), name_map)
+
     return result
 
 
@@ -292,9 +343,16 @@ def get_long_positions(
     if status is not None:
         sql += " AND status = %s"
         params.append(status)
-    sql += " ORDER BY buy_date DESC LIMIT 500"
+    sql += " ORDER BY buy_date DESC LIMIT 1000"
 
     rows = query(sql, params)
+    # 补充缺失股票名称
+    missing_ts = [r["ts_code"] for r in rows if not r.get("stock_name")]
+    if missing_ts:
+        name_map = get_stock_names(missing_ts)
+        for r in rows:
+            if not r.get("stock_name"):
+                r["stock_name"] = name_map.get(r["ts_code"], "")
     for r in rows:
         r["buy_date"] = str(r["buy_date"])
         r["sell_date"] = str(r["sell_date"]) if r["sell_date"] else None
@@ -315,12 +373,53 @@ def get_long_position_detail(position_id: int):
     if not rows:
         raise HTTPException(status_code=404, detail="Position not found")
     r = rows[0]
+    if not r.get("stock_name"):
+        nm = get_stock_names([r["ts_code"]])
+        r["stock_name"] = nm.get(r["ts_code"], "")
     r["buy_date"] = str(r["buy_date"])
     r["sell_date"] = str(r["sell_date"]) if r["sell_date"] else None
     for f in ["buy_price", "sell_price", "period_return", "max_drawdown", "max_floating_profit"]:
         r[f] = _to_float(r[f])
     r["daily_detail"] = _parse_json(r.get("daily_detail")) or []
     return r
+
+
+@app.get("/api/long/summary")
+def get_long_summary(
+    agent_id: str = Query(...),
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+):
+    """区间内汇总统计（不受 LIMIT 限制，用于卡片数据）"""
+    if not end_date:
+        _, end_date = _default_range()
+    if not start_date:
+        start_date = (date.today() - timedelta(days=365)).strftime("%Y-%m-%d")
+
+    rows = query("""
+        SELECT
+            COUNT(*) AS total,
+            SUM(status=0) AS open_cnt,
+            SUM(status=1) AS closed_cnt,
+            SUM(status=1 AND period_return > 0) AS win_cnt,
+            AVG(CASE WHEN status=1 THEN period_return END) AS avg_return,
+            AVG(CASE WHEN status=1 THEN trading_days END) AS avg_days
+        FROM agent_long_position_stats
+        WHERE agent_id = %s AND buy_date BETWEEN %s AND %s
+    """, [agent_id, start_date, end_date])
+
+    r = rows[0]
+    closed = int(r["closed_cnt"] or 0)
+    win = int(r["win_cnt"] or 0)
+    return {
+        "total":    int(r["total"] or 0),
+        "open":     int(r["open_cnt"] or 0),
+        "closed":   closed,
+        "win":      win,
+        "win_rate": round(win / closed * 100, 1) if closed > 0 else 0,
+        "avg_return": _to_float(r["avg_return"], 0),
+        "avg_days":   _to_float(r["avg_days"], 0),
+    }
 
 
 @app.get("/api/long/aggregate")
