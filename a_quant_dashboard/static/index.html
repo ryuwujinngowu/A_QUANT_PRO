@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>A Quant Pro · 策略监控台</title>
 <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
 <style>
@@ -178,8 +178,8 @@ tr:hover td{background:var(--bg2)}
   .chart-body[style*="height:220px"]{height:180px!important}
   .chart-body[style*="height:180px"]{height:160px!important}
 
-  /* Content padding 缩小 */
-  #content{padding:12px}
+  /* Content padding 缩小，底部留安全区 */
+  #content{padding:12px;padding-bottom:max(20px,env(safe-area-inset-bottom,20px))}
   .cards-row{gap:8px;margin-bottom:14px}
   .charts-grid{gap:8px;margin-bottom:14px}
   .card{padding:12px}
@@ -322,6 +322,8 @@ const S = {
   activeCharts: [],
   barDays: 90,         // 平均收益柱状图时间段
   shortRows: {},       // trade_date → row，供日期点击弹窗用
+  cumTab: 'intraday',  // 'intraday' | 't1' — 概览累计图 tab
+  ovData: null,        // 缓存最新 overview API 返回
 };
 
 // ══════════════════════════════════════════════════════════════════
@@ -570,11 +572,19 @@ function buildOverviewHTML(data) {
     </div>
   </div>
 
-  <div class="charts-grid charts-6040">
+  <div class="charts-grid" style="grid-template-columns:1fr">
     <div class="chart-card">
-      <div class="chart-title">各短线策略累计收益（T+1 收盘）<span style="font-size:10px;color:var(--text3);font-weight:400;margin-left:6px">· 点击图例切换</span></div>
-      <div class="chart-body" id="ov-cum" style="height:260px"></div>
+      <div class="chart-title-row">
+        <div class="chart-title">各短线策略累计收益<span style="font-size:10px;color:var(--text3);font-weight:400;margin-left:6px">· 点击图例切换</span></div>
+        <div class="periods">
+          <span class="period-btn ${S.cumTab==='intraday'?'active':''}" onclick="setCumTab('intraday')">T日日内</span>
+          <span class="period-btn ${S.cumTab==='t1'?'active':''}" onclick="setCumTab('t1')">T+1收盘</span>
+        </div>
+      </div>
+      <div class="chart-body" id="ov-cum" style="height:320px"></div>
     </div>
+  </div>
+  <div class="charts-grid charts-2">
     <div class="chart-card">
       <div class="chart-title-row">
         <div class="chart-title">短线策略平均日收益对比</div>
@@ -586,6 +596,10 @@ function buildOverviewHTML(data) {
         </div>
       </div>
       <div class="chart-body" id="ov-bar" style="height:240px"></div>
+    </div>
+    <div class="chart-card">
+      <div class="chart-title">各策略每日胜率（按信号股数）</div>
+      <div class="chart-body" id="ov-winrate" style="height:240px"></div>
     </div>
   </div>
 
@@ -649,52 +663,23 @@ function buildOverviewHTML(data) {
         </tbody>
       </table>
     </div>
-  </div>`;
+  </div>
+
+  ${data.long_perf && Object.keys(data.long_perf).length ? `
+  <div class="chart-card" style="margin-bottom:20px">
+    <div class="chart-title">长线策略 · 月度盈亏均值（已平仓）</div>
+    <div class="chart-body" id="ov-long-perf" style="height:260px"></div>
+  </div>` : ''}
+`;
 }
 
 function renderOverviewCharts(data) {
-  // Multi-line cumulative return
-  const agentIds = Object.keys(data.trend);
-  const allDates = [...new Set(agentIds.flatMap(id => data.trend[id].map(d=>d.date)))].sort();
-  const COLORS = ['#38bdf8','#818cf8','#f472b6','#34d399','#fbbf24','#f87171','#a78bfa','#6ee7b7'];
-
-  const series = agentIds.map((id, i) => {
-    const byDate = Object.fromEntries(data.trend[id].map(d=>[d.date, d.return]));
-    let cum = 0;
-    const cumVals = allDates.map(d => {
-      if (byDate[d] != null) cum += byDate[d];
-      return parseFloat(cum.toFixed(2));
-    });
-    const meta = S.agents.short.find(a=>a.id===id);
-    return {
-      name: meta?.name || id,
-      type: 'line', smooth: true, symbol:'none',
-      lineStyle: { width: 1.5 },
-      itemStyle: { color: COLORS[i%COLORS.length] },
-      data: cumVals,
-    };
-  });
-
-  mkChart('ov-cum', {
-    tooltip: { trigger:'axis', ...TOOLTIP_STYLE, formatter: params =>
-      params[0].axisValue + params.map(p=>`<br/><span style="color:${p.color}">●</span> ${p.seriesName}: ${p.value>=0?'+':''}${p.value}%`).join('')
-    },
-    legend: {
-      data: series.map(s=>s.name),
-      bottom: 0, type:'scroll',
-      textStyle:{color:'#94a3b8',fontSize:10},
-      icon:'roundRect', itemWidth:10, itemHeight:4,
-      pageTextStyle:{color:'#64748b'},
-      inactiveColor:'#334155',
-    },
-    grid: { ...GRID, bottom:55 },
-    xAxis: dateAxis(allDates),
-    yAxis: { ...valueAxis('%'), axisLabel:{...AXIS_STYLE.axisLabel, formatter:v=>v+'%'} },
-    series,
-  }, 260);
+  S.ovData = data;
+  renderCumChart(data);
+  renderWinRateChart(data);
 
   // Bar: avg return per agent
-  const shortData = data.short.sort((a,b)=>(b.avg_return||0)-(a.avg_return||0));
+  const shortData = (data.short || []).slice().sort((a,b)=>(b.avg_return||0)-(a.avg_return||0));
   mkChart('ov-bar', {
     tooltip: { trigger:'axis', ...TOOLTIP_STYLE },
     grid: { top:20, bottom:80, left:16, right:16, containLabel:true },
@@ -711,6 +696,171 @@ function renderOverviewCharts(data) {
       label: { show:true, position:'top', color:'#94a3b8', fontSize:10, formatter:p=>(p.value>=0?'+':'')+p.value+'%' },
     }],
   }, 240);
+
+  renderLongPerfChart(data.long_perf || {});
+}
+
+// ── 累计收益图（支持 tab 切换）───────────────────────────────────────────────
+function renderCumChart(data) {
+  const trendSrc  = S.cumTab === 'intraday' ? (data.intraday_trend || {}) : (data.trend || {});
+  const winLoss   = data.win_loss || {};
+  const agentIds  = Object.keys(trendSrc).filter(id => (trendSrc[id]||[]).length > 0);
+  const COLORS    = ['#38bdf8','#818cf8','#f472b6','#34d399','#fbbf24','#f87171','#a78bfa','#6ee7b7'];
+
+  if (!agentIds.length) return;
+  const allDates = [...new Set(agentIds.flatMap(id => trendSrc[id].map(d=>d.date)))].sort();
+
+  const series = agentIds.map((id, i) => {
+    const byDate = Object.fromEntries(trendSrc[id].map(d=>[d.date, d.return]));
+    let cum = 0;
+    const cumVals = allDates.map(d => {
+      if (byDate[d] != null) cum += byDate[d];
+      return parseFloat(cum.toFixed(2));
+    });
+    const meta = S.agents.short.find(a=>a.id===id);
+    return {
+      name: meta?.name || id,
+      type: 'line', smooth: true, symbol:'none',
+      lineStyle: { width: 2 },
+      itemStyle: { color: COLORS[i%COLORS.length] },
+      data: cumVals,
+    };
+  });
+
+  const tabLabel = S.cumTab === 'intraday' ? 'T日日内' : 'T+1收盘';
+  const option = {
+    tooltip: {
+      trigger:'axis', ...TOOLTIP_STYLE,
+      formatter: params => {
+        const d = params[0].axisValue;
+        return `<div style="font-weight:600;margin-bottom:4px">${d} · ${tabLabel}</div>` +
+          params.map((p, pi) => {
+            const aid = agentIds[p.seriesIndex];
+            const wl  = (winLoss[aid] || {})[d];
+            const wlStr = wl
+              ? ` <span style="color:#94a3b8;font-size:10px">(${wl.win}↑ ${wl.loss}↓)</span>`
+              : '';
+            return `<span style="color:${p.color}">●</span> ${p.seriesName}: <b>${p.value>=0?'+':''}${p.value}%</b>${wlStr}`;
+          }).join('<br/>');
+      }
+    },
+    legend: {
+      data: series.map(s=>s.name),
+      bottom:0, type:'scroll',
+      textStyle:{color:'#94a3b8',fontSize:10},
+      icon:'roundRect', itemWidth:10, itemHeight:4,
+      pageTextStyle:{color:'#64748b'},
+      inactiveColor:'#334155',
+    },
+    grid: { ...GRID, bottom:55 },
+    xAxis: dateAxis(allDates),
+    yAxis: { ...valueAxis('%'), axisLabel:{...AXIS_STYLE.axisLabel, formatter:v=>v+'%'} },
+    series,
+  };
+
+  // 已有图表则复用，否则新建
+  const existing = S.activeCharts.find(c => { try { return c.getDom().id==='ov-cum'; } catch(e){ return false; }});
+  if (existing) {
+    existing.setOption(option, true);
+  } else {
+    mkChart('ov-cum', option, 320);
+  }
+}
+
+// ── Tab 切换 ─────────────────────────────────────────────────────────────────
+function setCumTab(tab) {
+  S.cumTab = tab;
+  document.querySelectorAll('#ov-cum').length; // ensure DOM ready
+  // 更新按钮 active 状态（通过重建 HTML 更新比较复杂，直接遍历父级）
+  const card = document.getElementById('ov-cum')?.closest('.chart-card');
+  if (card) {
+    card.querySelectorAll('.period-btn').forEach(el => {
+      const onclick = el.getAttribute('onclick') || '';
+      el.classList.toggle('active', onclick.includes(`'${tab}'`));
+    });
+  }
+  if (S.ovData) renderCumChart(S.ovData);
+}
+
+// ── 各策略每日胜率图 ──────────────────────────────────────────────────────────
+function renderWinRateChart(data) {
+  const winLoss  = data.win_loss || {};
+  const agentIds = Object.keys(winLoss).filter(id => Object.keys(winLoss[id]||{}).length > 0);
+  if (!agentIds.length) return;
+
+  const COLORS  = ['#38bdf8','#818cf8','#f472b6','#34d399','#fbbf24','#f87171','#a78bfa','#6ee7b7'];
+  const allDates = [...new Set(agentIds.flatMap(id => Object.keys(winLoss[id]||{})))].sort();
+
+  const series = agentIds.map((id, i) => {
+    const wlByDate = winLoss[id] || {};
+    const vals = allDates.map(d => {
+      const wl = wlByDate[d];
+      if (!wl || wl.total === 0) return null;
+      return parseFloat((wl.win / wl.total * 100).toFixed(1));
+    });
+    const meta = S.agents.short.find(a=>a.id===id);
+    return {
+      name: meta?.name || id, type:'line', smooth:true, symbol:'none',
+      lineStyle:{ width:1.5 }, itemStyle:{ color:COLORS[i%COLORS.length] },
+      connectNulls:false, data:vals,
+    };
+  });
+
+  mkChart('ov-winrate', {
+    tooltip: {
+      trigger:'axis', ...TOOLTIP_STYLE,
+      formatter: params => {
+        const d = params[0].axisValue;
+        const validP = params.filter(p=>p.value!=null);
+        return `<div style="font-weight:600;margin-bottom:4px">${d} · 胜率</div>` +
+          validP.map(p=>`<span style="color:${p.color}">●</span> ${p.seriesName}: <b>${p.value}%</b>`).join('<br/>');
+      }
+    },
+    legend: { data:series.map(s=>s.name), bottom:0, type:'scroll', textStyle:{color:'#94a3b8',fontSize:10}, icon:'roundRect', itemWidth:10, itemHeight:4, inactiveColor:'#334155' },
+    grid: { ...GRID, bottom:55 },
+    xAxis: dateAxis(allDates),
+    yAxis: { ...valueAxis('%'), min:0, max:100, axisLabel:{...AXIS_STYLE.axisLabel, formatter:v=>v+'%'} },
+    series,
+  }, 240);
+}
+
+// ── 长线策略月度盈亏图（概览页）──────────────────────────────────────────────
+function renderLongPerfChart(longPerf) {
+  if (!longPerf || !Object.keys(longPerf).length) return;
+  const LONG_COLORS = ['#38bdf8','#818cf8','#f472b6'];
+  const agentIds = Object.keys(longPerf);
+  const allMonths = [...new Set(agentIds.flatMap(id=>(longPerf[id]||[]).map(r=>r.ym)))].sort();
+  if (!allMonths.length) return;
+
+  const winSeries = agentIds.map((id,i)=>{
+    const byYm = Object.fromEntries((longPerf[id]||[]).map(r=>[r.ym,r.avg_win]));
+    const meta = S.agents.long.find(a=>a.id===id);
+    return { name:(meta?.name||id)+' 盈利均值', type:'bar', barGap:'10%',
+      itemStyle:{ color:LONG_COLORS[i%LONG_COLORS.length], opacity:0.85 },
+      data: allMonths.map(m=>byYm[m]??null) };
+  });
+  const lossSeries = agentIds.map((id,i)=>{
+    const byYm = Object.fromEntries((longPerf[id]||[]).map(r=>[r.ym,r.avg_loss]));
+    const meta = S.agents.long.find(a=>a.id===id);
+    return { name:(meta?.name||id)+' 亏损均值', type:'bar', barGap:'10%',
+      itemStyle:{ color:LONG_COLORS[i%LONG_COLORS.length], opacity:0.45 },
+      data: allMonths.map(m=>byYm[m]??null) };
+  });
+
+  mkChart('ov-long-perf', {
+    tooltip: { trigger:'axis', ...TOOLTIP_STYLE,
+      formatter: params => {
+        const d = params[0].axisValue;
+        return `<div style="font-weight:600;margin-bottom:4px">${d}</div>` +
+          params.filter(p=>p.value!=null).map(p=>`<span style="color:${p.color}">●</span> ${p.seriesName}: <b>${p.value>=0?'+':''}${p.value}%</b>`).join('<br/>');
+      }
+    },
+    legend: { bottom:0, type:'scroll', textStyle:{color:'#94a3b8',fontSize:10}, itemWidth:10, itemHeight:4, inactiveColor:'#334155' },
+    grid: { ...GRID, bottom:55 },
+    xAxis: { type:'category', data:allMonths, ...AXIS_STYLE, axisLabel:{...AXIS_STYLE.axisLabel, rotate:30, interval:0} },
+    yAxis: { ...valueAxis('%'), axisLabel:{...AXIS_STYLE.axisLabel, formatter:v=>v+'%'} },
+    series: [...winSeries, ...lossSeries],
+  }, 260);
 }
 
 // 柱状图时段切换
@@ -941,7 +1091,11 @@ function buildShortHTML(rows, agentId) {
   const bestDay = valid.length ? valid.reduce((b,r)=>r.next_day_avg_close_return>b.next_day_avg_close_return?r:b) : null;
 
   const meta = S.agents.short.find(a=>a.id===agentId);
+  const agentDesc = rows.find(r=>r.reserve_str_2)?.reserve_str_2 || meta?.desc || '';
   return `
+  ${agentDesc ? `<div style="background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);padding:12px 16px;margin-bottom:16px;font-size:12px;color:var(--text2);line-height:1.7">
+    <span style="color:var(--accent);font-weight:600;margin-right:8px">策略说明</span>${agentDesc}
+  </div>` : ''}
   <div class="cards-row cards-4">
     <div class="card accent">
       <div class="card-label">有效信号天数</div>
@@ -1129,14 +1283,15 @@ function renderShortCharts(rows) {
 async function renderLong(agentId) {
   showContent('<div class="loading-wrap"><div class="spinner"></div><div>加载中...</div></div>');
   try {
-    const [positions, agg, summary] = await Promise.all([
+    const [positions, agg, summary, stopStats] = await Promise.all([
       apiFetch(apiUrl('/api/long/positions', { agent_id: agentId })),
       apiFetch(apiUrl('/api/long/aggregate', { agent_id: agentId })),
       apiFetch(apiUrl('/api/long/summary',   { agent_id: agentId })),
+      apiFetch(apiUrl('/api/long/stop_stats', { agent_id: agentId })).catch(()=>[]),
     ]);
     if (!summary.total) { showContent('<div class="empty-wrap">⚡ 该时段暂无持仓数据</div>'); return; }
     showContent(buildLongHTML(positions, agg, summary, agentId));
-    renderLongCharts(positions, agg);
+    renderLongCharts(positions, agg, stopStats || []);
   } catch(e) {
     showContent(`<div class="loading-wrap"><div style="color:var(--neg)">加载失败：${e.message}</div></div>`);
   }
@@ -1144,9 +1299,11 @@ async function renderLong(agentId) {
 
 function buildLongHTML(positions, agg, summary, agentId) {
   // 卡片统计来自后端全量统计，不受 positions LIMIT 影响
-  const winRate = summary.win_rate;
-  const avgRet  = summary.avg_return;
-  const avgDays = summary.avg_days != null ? summary.avg_days.toFixed(1) : '--';
+  const winRate  = summary.win_rate;
+  const avgRet   = summary.avg_return;
+  const avgDays  = summary.avg_days != null ? summary.avg_days.toFixed(1) : '--';
+  const stopRate = summary.stop_loss_rate ?? '--';
+  const stopDays = summary.avg_stop_days != null ? summary.avg_stop_days.toFixed(1) : '--';
 
   const meta = S.agents.long.find(a=>a.id===agentId);
   return `
@@ -1164,33 +1321,23 @@ function buildLongHTML(positions, agg, summary, agentId) {
     <div class="card ${avgRet>=0?'pos':'neg'}">
       <div class="card-label">均收益（已平仓）</div>
       <div class="card-value ${avgRet>=0?'pos':'neg'}">${fmt2(avgRet)}</div>
-      <div class="card-sub">含手续费约 -0.15%</div>
+      <div class="card-sub">均持仓 ${avgDays} 天</div>
     </div>
-    <div class="card purple">
-      <div class="card-label">平均持仓天数</div>
-      <div class="card-value">${avgDays}</div>
-      <div class="card-sub">交易日</div>
+    <div class="card neg">
+      <div class="card-label">止损率（≤-7%）</div>
+      <div class="card-value neg">${stopRate}%</div>
+      <div class="card-sub">均止损 ${stopDays} 天</div>
     </div>
   </div>
 
   <div class="charts-grid charts-2">
     <div class="chart-card">
-      <div class="chart-title">持仓收益 vs 持仓天数（散点）</div>
-      <div class="chart-body" id="l-scatter" style="height:260px"></div>
-    </div>
-    <div class="chart-card">
       <div class="chart-title">平仓收益分布</div>
       <div class="chart-body" id="l-hist" style="height:260px"></div>
     </div>
-  </div>
-  <div class="charts-grid charts-2">
     <div class="chart-card">
-      <div class="chart-title">风险收益图（最大浮盈 vs 最大浮亏）</div>
-      <div class="chart-body" id="l-risk" style="height:240px"></div>
-    </div>
-    <div class="chart-card">
-      <div class="chart-title">每日操作累计权益（按买入日，中位收益叠加）</div>
-      <div class="chart-body" id="l-equity" style="height:240px"></div>
+      <div class="chart-title">月度盈亏均值 · 止损率统计</div>
+      <div class="chart-body" id="l-stopstats" style="height:260px"></div>
     </div>
   </div>
 
@@ -1203,7 +1350,7 @@ function buildLongHTML(positions, agg, summary, agentId) {
       <table>
         <thead><tr>
           <th>买入日</th><th>股票</th><th>买价</th><th>卖出日</th><th>卖价</th>
-          <th>收益</th><th>天数</th><th>最大浮盈</th><th>最大回撤</th><th>状态</th><th>详情</th>
+          <th>收益/天数</th><th>最大浮盈</th><th>最大回撤</th><th>状态</th><th>详情</th>
         </tr></thead>
         <tbody>
           ${positions.map(p => longRow(p)).join('')}
@@ -1241,14 +1388,25 @@ function buildLongHTML(positions, agg, summary, agentId) {
 
 function longRow(p) {
   const retCls = (p.period_return||0) >= 0 ? 'val-pos' : 'val-neg';
+  // 持仓中：显示当前浮动收益 + 持股天数
+  let retCell;
+  if (p.status === 0) {
+    if (p.current_return != null) {
+      const cls = p.current_return >= 0 ? 'val-pos' : 'val-neg';
+      retCell = `<td class="${cls}">${fmt2(p.current_return)}<br><span style="color:var(--text3);font-size:10px">${p.days_held??'?'}日</span></td>`;
+    } else {
+      retCell = `<td style="color:var(--text3)">持仓${p.days_held!=null?p.days_held+'日':'中'}</td>`;
+    }
+  } else {
+    retCell = `<td class="${retCls}">${fmt2(p.period_return)}<br><span style="color:var(--text3);font-size:10px">${p.trading_days!=null?p.trading_days+'天':''}</span></td>`;
+  }
   return `<tr>
     <td>${p.buy_date}</td>
     <td><span style="color:var(--text1)">${p.stock_name||p.ts_code}</span><br><span style="color:var(--text3);font-size:10px">${p.ts_code}</span></td>
     <td>${fmtN(p.buy_price)}</td>
     <td>${p.sell_date||'--'}</td>
-    <td>${fmtN(p.sell_price)}</td>
-    <td class="${retCls}">${p.status===1 ? fmt2(p.period_return) : '--'}</td>
-    <td>${p.trading_days != null ? p.trading_days+'天' : '--'}</td>
+    <td>${p.status===1?fmtN(p.sell_price):'--'}</td>
+    ${retCell}
     <td class="val-pos">${fmt2(p.max_floating_profit)}</td>
     <td class="val-neg">${fmt2(p.max_drawdown)}</td>
     <td>${p.status===0
@@ -1259,88 +1417,61 @@ function longRow(p) {
   </tr>`;
 }
 
-function renderLongCharts(positions, agg) {
+function renderLongCharts(positions, agg, stopStats) {
   const closed = positions.filter(p => p.status === 1 && p.period_return != null);
 
-  // Scatter: return vs days
-  const scData = closed.map(p => [p.trading_days||0, p.period_return, p.stock_name||p.ts_code, p.buy_date]);
-  mkChart('l-scatter', {
-    tooltip: { trigger:'item', ...TOOLTIP_STYLE,
-      formatter: p => `${p.data[2]} (${p.data[3]})<br/>持仓: ${p.data[0]}天<br/>收益: ${fmt2(p.data[1])}` },
-    grid: { top:20, bottom:36, left:56, right:10 },
-    xAxis: { type:'value', name:'持仓天数', ...AXIS_STYLE, nameTextStyle:{color:'#475569',fontSize:10} },
-    yAxis: { type:'value', name:'收益%', ...AXIS_STYLE, nameTextStyle:{color:'#475569',fontSize:10} },
-    series: [{
-      type:'scatter', symbolSize: p => Math.max(5, Math.min(18, Math.abs(p[1])*1.5)),
-      data: scData,
-      itemStyle:{ color: p => retColor(p.data[1]), opacity:0.8 },
-    }],
-  }, 260);
-
-  // Histogram
+  // 平仓收益分布直方图
   if (closed.length) {
     const rets = closed.map(p => p.period_return);
-    const min = Math.floor(Math.min(...rets) / 2) * 2;
-    const max = Math.ceil(Math.max(...rets) / 2) * 2;
+    const mn = Math.floor(Math.min(...rets) / 2) * 2;
+    const mx = Math.ceil(Math.max(...rets) / 2) * 2;
     const buckets = {};
-    for (let b = min; b <= max; b += 2) buckets[b] = 0;
-    rets.forEach(v => { const b = Math.floor(v/2)*2; if(b in buckets) buckets[b]++; });
+    for (let b = mn; b <= mx; b += 2) buckets[b] = 0;
+    rets.forEach(v => { const b = Math.floor(v/2)*2; if (b in buckets) buckets[b]++; });
     const bKeys = Object.keys(buckets).map(Number).sort((a,b)=>a-b);
     mkChart('l-hist', {
-      tooltip: { trigger:'axis', ...TOOLTIP_STYLE },
+      tooltip: { trigger:'axis', ...TOOLTIP_STYLE,
+        formatter: p => `${p[0].axisValue} 区间<br/>笔数: <b>${p[0].value}</b>` },
       grid: { top:20, bottom:40, left:40, right:10 },
-      xAxis: { type:'category', data: bKeys.map(k=>k+'%'), ...AXIS_STYLE,
+      xAxis: { type:'category', data:bKeys.map(k=>k+'%'), ...AXIS_STYLE,
         axisLabel:{...AXIS_STYLE.axisLabel, rotate:30, interval:1} },
       yAxis: { type:'value', ...AXIS_STYLE },
-      series: [{ type:'bar', barMaxWidth:24,
+      series: [{ type:'bar', barMaxWidth:28,
         data: bKeys.map(k=>({ value:buckets[k], itemStyle:{color:retColor(k)} })) }],
     }, 260);
   }
 
-  // Risk chart: max_floating_profit vs max_drawdown
-  const riskData = closed.map(p => [p.max_floating_profit||0, p.max_drawdown||0, p.period_return, p.stock_name||p.ts_code]);
-  mkChart('l-risk', {
-    tooltip: { trigger:'item', ...TOOLTIP_STYLE,
-      formatter: p => `${p.data[3]}<br/>最大浮盈: +${fmtN(p.data[0])}%<br/>最大回撤: ${fmtN(p.data[1])}%<br/>最终收益: ${fmt2(p.data[2])}` },
-    grid: { top:20, bottom:36, left:56, right:10 },
-    xAxis: { type:'value', name:'最大浮盈%', min:0, ...AXIS_STYLE, nameTextStyle:{color:'#475569',fontSize:10} },
-    yAxis: { type:'value', name:'最大回撤%', ...AXIS_STYLE, nameTextStyle:{color:'#475569',fontSize:10} },
-    series: [{
-      type:'scatter', symbolSize:7,
-      data: riskData,
-      itemStyle:{ color: p => retColor(p.data[2]), opacity:0.75 },
-    }],
-  }, 240);
-
-  // 权益曲线：按买入日累计中位收益（agg 数据），体现每日操作模式的累积效果
-  // agg 中每行 = 该买入日所有持仓全部平仓后的汇总，median_return 代表典型单次操作收益
-  const sortedAgg = (agg || [])
-    .filter(a => a.long_median_return != null)
-    .sort((a,b) => a.trade_date > b.trade_date ? 1 : -1);
-  let eq = 0;
-  const eqDates = [], eqVals = [];
-  sortedAgg.forEach(a => {
-    eq += a.long_median_return;
-    eqDates.push(a.trade_date);
-    eqVals.push(parseFloat(eq.toFixed(2)));
-  });
-  if (eqVals.length) {
-    mkChart('l-equity', {
-      tooltip: { trigger:'axis', ...TOOLTIP_STYLE, formatter: p => `${p[0].axisValue}<br/>累计: ${p[0].value>=0?'+':''}${p[0].value}%` },
-      grid: { ...GRID },
-      xAxis: dateAxis(eqDates),
-      yAxis: { ...valueAxis('%'), axisLabel:{...AXIS_STYLE.axisLabel, formatter:v=>v+'%'} },
-      series: [{
-        type:'line', smooth:true, symbol:'none',
-        lineStyle:{ width:2, color:'#818cf8' },
-        areaStyle:{ color:{ type:'linear', x:0,y:0,x2:0,y2:1, colorStops:[
-          {offset:0, color:'rgba(129,140,248,.25)'}, {offset:1, color:'rgba(129,140,248,.02)'}
-        ]}},
-        itemStyle:{ color:'#818cf8' },
-        data: eqVals,
-        markLine:{ silent:true, data:[{yAxis:0}], lineStyle:{color:'#1a2744',type:'dashed'} },
-      }],
-    }, 240);
+  // 月度盈亏均值 + 止损率图（双 Y 轴）
+  if (stopStats && stopStats.length) {
+    const months    = stopStats.map(r=>r.ym);
+    const avgWin    = stopStats.map(r=>r.avg_win);
+    const avgLoss   = stopStats.map(r=>r.avg_loss);
+    const stopRates = stopStats.map(r=>r.stop_rate);
+    mkChart('l-stopstats', {
+      tooltip: { trigger:'axis', ...TOOLTIP_STYLE,
+        formatter: params => {
+          const d = params[0].axisValue;
+          return `<div style="font-weight:600;margin-bottom:4px">${d}</div>` +
+            params.filter(p=>p.value!=null).map(p=>`<span style="color:${p.color}">●</span> ${p.seriesName}: <b>${p.value!=null?(p.seriesName.includes('止损')?p.value+'%':(p.value>=0?'+':'')+p.value+'%'):'--'}</b>`).join('<br/>');
+        }
+      },
+      legend: { bottom:0, textStyle:{color:'#94a3b8',fontSize:10}, icon:'roundRect', itemWidth:10, itemHeight:4, inactiveColor:'#334155' },
+      grid: { ...GRID, bottom:55, right:50 },
+      xAxis: { type:'category', data:months, ...AXIS_STYLE, axisLabel:{...AXIS_STYLE.axisLabel, rotate:30, interval:0} },
+      yAxis: [
+        { type:'value', name:'收益%', ...AXIS_STYLE, axisLabel:{...AXIS_STYLE.axisLabel, formatter:v=>v+'%'} },
+        { type:'value', name:'止损率%', min:0, max:100, ...AXIS_STYLE, axisLabel:{...AXIS_STYLE.axisLabel, formatter:v=>v+'%'}, splitLine:{show:false} },
+      ],
+      series: [
+        { name:'盈利均值', type:'bar', barMaxWidth:18, itemStyle:{color:'#10b981',opacity:0.85},
+          data: avgWin.map(v=>v!=null?{value:v}:null) },
+        { name:'亏损均值', type:'bar', barMaxWidth:18, itemStyle:{color:'#ef4444',opacity:0.75},
+          data: avgLoss.map(v=>v!=null?{value:v}:null) },
+        { name:'止损率', type:'line', yAxisIndex:1, smooth:true, symbol:'circle', symbolSize:5,
+          lineStyle:{color:'#f59e0b',width:2}, itemStyle:{color:'#f59e0b'},
+          data: stopRates },
+      ],
+    }, 260);
   }
 }
 

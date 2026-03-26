@@ -35,7 +35,7 @@ from utils.xgb_compat import safe_predict_proba
 
 # ── 策略参数（与 sector_heat_strategy.py 保持一致）──────────────────────────
 _BUY_TOP_K = 6        # 每日最多信号数
-_MIN_PROB  = 0.50      # 最低买入概率阈值（v5.2 AUC-first 模型概率分布更保守，降低阈值）
+_MIN_PROB  = 0.60      # 最低买入概率阈值（v5.2 AUC-first 模型概率分布更保守，降低阈值）
 _MIN_AMOUNT = 10_000   # 低流动性阈值（千元，= 1000 万元）
 _LOAD_MINUTE = True    # 特征计算是否加载分钟线（与训练口径一致）
 

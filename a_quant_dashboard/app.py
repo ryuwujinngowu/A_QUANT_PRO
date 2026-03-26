@@ -191,32 +191,80 @@ def get_overview(start_date: Optional[str] = None, end_date: Optional[str] = Non
         r["avg_days"] = _to_float(r["avg_days"], 0)
         long_summary.append(r)
 
-    # 各 agent 每日收益时间序列（用于 Overview 多线图）
+    # 各 agent 每日收益时间序列（用于 Overview 多线图）— 扩展包含日内收益和 win/loss 计数
     trend_rows = query("""
-        SELECT agent_id, trade_date, next_day_avg_close_return
+        SELECT agent_id, trade_date, next_day_avg_close_return, intraday_avg_return, next_day_stock_detail
         FROM agent_daily_profit_stats
         WHERE trade_date BETWEEN %s AND %s
-          AND next_day_avg_close_return IS NOT NULL
           AND (reserve_str_1 IS NULL OR reserve_str_1 NOT LIKE '[ERR]%%')
           AND agent_id NOT LIKE 'long_%%'
         ORDER BY trade_date
     """, [start_date, end_date])
 
     trend_by_agent = {}
+    intraday_by_agent = {}
+    win_loss_by_agent = {}  # {agent_id: {date_str: {total, win, loss}}}
+
     for r in trend_rows:
         aid = r["agent_id"]
+        date_str = str(r["trade_date"])
+
         if aid not in trend_by_agent:
             trend_by_agent[aid] = []
-        trend_by_agent[aid].append({
-            "date": str(r["trade_date"]),
-            "return": _to_float(r["next_day_avg_close_return"], 0),
+            intraday_by_agent[aid] = []
+            win_loss_by_agent[aid] = {}
+
+        t1_ret = _to_float(r["next_day_avg_close_return"])
+        if t1_ret is not None:
+            trend_by_agent[aid].append({"date": date_str, "return": t1_ret})
+
+        id_ret = _to_float(r["intraday_avg_return"])
+        if id_ret is not None:
+            intraday_by_agent[aid].append({"date": date_str, "return": id_ret})
+
+        detail = _parse_json(r.get("next_day_stock_detail"))
+        if isinstance(detail, dict):
+            sl = detail.get("stock_list", [])
+            if sl:
+                total = len(sl)
+                win = sum(1 for s in sl if (s.get("close_return") or s.get("pct_chg") or 0) > 0)
+                win_loss_by_agent[aid][date_str] = {"total": total, "win": win, "loss": total - win}
+
+    # 长线策略月度盈亏均值（用于概览页图表）
+    long_perf_rows = query("""
+        SELECT agent_id,
+               DATE_FORMAT(buy_date, '%%Y-%%m') AS ym,
+               AVG(CASE WHEN period_return > 0 THEN period_return END) AS avg_win,
+               AVG(CASE WHEN period_return < 0 THEN period_return END) AS avg_loss,
+               SUM(CASE WHEN period_return > 0 THEN 1 ELSE 0 END) AS win_cnt,
+               SUM(CASE WHEN period_return < 0 THEN 1 ELSE 0 END) AS loss_cnt
+        FROM agent_long_position_stats
+        WHERE status = 1 AND buy_date BETWEEN %s AND %s
+        GROUP BY agent_id, DATE_FORMAT(buy_date, '%%Y-%%m')
+        ORDER BY agent_id, ym
+    """, [start_date, end_date])
+
+    long_perf: dict = {}
+    for r in long_perf_rows:
+        aid = r["agent_id"]
+        if aid not in long_perf:
+            long_perf[aid] = []
+        long_perf[aid].append({
+            "ym":      r["ym"],
+            "avg_win":  _to_float(r["avg_win"]),
+            "avg_loss": _to_float(r["avg_loss"]),
+            "win_cnt":  int(r["win_cnt"] or 0),
+            "loss_cnt": int(r["loss_cnt"] or 0),
         })
 
     return {
-        "short": short_summary,
-        "long": long_summary,
-        "trend": trend_by_agent,
-        "period": {"start": start_date, "end": end_date},
+        "short":          short_summary,
+        "long":           long_summary,
+        "trend":          trend_by_agent,
+        "intraday_trend": intraday_by_agent,
+        "win_loss":       win_loss_by_agent,
+        "long_perf":      long_perf,
+        "period":         {"start": start_date, "end": end_date},
     }
 
 
@@ -277,7 +325,8 @@ def get_short_daily(
                next_day_avg_intraday_profit,
                signal_stock_detail,
                next_day_stock_detail,
-               reserve_str_1
+               reserve_str_1,
+               reserve_str_2
         FROM agent_daily_profit_stats
         WHERE agent_id = %s
           AND trade_date BETWEEN %s AND %s
@@ -297,6 +346,7 @@ def get_short_daily(
         r["signal_stock_detail"] = detail
         r["next_day_stock_detail"] = _parse_json(r.get("next_day_stock_detail"))
         r["has_error"] = bool(r.get("reserve_str_1") and str(r["reserve_str_1"]).startswith("[ERR]"))
+        # 保留 reserve_str_2（策略描述），不做额外处理
         result.append(r)
 
     # 批量补充股票名称
@@ -358,6 +408,44 @@ def get_long_positions(
         r["sell_date"] = str(r["sell_date"]) if r["sell_date"] else None
         for f in ["buy_price", "sell_price", "period_return", "max_drawdown", "max_floating_profit"]:
             r[f] = _to_float(r[f])
+
+    # 为持仓中（status=0）股票计算当前收益
+    open_ps = [r for r in rows if r["status"] == 0]
+    if open_ps:
+        ts_codes = list({p["ts_code"] for p in open_ps})
+        ph = ','.join(['%s'] * len(ts_codes))
+        try:
+            latest_rows = query(f"""
+                SELECT k.ts_code, k.close, k.trade_date
+                FROM kline_day k
+                INNER JOIN (
+                    SELECT ts_code, MAX(trade_date) AS max_date
+                    FROM kline_day WHERE ts_code IN ({ph})
+                    GROUP BY ts_code
+                ) m ON k.ts_code = m.ts_code AND k.trade_date = m.max_date
+            """, ts_codes)
+            price_map = {r2["ts_code"]: r2 for r2 in latest_rows}
+        except Exception:
+            price_map = {}
+
+        today = date.today()
+        for p in open_ps:
+            lp = price_map.get(p["ts_code"])
+            if lp and p.get("buy_price"):
+                try:
+                    cr = (float(lp["close"]) / float(p["buy_price"]) - 1) * 100
+                    p["current_return"] = round(cr, 2)
+                    p["latest_price_date"] = str(lp["trade_date"])
+                except Exception:
+                    p["current_return"] = None
+            else:
+                p["current_return"] = None
+            try:
+                buy_d = date.fromisoformat(p["buy_date"])
+                p["days_held"] = (today - buy_d).days
+            except Exception:
+                p["days_held"] = None
+
     return rows
 
 
@@ -411,14 +499,30 @@ def get_long_summary(
     r = rows[0]
     closed = int(r["closed_cnt"] or 0)
     win = int(r["win_cnt"] or 0)
+
+    # 止损统计：period_return <= -7% 视为触发止损
+    _STOP_THRESH = -7.0
+    stop_rows = query("""
+        SELECT
+            SUM(CASE WHEN status=1 AND period_return <= %s THEN 1 ELSE 0 END) AS stop_cnt,
+            AVG(CASE WHEN status=1 AND period_return <= %s THEN trading_days END) AS avg_stop_days
+        FROM agent_long_position_stats
+        WHERE agent_id = %s AND buy_date BETWEEN %s AND %s
+    """, [_STOP_THRESH, _STOP_THRESH, agent_id, start_date, end_date])
+    sr = stop_rows[0]
+    stop_cnt = int(sr["stop_cnt"] or 0)
+
     return {
-        "total":    int(r["total"] or 0),
-        "open":     int(r["open_cnt"] or 0),
-        "closed":   closed,
-        "win":      win,
-        "win_rate": round(win / closed * 100, 1) if closed > 0 else 0,
-        "avg_return": _to_float(r["avg_return"], 0),
-        "avg_days":   _to_float(r["avg_days"], 0),
+        "total":           int(r["total"] or 0),
+        "open":            int(r["open_cnt"] or 0),
+        "closed":          closed,
+        "win":             win,
+        "win_rate":        round(win / closed * 100, 1) if closed > 0 else 0,
+        "avg_return":      _to_float(r["avg_return"], 0),
+        "avg_days":        _to_float(r["avg_days"], 0),
+        "stop_loss_count": stop_cnt,
+        "stop_loss_rate":  round(stop_cnt / closed * 100, 1) if closed > 0 else 0,
+        "avg_stop_days":   _to_float(sr["avg_stop_days"]),
     }
 
 
@@ -451,6 +555,49 @@ def get_long_aggregate(
         for f in ["long_median_return", "long_max_return", "long_min_return", "long_avg_trading_days"]:
             r[f] = _to_float(r[f])
     return rows
+
+
+@app.get("/api/long/stop_stats")
+def get_long_stop_stats(
+    agent_id: str = Query(...),
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+):
+    """月度止损率 + 平均止损天数 + 盈亏均值（用于详情页图表）"""
+    if not start_date:
+        start_date = (date.today() - timedelta(days=365)).strftime("%Y-%m-%d")
+    if not end_date:
+        end_date = date.today().strftime("%Y-%m-%d")
+
+    _STOP_THRESH = -7.0
+    rows = query("""
+        SELECT
+            DATE_FORMAT(buy_date, '%%Y-%%m') AS ym,
+            SUM(CASE WHEN status=1 THEN 1 ELSE 0 END) AS closed,
+            SUM(CASE WHEN status=1 AND period_return <= %s THEN 1 ELSE 0 END) AS stop_cnt,
+            AVG(CASE WHEN status=1 AND period_return <= %s THEN trading_days END) AS avg_stop_days,
+            AVG(CASE WHEN status=1 AND period_return > 0 THEN period_return END) AS avg_win,
+            AVG(CASE WHEN status=1 AND period_return < 0 THEN period_return END) AS avg_loss
+        FROM agent_long_position_stats
+        WHERE agent_id = %s AND buy_date BETWEEN %s AND %s
+        GROUP BY DATE_FORMAT(buy_date, '%%Y-%%m')
+        ORDER BY ym
+    """, [_STOP_THRESH, _STOP_THRESH, agent_id, start_date, end_date])
+
+    result = []
+    for r in rows:
+        closed = int(r["closed"] or 0)
+        stop = int(r["stop_cnt"] or 0)
+        result.append({
+            "ym":            r["ym"],
+            "stop_rate":     round(stop / closed * 100, 1) if closed > 0 else 0,
+            "avg_stop_days": _to_float(r["avg_stop_days"]),
+            "stop_cnt":      stop,
+            "closed":        closed,
+            "avg_win":       _to_float(r["avg_win"]),
+            "avg_loss":      _to_float(r["avg_loss"]),
+        })
+    return result
 
 
 # ── 静态文件（放最后，避免覆盖 /api 路由）─────────────────────────────────────
