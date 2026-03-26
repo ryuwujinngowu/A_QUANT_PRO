@@ -110,29 +110,46 @@ def _enrich_detail_names(detail, name_map: dict) -> None:
             s['stock_name'] = name_map[ts]
 
 
-# ── Agent 元数据 ───────────────────────────────────────────────────────────────
-AGENTS = {
-    "short": [
-        {"id": "hot_sector_dip_buy",   "name": "热板块低吸",   "desc": "热门板块早盘低吸反弹，09:30-10:30 低于开盘3%买入"},
-        {"id": "model_dip_buy",        "name": "模型低吸",     "desc": "XGBoost 信号 + 恐慌低吸，D-1 选股 D 日低吸"},
-        {"id": "model_open_buy",       "name": "模型开盘",     "desc": "XGBoost 信号 + 次日开盘价买入，关注隔夜溢价"},
-        {"id": "model_surge_buy",      "name": "模型拉升",     "desc": "XGBoost 信号 + 早盘 5 分钟涨幅 >4% 跟进"},
-        {"id": "high_position_stock",  "name": "高位股",       "desc": "近 20 日涨幅前 1% 强势股池，动量最强"},
-        {"id": "mid_position_stock",   "name": "中位股",       "desc": "近 20 日涨幅 50%~1% 中间层，次强动量"},
-        {"id": "limit_down_buy",       "name": "跌停反包",     "desc": "5 日涨幅 >30% 后首次跌停，反弹博弈"},
-        {"id": "sector_top_high_open", "name": "板块龙头高开", "desc": "昨日热板块第一名 + 今日高开跟进"},
-    ],
-    "long": [
-        {"id": "long_breakout_buy",       "name": "120日突破",  "desc": "HFQ 收盘突破 120 日新高 + 量能放大 1.5 倍，持有最长 60 天"},
-        {"id": "long_ma_trend_tracking",  "name": "MA多头趋势", "desc": "MA5>10>20>60 多头排列 + 正向斜率 + 放量，持有最长 90 天"},
-        {"id": "long_high_low_switch",    "name": "高低切换",   "desc": "高位钝化后转连板博弈，持有最长 10 天"},
-    ],
-}
-
 # ── Overview ───────────────────────────────────────────────────────────────────
 @app.get("/api/agents")
 def get_agents():
-    return AGENTS
+    """动态从数据库查询已有 agent，不依赖硬编码列表"""
+    # 短线：从 agent_daily_profit_stats 取 DISTINCT agent，用最新一条 reserve_str_2 作描述
+    # 排除 long_ 前缀（双写表中也有长线记录）
+    short_rows = query("""
+        SELECT agent_id, agent_name,
+               SUBSTRING_INDEX(GROUP_CONCAT(reserve_str_2 ORDER BY trade_date DESC), ',', 1) AS desc_str
+        FROM agent_daily_profit_stats
+        WHERE agent_id IS NOT NULL AND agent_id != ''
+          AND agent_id NOT LIKE %s
+        GROUP BY agent_id, agent_name
+        ORDER BY agent_id
+    """, ["long_%"])
+    # 长线：从 agent_long_position_stats 取 DISTINCT agent
+    long_rows = query("""
+        SELECT DISTINCT agent_id, agent_name
+        FROM agent_long_position_stats
+        WHERE agent_id IS NOT NULL AND agent_id != ''
+        ORDER BY agent_id
+    """)
+    return {
+        "short": [
+            {
+                "id":   r["agent_id"],
+                "name": r["agent_name"] or r["agent_id"],
+                "desc": r.get("desc_str") or "",
+            }
+            for r in short_rows
+        ],
+        "long": [
+            {
+                "id":   r["agent_id"],
+                "name": r["agent_name"] or r["agent_id"],
+                "desc": "",
+            }
+            for r in long_rows
+        ],
+    }
 
 
 @app.get("/api/overview")
