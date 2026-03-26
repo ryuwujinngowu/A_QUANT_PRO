@@ -61,6 +61,7 @@ class HotSectorDipBuyAgent(BaseAgent):
         context: Dict,
     ) -> List[Dict]:
         st_set: set = set(context.get("st_stock_list", []))
+        trade_dates: List[str] = context.get("trade_dates", [])
 
         # ── 日期格式统一 ──────────────────────────────────────────────────
         # sector_heat 需要 YYYY-MM-DD；data_cleaner 分钟线接口需要 YYYYMMDD
@@ -71,9 +72,19 @@ class HotSectorDipBuyAgent(BaseAgent):
             trade_date_dash = trade_date
             trade_date_8    = trade_date.replace("-", "")
 
-        # ── Step 1: Top3 热点板块 ─────────────────────────────────────────
+        # ── 获取 D-1 日（避免未来函数：板块热度和5日涨幅排序均使用 D-1 数据）──
+        if trade_date_dash not in trade_dates:
+            logger.warning(f"[{self.agent_id}][{trade_date}] trade_date 不在 trade_dates 中，跳过")
+            return []
+        idx = trade_dates.index(trade_date_dash)
+        if idx == 0:
+            logger.info(f"[{self.agent_id}][{trade_date}] 无 D-1 交易日，跳过")
+            return []
+        prev_date = trade_dates[idx - 1]  # D-1 日（YYYY-MM-DD）
+
+        # ── Step 1: Top3 热点板块（用 D-1 数据，避免用 D 日收盘涨跌幅）────
         try:
-            heat_result  = _sector_heat.select_top3_hot_sectors(trade_date_dash)
+            heat_result  = _sector_heat.select_top3_hot_sectors(prev_date)
             top3_sectors: List[str] = heat_result.get("top3_sectors", [])
         except Exception as e:
             logger.error(f"[{self.agent_id}][{trade_date}] 板块热度计算失败: {e}")
@@ -83,7 +94,7 @@ class HotSectorDipBuyAgent(BaseAgent):
             logger.warning(f"[{self.agent_id}][{trade_date}] Top3 板块为空，无信号")
             return []
 
-        logger.info(f"[{self.agent_id}][{trade_date}] Top3 热点板块: {top3_sectors}")
+        logger.info(f"[{self.agent_id}][{trade_date}] Top3 热点板块（基于D-1={prev_date}）: {top3_sectors}")
 
         # ── Step 2: 每板块取 5 日涨幅前 TOP_N 名 ──────────────────────────
         candidate_codes: List[str] = []
@@ -116,9 +127,9 @@ class HotSectorDipBuyAgent(BaseAgent):
                     logger.debug(f"[{self.agent_id}][{trade_date}][{sector}] 日线数据为空")
                     continue
 
-                # 5 日涨幅排序（sort_by_recent_gain 内部查 DB，仅需候选股两天数据）
+                # 5 日涨幅排序（用 D-1 收盘价排序，避免用 D 日收盘的未来函数）
                 sector_daily = sort_by_recent_gain(
-                    sector_daily, trade_date_dash, day_count=RECENT_GAIN_DAYS
+                    sector_daily, prev_date, day_count=RECENT_GAIN_DAYS
                 )
                 if sector_daily.empty:
                     continue
