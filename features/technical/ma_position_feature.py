@@ -43,9 +43,9 @@ MA 均线 + 个股位置因子
                                   from_high_20d 小 + pos_20d 高 → 创新高附近的强势位
 
 设计说明：
-    - 均线用前复权（qfq）数据：避免分红/送转导致价格跳空，使历史 MA 失真。
-      策略以短线为主，长期复权偏差可接受，优先保证近期 MA 口径准确。
-      前复权数据缺失时（新股/停牌）自动降级至不复权数据（逐日）。
+    - 均线用不复权（bfq）数据：与 kline_day / 分钟线 / stk_factor_pro(_bfq) 保持统一口径。
+      振荡类指标（RSI/KDJ/MACD 等）bfq=qfq=hfq，BIAS 计算对短线策略受除权影响极小。
+      统一口径消除 d0-d4 特征跨日混用不同复权来源的训练数据污染。
     - data_bundle 的 lookback_dates_20d 已有 20 日，MA13 需要 13 日，数据足够。
     - 无足够历史数据时（停牌/新股）输出中性值并记录 warning，不抛出异常。
 """
@@ -125,17 +125,14 @@ class MAPositionFeature(BaseFeature):
 
     def calculate(self, data_bundle) -> tuple:
         """
-        :param data_bundle: FeatureDataBundle，需含 qfq_daily_grouped(优先) / daily_grouped(降级)
-                            / lookback_dates_20d / target_ts_codes
+        :param data_bundle: FeatureDataBundle，需含 daily_grouped / lookback_dates_20d / target_ts_codes
         :return: (feature_df, {})
 
-        均线用前复权（qfq）收盘价，避免分红/送转的价格跳空失真。
-        若前复权数据缺失（新股/停牌），自动降级至不复权数据。
+        均线用不复权（bfq）收盘价，与 kline_day / 分钟线 / stk_factor_pro(_bfq) 统一口径。
         """
         trade_date      = data_bundle.trade_date
         dates_20d       = sorted(data_bundle.lookback_dates_20d)   # 升序，最后一个 = trade_date
-        qfq_grouped     = data_bundle.qfq_daily_grouped             # 前复权（MA 专用）
-        daily_grouped   = data_bundle.daily_grouped                 # 不复权（降级备用）
+        daily_grouped   = data_bundle.daily_grouped                 # 不复权
         target_ts_codes = data_bundle.target_ts_codes
 
         if not dates_20d:
@@ -147,10 +144,9 @@ class MAPositionFeature(BaseFeature):
 
         for ts_code in target_ts_codes:
             # ── 提取 20 日收盘价序列（升序，index -1 = D 日）──
-            # 优先用前复权；单日缺失则降级用不复权，保证序列尽量连续
             close_series = []
             for d in dates_20d:
-                row = qfq_grouped.get((ts_code, d)) or daily_grouped.get((ts_code, d), {})
+                row = daily_grouped.get((ts_code, d), {})
                 v   = row.get("close", None)
                 close_series.append(float(v) if v else float("nan"))
 

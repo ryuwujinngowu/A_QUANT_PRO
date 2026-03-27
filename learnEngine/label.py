@@ -6,20 +6,27 @@
     - 策略在 D 日收盘后生成信号，D+1 日开盘买入
     - 因此标签买入价 = D+1 open，卖出价 = D+1 close
 
-label 定义：
-    label1 : (D+1 close - D+1 open) / D+1 open >= 5%  → 1，否则 0
-             含义：D+1 日以开盘价买入、收盘价卖出，涨幅达 5%
-             模型主训练标签（TARGET_LABEL = "label1"）
+label 定义（完整版）：
 
-    label2 : D+2 open > D+1 close  AND  D+1 close > D+1 open → 1，否则 0
-             含义：D+1 日内已盈利（close > open）且 D+2 高开（隔夜继续赚），
-                   即值得持仓过夜的强势票
-             设计约束：label2=1 必然满足 label1（label2 ⊆ label1 的充分子集）
-             可用于策略二阶过滤：模型选出 label1 候选后，label2 高概率的票优先持仓
+二分类标签（1/0，用于分类模型训练）：
+    label1              : D+1 日内收益率 >= 5%（主训练标签）
+    label2              : D+1 日内盈利 AND D+2 高开（隔夜强势票）
+    label1_3pct         : D+1 日内收益率 >= 3%（低门槛，更多正样本）
+    label1_8pct         : D+1 日内收益率 >= 8%（高门槛，强势票过滤）
+    label_d2_limit_down : D+2 日跌停（pct_chg <= -9.5%）→ 1，用于黑名单模型
+
+浮点标签（用于回归模型或分级惩罚）：
+    label_raw_return    : D+1 日内实际收益率（分级惩罚权重基础）
+    label_open_gap      : (D+1 open - D close) / D close，开盘溢价率
+    label_d1_high       : (D+1 high - D+1 open) / D+1 open，日内最大浮盈
+    label_d1_low        : (D+1 low  - D+1 open) / D+1 open，日内最大回撤（负数）
+    label_d1_pct_chg    : D+1 pct_chg（收盘相对前收涨跌幅 %，与实盘统计口径对齐）
+    label_d2_return     : (D+2 close - D+1 open) / D+1 open，持有2日总收益
 
 过滤逻辑：
     - D+1 停牌（无数据）→ 跳过，不作为负样本
-    - D+2 无数据 → label2 填 NaN，后续清洗时 dropna 即可
+    - D+2 无数据 → 涉及 D+2 的标签填 None（dataset.py 不 dropna 这些列）
+    - D close 无法获取 → label_open_gap 填 None
 """
 import sys
 import os
@@ -44,11 +51,11 @@ class LabelEngine:
 
     def generate_single_date(self, trade_date: str, stock_list: List[str]) -> pd.DataFrame:
         """
-        生成单日标签（口径与策略对齐：D+1 open 买入，D+1 close 卖出）
+        生成单日全量标签（口径与策略对齐：D+1 open 买入，D+1 close 卖出）
 
         :param trade_date: D 日，格式 yyyy-mm-dd
         :param stock_list: 候选股代码列表
-        :return: DataFrame，列：stock_code, trade_date, label1, label2
+        :return: DataFrame，列见模块头部 label 定义
                  D+1 停牌的股票不会出现在返回结果中
         """
         if trade_date not in self.date_idx_map:
@@ -61,19 +68,23 @@ class LabelEngine:
         d1_date = self.all_trade_dates[idx + 1]
         d2_date = self.all_trade_dates[idx + 2]
 
-        # 批量拉取 D+1 和 D+2 日线
-        d1_df = get_daily_kline_data(trade_date=d1_date, ts_code_list=stock_list)
-        d2_df = get_daily_kline_data(trade_date=d2_date, ts_code_list=stock_list)
+        # 批量拉取 D / D+1 / D+2 日线
+        d0_df = get_daily_kline_data(trade_date=trade_date, ts_code_list=stock_list)
+        d1_df = get_daily_kline_data(trade_date=d1_date,   ts_code_list=stock_list)
+        d2_df = get_daily_kline_data(trade_date=d2_date,   ts_code_list=stock_list)
 
         if d1_df.empty:
             logger.warning(f"[LabelEngine] {d1_date} 日线数据为空，跳过")
             return pd.DataFrame()
 
         d1_df["trade_date"] = d1_df["trade_date"].astype(str)
+        if not d0_df.empty:
+            d0_df["trade_date"] = d0_df["trade_date"].astype(str)
         if not d2_df.empty:
             d2_df["trade_date"] = d2_df["trade_date"].astype(str)
 
         # 构建快速查找
+        d0_map = {row["ts_code"]: row for _, row in d0_df.iterrows()} if not d0_df.empty else {}
         d1_map = {row["ts_code"]: row for _, row in d1_df.iterrows()}
         d2_map = {row["ts_code"]: row for _, row in d2_df.iterrows()} if not d2_df.empty else {}
 
@@ -84,41 +95,79 @@ class LabelEngine:
                 # D+1 停牌，跳过（不作为负样本）
                 continue
 
-            d1_open  = d1_row.get("open",  0)
-            d1_close = d1_row.get("close", 0)
+            d1_open  = float(d1_row.get("open",  0) or 0)
+            d1_close = float(d1_row.get("close", 0) or 0)
+            d1_high  = float(d1_row.get("high",  0) or 0)
+            d1_low   = float(d1_row.get("low",   0) or 0)
 
-            if not d1_open or d1_open <= 0:
+            if d1_open <= 0:
                 continue
 
-            # label1：D+1 日内收益率 = (D+1 close - D+1 open) / D+1 open
-            # 阈值：>= 5%（策略目标：T+1 开盘买入后当日日内涨幅 ≥ 5% 才算正样本）
+            # ── D+1 日内收益率（核心基础量）──────────────────────────────────
             d1_intra_return = (d1_close - d1_open) / d1_open
-            label1 = 1 if d1_intra_return >= 0.05 else 0
 
-            # label2：D+1 日内盈利 AND D+2 高开
-            # 设计约束：label2=1 必然满足 label1（值得隔夜持股的强势票）
-            # 原定义（D+2 open > D+1 close）存在 label1=0 时 label2=1 的语义矛盾：
-            # D+1 日内亏损但 D+2 高开 → 实际仍是亏损交易，不应标记为正样本
+            # ── 二分类标签 ────────────────────────────────────────────────────
+            label1      = 1 if d1_intra_return >= 0.05 else 0
+            label1_3pct = 1 if d1_intra_return >= 0.03 else 0
+            label1_8pct = 1 if d1_intra_return >= 0.08 else 0
+
+            # ── D+2 相关标签 ──────────────────────────────────────────────────
             d2_row = d2_map.get(ts_code)
             if d2_row is not None:
-                d2_open  = d2_row.get("open", 0)
-                # 同时满足：D+1 日内盈利（close > open）且 D+2 高开（open > D+1 close）
+                d2_open    = float(d2_row.get("open",     0) or 0)
+                d2_close   = float(d2_row.get("close",    0) or 0)
+                d2_pct_chg = float(d2_row.get("pct_chg",  0) or 0)
+
+                # label2：D+1 日内盈利 AND D+2 高开（值得隔夜持股的强势票）
                 label2 = 1 if (d1_close > d1_open) and (d2_open > d1_close) else 0
+
+                # label_d2_return：持有至 D+2 收盘的总收益
+                label_d2_return = round((d2_close - d1_open) / d1_open, 6) if d2_close > 0 else None
+
+                # label_d2_limit_down：D+2 跌停（主板 -10%，阈值 -9.5% 以包含精度误差）
+                label_d2_limit_down = 1 if d2_pct_chg <= -9.5 else 0
             else:
-                label2 = None  # D+2 无数据，后续清洗时 dropna
+                # D+2 无数据，涉及 D+2 的标签填 None
+                label2              = None
+                label_d2_return     = None
+                label_d2_limit_down = None
+
+            # ── 浮点标签（日内结构）─────────────────────────────────────────
+            label_raw_return = round(d1_intra_return, 6)
+            label_d1_high    = round((d1_high - d1_open) / d1_open, 6) if d1_high > 0 else None
+            label_d1_low     = round((d1_low  - d1_open) / d1_open, 6) if d1_low  > 0 else None
+            label_d1_pct_chg = float(d1_row.get("pct_chg", None) or None) if d1_row.get("pct_chg") is not None else None
+
+            # ── 开盘溢价（需要 D close）──────────────────────────────────────
+            d0_row   = d0_map.get(ts_code)
+            d0_close = float(d0_row.get("close", 0) or 0) if d0_row else 0
+            label_open_gap = round((d1_open - d0_close) / d0_close, 6) if d0_close > 0 else None
 
             rows.append({
-                "stock_code":       ts_code,
-                "trade_date":       trade_date,
-                "label1":           label1,
-                "label2":           label2,
-                "label_raw_return": round(d1_intra_return, 6),  # D+1日内实际收益率，供分级惩罚使用
+                "stock_code":           ts_code,
+                "trade_date":           trade_date,
+                # 二分类
+                "label1":               label1,
+                "label2":               label2,
+                "label1_3pct":          label1_3pct,
+                "label1_8pct":          label1_8pct,
+                "label_d2_limit_down":  label_d2_limit_down,
+                # 浮点
+                "label_raw_return":     label_raw_return,
+                "label_open_gap":       label_open_gap,
+                "label_d1_high":        label_d1_high,
+                "label_d1_low":         label_d1_low,
+                "label_d1_pct_chg":     label_d1_pct_chg,
+                "label_d2_return":      label_d2_return,
             })
 
         result = pd.DataFrame(rows)
         if not result.empty:
             logger.info(
                 f"[LabelEngine] {trade_date} 标签生成完成 | "
-                f"样本数:{len(result)} | 正样本(label1):{result['label1'].sum()}"
+                f"样本数:{len(result)} | "
+                f"label1正样本:{result['label1'].sum()} | "
+                f"label1_3pct:{result['label1_3pct'].sum()} | "
+                f"label1_8pct:{result['label1_8pct'].sum()}"
             )
         return result

@@ -12,7 +12,7 @@ from typing import List, Dict
 import pandas as pd
 
 from utils.common_tools import (
-    get_trade_dates, get_daily_kline_data, get_qfq_kline_data,
+    get_trade_dates, get_daily_kline_data,
     get_limit_list_ths, get_limit_step, get_limit_cpt_list, get_index_daily,
     get_market_total_volume,
 )
@@ -63,13 +63,11 @@ class FeatureDataBundle:
         self.lookback_dates_5d: List[str] = []
         self.lookback_dates_20d: List[str] = []
         self.daily_grouped: Dict[tuple, dict] = {}
-        self.qfq_daily_grouped: Dict[tuple, dict] = {}   # 前复权日线，MA 计算专用
         self.minute_cache: Dict[tuple, pd.DataFrame] = {}
         self.macro_cache: Dict[str, pd.DataFrame] = {}
 
         self._load_trade_dates()
         self._load_daily_data()
-        self._load_qfq_data()
         self._load_macro_data()
         if load_minute:
             self._load_minute_data()
@@ -114,36 +112,6 @@ class FeatureDataBundle:
         except Exception as e:
             logger.error(f"[DataBundle] 日线数据加载失败：{e}")
             raise
-
-    def _load_qfq_data(self):
-        """批量加载前复权日线（MA 计算专用，与 daily_grouped 结构相同）"""
-        try:
-            all_dates = list(set(self.lookback_dates_5d + self.lookback_dates_20d))
-
-            def _fetch_one(date):
-                df = get_qfq_kline_data(trade_date=date, ts_code_list=self.target_ts_codes)
-                if not df.empty:
-                    df["trade_date"] = df["trade_date"].astype(str)
-                return df
-
-            frames = []
-            with ThreadPoolExecutor(max_workers=_IO_WORKERS) as pool:
-                futures = {pool.submit(_fetch_one, d): d for d in all_dates}
-                for fut in as_completed(futures):
-                    df = fut.result()
-                    if not df.empty:
-                        frames.append(df)
-
-            if frames:
-                all_df = pd.concat(frames, ignore_index=True)
-                self.qfq_daily_grouped = (
-                    all_df.groupby(["ts_code", "trade_date"]).first().to_dict(orient="index")
-                )
-            logger.debug(
-                f"[DataBundle] 前复权日线加载完成 | 记录数:{len(self.qfq_daily_grouped)}"
-            )
-        except Exception as e:
-            logger.warning(f"[DataBundle] 前复权日线加载失败（MA 将降级用不复权数据）：{str(e)[:120]}")
 
     def _load_macro_data(self):
         """

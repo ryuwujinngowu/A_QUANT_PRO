@@ -25,14 +25,31 @@ MODEL_DIR = os.path.join(_BASE_DIR, "model")
 # 训练基础配置
 # ═══════════════════════════════════════════════
 MODEL_VERSION = "v5.2_auc_first"
-TARGET_LABEL  = "label1"   # "label1"（次日日内涨3%）或 "label2"（隔夜高开）
+TARGET_LABEL  = "label1"   # 切换此处即可更换训练目标（见下方可选值）
+# 可选 TARGET_LABEL 值：
+#   "label1"             — D+1 日内涨幅 >= 5%（主模型）
+#   "label2"             — D+1 日内盈利 AND D+2 高开（隔夜强势）
+#   "label1_3pct"        — D+1 日内涨幅 >= 3%（低门槛，正样本更多）
+#   "label1_8pct"        — D+1 日内涨幅 >= 8%（高门槛，强势票过滤）
+#   "label_d2_limit_down"— D+2 跌停（用于黑名单反向模型，目标=1 → 避开）
+#   "label_raw_return"   — 日内实际收益率（XGBRegressor 回归目标）
+#   "label_open_gap"     — 开盘溢价率（回归目标）
+#   "label_d1_high"      — 日内最大浮盈（回归目标）
+#   "label_d1_low"       — 日内最大回撤（回归目标）
+#   "label_d1_pct_chg"   — D+1 收盘涨跌幅%（与实盘口径对齐，回归目标）
+#   "label_d2_return"    — 持有2日总收益（回归目标）
 VAL_RATIO     = 0.2        # 验证集比例（时序尾部切分，不随机打乱）
 
 # 非特征列（固定排除，与 dataset.py 列结构绑定）
+# 所有 label 列必须在此列出，防止被当作训练特征
 EXCLUDE_COLS = [
     "stock_code", "trade_date",
-    "label1", "label2",
-    "label_raw_return",  # 仅用于历史分析，不作训练特征
+    # 二分类 label
+    "label1", "label2", "label1_3pct", "label1_8pct", "label_d2_limit_down",
+    # 浮点 label
+    "label_raw_return", "label_open_gap", "label_d1_high", "label_d1_low",
+    "label_d1_pct_chg", "label_d2_return",
+    # 元数据
     "sector_name", "top3_sectors",
 ]
 

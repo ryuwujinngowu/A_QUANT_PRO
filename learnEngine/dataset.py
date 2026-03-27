@@ -118,10 +118,10 @@ class DataSetAssembler:
             return pd.DataFrame()
 
         df = df.drop_duplicates(subset=["stock_code", "trade_date"])
+        # label1/label2 是核心必需列，D+1 停牌时整行已被 LabelEngine 跳过，此处 dropna 正常
         df = df.dropna(subset=["label1", "label2"])
-        # label_raw_return 允许 NaN（旧数据或 D+1 停牌），填 0 不影响权重生成的兜底逻辑
-        if "label_raw_return" not in df.columns:
-            df["label_raw_return"] = float("nan")
+        # 涉及 D+2 或 D close 的标签（D+2 无数据时可为 None），允许 NaN 保留行
+        # 训练时按 TARGET_LABEL 各自 dropna，不在此处强制清洗
 
         # ── 丢弃 D 日收盘价缺失或为零的行 ───────────────────────────────
         # 该列为零必然是停牌 / 数据入库异常，宁可损失训练样本，
@@ -313,6 +313,7 @@ def validate_train_dataset(csv_path: str) -> pd.DataFrame:
         df = df.drop_duplicates(subset=["stock_code", "trade_date"])
         logger.warning(f"移除重复行: {dup}")
 
+    # 只对核心二分类 label 做 dropna；涉及 D+2/D0 的标签允许 NaN（训练时按需处理）
     null = df[["label1", "label2"]].isnull().sum().sum()
     if null:
         df = df.dropna(subset=["label1", "label2"])
