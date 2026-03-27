@@ -20,9 +20,20 @@
   index_sz_pct_chg          : D 日深证成指涨跌幅
   index_cyb_pct_chg         : D 日创业板指涨跌幅
 
-【全市场成交量比率（窗口内归一化）】
-  market_vol_ratio_d{0-4}   : vol_di / mean(vol_d0..d4)。放量>1，缩量<1，无数据=1.0
-                              5日窗口内归一化，消除绝对额的跨日期差异
+【全市场成交量相对比率（窗口内归一化）】
+  market_vol_ratio_d{0-4}   : d0 = vol_d0 / mean(vol_d1..d4)（历史均值，不含自身）
+                              d1~d4 = vol_di / mean(vol_d0..d4)（全窗口均值）
+                              放量>1，缩量<1，无数据=1.0
+
+【全市场成交额绝对量维度】
+  market_amount_d0          : D 日全市场总成交额（万亿元）
+                              连续值，直接反映市场绝对活跃程度（如 1.5万亿分水岭效应）
+                              由模型自主学习阈值效应，不做人工分段
+  market_amount_5d_avg      : 近4日（d1~d4）全市场总成交额均值（万亿元）
+                              作为成交基准，衡量"现在是否偏活跃/冷淡"
+  market_amount_d0_vs_5d    : market_amount_d0 / market_amount_5d_avg
+                              相对活跃度，>1=当日比近期活跃，<1=当日比近期冷淡
+                              与 market_vol_ratio_d0 语义类似，但单位为成交额而非成交量
 
 【派生趋势因子】
   market_limit_up_rate      : D 日涨停数 / 全市场总股数（约5200）≈ 涨停参与率
@@ -32,9 +43,9 @@
 
 设计说明：
     - 本模块输出全局级（无 stock_code），由 FeatureEngine 通过 left join 广播到所有个股行
-    - 数据来源：limit_list_ths / limit_step / limit_cpt_list / index_daily 四张表
+    - 数据来源：limit_list_ths / limit_step / limit_cpt_list / index_daily / kline_day 四张表
     - 依赖 data_bundle.macro_cache（由 FeatureDataBundle 在初始化时预加载）
-    - 后续可在此文件中继续新增其他宏观维度因子（如融资融券余额、北向资金等）
+    - market_vol_ratio_d0 修复：d0 用历史均值 mean(d1~d4) 作分母，避免自引用
 """
 from typing import Dict
 import numpy as np
@@ -71,9 +82,11 @@ class MarketMacroFeature(BaseFeature):
         "market_top_cpt_up_nums", "market_top_cpt_cons_nums",
         # 指数
         "index_sh_pct_chg", "index_sz_pct_chg", "index_cyb_pct_chg",
-        # 全市场成交量比率（窗口内归一化，d0=当日，d1~d4=近4个交易日）
+        # 全市场成交量比率（窗口内归一化，d0 用历史均值避免自引用）
         "market_vol_ratio_d0", "market_vol_ratio_d1", "market_vol_ratio_d2",
         "market_vol_ratio_d3", "market_vol_ratio_d4",
+        # 全市场成交额绝对量（连续值，万亿元，供模型学习分水岭效应）
+        "market_amount_d0", "market_amount_5d_avg", "market_amount_d0_vs_5d",
         # 派生趋势因子
         "market_limit_up_rate", "market_limit_up_5d_trend", "market_consec_5d_trend",
     ]
@@ -129,8 +142,9 @@ class MarketMacroFeature(BaseFeature):
             row[col_name] = float(idx_map.get(ts_code, 0) or 0)
 
         # ========== 全市场成交量（窗口内归一化比率）==========
-        # market_vol_ratio_d{i} = vol_di / mean(vol_d0..d4)
-        # 与 stock_amount_5d_ratio 设计对称，消除绝对额跨日期差异
+        # 修复：d0 用历史均值 mean(d1~d4) 作分母，避免自引用。
+        #       d1~d4 仍用全部5日均值（历史数据，无自引用问题）。
+        # market_total_vol 来自 kline_day.amount 聚合，单位：千元
         market_vol_df = macro_cache.get("market_vol_df", pd.DataFrame())
         lookback_5d   = getattr(data_bundle, "lookback_dates_5d", [])
         if not market_vol_df.empty and "trade_date" in market_vol_df.columns and lookback_5d:
@@ -138,20 +152,41 @@ class MarketMacroFeature(BaseFeature):
                 str(r["trade_date"]).replace("-", ""): float(r.get("market_total_vol", 0) or 0)
                 for _, r in market_vol_df.iterrows()
             }
-            # 计算5日均值（含d0）
-            all_vols = [vol_map.get(d.replace("-", ""), 0) for d in lookback_5d]
-            avg_vol  = float(np.mean(all_vols)) if any(v > 0 for v in all_vols) else 0.0
-            # lookback_5d 升序，最后一个=d0，往前=d1..d4
+            # lookback_5d 升序，最后一个索引=d0（当日），往前依次为 d1~d4（历史）
+            all_vols  = [vol_map.get(d.replace("-", ""), 0) for d in lookback_5d]
+            # 历史均值：d1~d4（不含 d0），用于 d0 的分母（修复自引用）
+            hist_vols = all_vols[:-1] if len(all_vols) > 1 else []
+            avg_vol_hist = float(np.mean(hist_vols)) if any(v > 0 for v in hist_vols) else 0.0
+            avg_vol_all  = float(np.mean(all_vols))  if any(v > 0 for v in all_vols)  else 0.0
+
             for di in range(5):
                 idx = len(lookback_5d) - 1 - di
                 if 0 <= idx < len(lookback_5d):
-                    vol_val = vol_map.get(lookback_5d[idx].replace("-", ""), 0)
-                    row[f"market_vol_ratio_d{di}"] = round(vol_val / (avg_vol + 1e-6), 3) if avg_vol > 0 else 1.0
+                    vol_val = all_vols[idx]
+                    if di == 0:
+                        # d0：分母用历史均值 mean(d1~d4)，消除自引用
+                        denom = avg_vol_hist
+                    else:
+                        # d1~d4：分母用全部5日均值（对称设计，与 stock_amount_5d_ratio 一致）
+                        denom = avg_vol_all
+                    row[f"market_vol_ratio_d{di}"] = round(vol_val / (denom + 1e-6), 3) if denom > 0 else 1.0
                 else:
                     row[f"market_vol_ratio_d{di}"] = 1.0
+
+            # ========== 全市场成交额绝对量维度 ==========
+            # 连续值，单位万亿元（千元 → 万亿：÷1e9），交给模型学习 1.5万亿等分水岭效应
+            d0_vol   = all_vols[-1] if all_vols else 0.0
+            amt_d0   = round(d0_vol / 1e9, 4)          # 当日总成交额（万亿元）
+            amt_hist = round(avg_vol_hist / 1e9, 4)     # 近4日均额（万亿元）
+            row["market_amount_d0"]       = amt_d0
+            row["market_amount_5d_avg"]   = amt_hist
+            row["market_amount_d0_vs_5d"] = round(amt_d0 / (amt_hist + 1e-6), 3) if amt_hist > 0 else 1.0
         else:
             for di in range(5):
                 row[f"market_vol_ratio_d{di}"] = 1.0
+            row["market_amount_d0"]       = 0.0
+            row["market_amount_5d_avg"]   = 0.0
+            row["market_amount_d0_vs_5d"] = 1.0
 
         # ========== 派生趋势因子 ==========
         limit_up_counts_5d = macro_cache.get("limit_up_counts_5d", {})

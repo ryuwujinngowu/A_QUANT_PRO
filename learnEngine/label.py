@@ -91,8 +91,9 @@ class LabelEngine:
                 continue
 
             # label1：D+1 日内收益率 = (D+1 close - D+1 open) / D+1 open
+            # 阈值：>= 5%（策略目标：T+1 开盘买入后当日日内涨幅 ≥ 5% 才算正样本）
             d1_intra_return = (d1_close - d1_open) / d1_open
-            label1 = 1 if d1_intra_return >= 0.03 else 0
+            label1 = 1 if d1_intra_return >= 0.05 else 0
 
             # label2：D+1 日内盈利 AND D+2 高开
             # 设计约束：label2=1 必然满足 label1（值得隔夜持股的强势票）

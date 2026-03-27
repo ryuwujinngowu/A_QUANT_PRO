@@ -137,9 +137,38 @@ class DataSetAssembler:
                 )
                 df = df[~bad]
 
-        # ── 特征 NaN 填 0（中性值，与 FeatureDataBundle 设计对齐）────────
+        # ── 特征 NaN 显式中性值填充 ────────────────────────────────────────
         # 注意：label1/label2 已在上方 dropna 保证，此处 fillna 不会影响标签
-        df = df.fillna(0)
+        #
+        # 语义说明：不同类型的因子有不同的"中性"含义，统一填 0 会扭曲语义：
+        #   pos_20d = 0 → "处在20日最低价"（强烈看空），正确中性应为 0.5（区间中点）
+        #   stock_cpr = 0 → "收于日内最低价"（强烈看空），正确中性应为 0.5
+        #   stock_trend_r2 = 0 → "纯震荡无趋势"，正确中性应为 0.5（无信息）
+        #   boll_pct = 0 → "触及布林下轨"，正确中性应为 0.5（区间中点）
+        #
+        # 规则：先按列名精确/模式匹配填充有语义的中性值，其余列统一填 0
+        _exact_neutral = {
+            "pos_20d":           0.5,   # 20日价格区间中点
+            "pos_5d":            0.5,   # 5日价格区间中点
+            "from_high_20d":     0.1,   # 距最高点跌幅：保守填10%，避免偏向0（当前就是最高点）
+            "boll_pct":          0.5,   # 布林带区间中点
+        }
+        _pattern_neutral = {
+            "_cpr_":       0.5,   # 收盘位置比：区间中点
+            "_trend_r2_":  0.5,   # 分钟线趋势R²：中性（无趋势信息）
+        }
+        fill_map = {}
+        for col in df.columns:
+            if col in _exact_neutral:
+                fill_map[col] = _exact_neutral[col]
+            else:
+                for pat, val in _pattern_neutral.items():
+                    if pat in col:
+                        fill_map[col] = val
+                        break
+        if fill_map:
+            df = df.fillna(fill_map)
+        df = df.fillna(0)   # 其余列（pct_chg/bias/sei/hdi/计数类等）0 即为正确中性值
         return df.reset_index(drop=True)
 
 
