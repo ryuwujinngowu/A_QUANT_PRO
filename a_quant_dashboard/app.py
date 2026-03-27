@@ -9,9 +9,12 @@ from datetime import date, timedelta
 from typing import Optional
 from contextlib import contextmanager
 
+import logging
+import time
+
 import pymysql
 import pymysql.cursors
-from fastapi import FastAPI, Query, HTTPException
+from fastapi import FastAPI, Query, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse
@@ -19,8 +22,28 @@ from dotenv import load_dotenv
 
 load_dotenv(os.path.join(os.path.dirname(__file__), '.env'))
 
+# ── 访问日志 ───────────────────────────────────────────────────────────────────
+_LOG_PATH = os.path.join(os.path.dirname(__file__), "access.log")
+_access_logger = logging.getLogger("access")
+_access_logger.setLevel(logging.INFO)
+_access_logger.propagate = False
+_fh = logging.FileHandler(_LOG_PATH, encoding="utf-8")
+_fh.setFormatter(logging.Formatter("%(message)s"))
+_access_logger.addHandler(_fh)
+
 app = FastAPI(title="A_QUANT Dashboard", version="1.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+
+@app.middleware("http")
+async def log_access(request: Request, call_next):
+    # 只记录 API 接口，忽略静态资源
+    if request.url.path.startswith("/api/"):
+        ip = request.headers.get("x-forwarded-for", request.client.host if request.client else "-")
+        ip = ip.split(",")[0].strip()
+        ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+        _access_logger.info(f"{ts} {ip} {request.method} {request.url.path}")
+    return await call_next(request)
 
 # ── DB 配置 ────────────────────────────────────────────────────────────────────
 _db_host = os.getenv("DB_HOST")
@@ -613,6 +636,270 @@ def get_long_stop_stats(
             "closed":        closed,
             "avg_win":       _to_float(r["avg_win"]),
             "avg_loss":      _to_float(r["avg_loss"]),
+        })
+    return result
+
+
+@app.get("/api/market/limitup_trend")
+def get_limitup_trend(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    min_days: int = Query(0),  # 0=全部涨停, 1=首板, 2=二板以上, 3=三板以上, 4=四板以上
+):
+    """昨日涨停/连板股，次日平均涨幅统计"""
+    if not start_date:
+        start_date, _ = _default_range()
+    if not end_date:
+        _, end_date = _default_range()
+
+    # 获取区间内所有交易日（按顺序）
+    date_rows = query(
+        "SELECT DISTINCT trade_date FROM kline_day WHERE trade_date BETWEEN %s AND %s ORDER BY trade_date",
+        [start_date, end_date]
+    )
+    dates = [str(r['trade_date']) for r in date_rows]
+    if len(dates) < 2:
+        return []
+
+    # 前一日→当日 映射
+    next_date_map = {dates[i]: dates[i+1] for i in range(len(dates)-1)}
+    prev_dates = dates[:-1]
+
+    # 根据 min_days 决定数据源：
+    # 0=全部涨停(limit_list_ths), 1=首板(limit_list_ths-limit_step), 2+=连板(limit_step.nums>=N)
+    ph = ','.join(['%s'] * len(prev_dates))
+    min_days = int(min_days)
+
+    if min_days == 0:
+        # 全部涨停
+        limit_rows = query(
+            f"SELECT ts_code, trade_date FROM limit_list_ths WHERE limit_type='涨停池' AND trade_date IN ({ph})",
+            prev_dates
+        )
+    elif min_days == 1:
+        # 首板：在涨停池但不在连板天梯（limit_step）中
+        limit_rows = query(
+            f"""SELECT l.ts_code, l.trade_date FROM limit_list_ths l
+                LEFT JOIN limit_step s ON l.ts_code=s.ts_code AND l.trade_date=s.trade_date
+                WHERE l.limit_type='涨停池' AND l.trade_date IN ({ph})
+                  AND s.ts_code IS NULL""",
+            prev_dates
+        )
+    else:
+        # 连板：直接从 limit_step 取 nums >= min_days
+        limit_rows = query(
+            f"SELECT ts_code, trade_date FROM limit_step WHERE trade_date IN ({ph}) AND nums >= %s",
+            prev_dates + [min_days]
+        )
+
+    # 按日期分组
+    limit_by_date: dict = {}
+    for r in limit_rows:
+        d = str(r['trade_date'])
+        if d not in limit_by_date:
+            limit_by_date[d] = []
+        limit_by_date[d].append(r['ts_code'])
+
+    if not limit_by_date:
+        return []
+
+    # 收集所有需要查询的 (next_date, ts_codes)
+    needed_dates: set = set()
+    all_stocks: set = set()
+    for prev_d, stocks in limit_by_date.items():
+        if prev_d in next_date_map:
+            needed_dates.add(next_date_map[prev_d])
+            all_stocks.update(stocks)
+
+    if not needed_dates or not all_stocks:
+        return []
+
+    ph_d = ','.join(['%s'] * len(needed_dates))
+    ph_s = ','.join(['%s'] * len(all_stocks))
+    pct_rows = query(
+        f"SELECT ts_code, trade_date, pct_chg FROM kline_day WHERE trade_date IN ({ph_d}) AND ts_code IN ({ph_s})",
+        list(needed_dates) + list(all_stocks)
+    )
+
+    pct_map: dict = {}
+    for r in pct_rows:
+        d = str(r['trade_date'])
+        if d not in pct_map:
+            pct_map[d] = {}
+        pct_map[d][r['ts_code']] = _to_float(r['pct_chg'])
+
+    result = []
+    for prev_d in sorted(limit_by_date.keys()):
+        next_d = next_date_map.get(prev_d)
+        if not next_d:
+            continue
+        stocks = limit_by_date[prev_d]
+        day_pct = pct_map.get(next_d, {})
+        vals = [day_pct[s] for s in stocks if day_pct.get(s) is not None]
+        if vals:
+            result.append({
+                "date": next_d,
+                "avg_pct_chg": round(sum(vals) / len(vals), 2),
+                "cnt": len(vals),
+            })
+    return result
+
+
+@app.get("/api/market/breadth")
+def get_market_breadth(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    n_days: int = Query(30),        # 30/60/90/120
+    min_amount_yi: int = Query(10), # 10/20/40/60 亿
+):
+    """N日新高/新低个股数统计（成交额过滤）"""
+    if not start_date:
+        start_date, _ = _default_range()
+    if not end_date:
+        _, end_date = _default_range()
+
+    # 验证参数（n_days 作为 SQL 整数字面量，必须校验）
+    n_days = max(1, min(int(n_days), 250))
+    min_amount_yi = max(1, int(min_amount_yi))
+    # kline_day.amount 单位：千元；1亿 = 100000千元
+    amount_threshold = min_amount_yi * 100000
+
+    # lookback_start：向前多取 n_days 个交易日的数据（保守用日历天）
+    from datetime import date as _date, timedelta
+    lookback_start = (_date.fromisoformat(start_date) - timedelta(days=n_days + 30)).strftime("%Y-%m-%d")
+
+    # 关键优化：先在目标区间内找出"活跃股"（有过达标成交额的股票），
+    # 再只对这些股票做窗口函数，大幅缩减扫描行数（5000只→几百只）
+    rows = query(f"""
+        WITH active_stocks AS (
+            SELECT DISTINCT ts_code FROM kline_day
+            WHERE trade_date BETWEEN %s AND %s AND amount >= %s
+        ),
+        base AS (
+            SELECT k.ts_code, k.trade_date, k.close, k.high, k.low, k.amount,
+                   MAX(k.high) OVER (PARTITION BY k.ts_code ORDER BY k.trade_date
+                       ROWS BETWEEN {n_days} PRECEDING AND 1 PRECEDING) AS max_n,
+                   MIN(k.low) OVER (PARTITION BY k.ts_code ORDER BY k.trade_date
+                       ROWS BETWEEN {n_days} PRECEDING AND 1 PRECEDING) AS min_n
+            FROM kline_day k
+            INNER JOIN active_stocks a ON k.ts_code = a.ts_code
+            WHERE k.trade_date >= %s AND k.trade_date <= %s
+        )
+        SELECT trade_date,
+            SUM(CASE WHEN close >= max_n AND amount >= %s THEN 1 ELSE 0 END) AS new_high_cnt,
+            SUM(CASE WHEN close <= min_n AND amount >= %s THEN 1 ELSE 0 END) AS new_low_cnt
+        FROM base
+        WHERE trade_date BETWEEN %s AND %s
+        GROUP BY trade_date
+        ORDER BY trade_date
+    """, [start_date, end_date, amount_threshold,
+          lookback_start, end_date,
+          amount_threshold, amount_threshold, start_date, end_date])
+
+    return [{"date": str(r["trade_date"]), "new_high_cnt": int(r["new_high_cnt"] or 0), "new_low_cnt": int(r["new_low_cnt"] or 0)} for r in rows]
+
+
+@app.get("/api/market/volume_pattern")
+def get_volume_pattern(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+):
+    """成交额≥20亿且大于5日均值的个股，量价形态统计"""
+    if not start_date:
+        start_date, _ = _default_range()
+    if not end_date:
+        _, end_date = _default_range()
+
+    from datetime import date as _date, timedelta
+    lookback_start = (_date.fromisoformat(start_date) - timedelta(days=20)).strftime("%Y-%m-%d")
+    # 20亿 in 千元 = 20 * 100000 = 2000000
+    AMOUNT_THRESH = 2000000
+
+    # 关键优化：先在目标区间找出活跃股，再只对这些股票做窗口函数
+    rows = query("""
+        WITH active_stocks AS (
+            SELECT DISTINCT ts_code FROM kline_day
+            WHERE trade_date BETWEEN %s AND %s
+              AND amount >= %s AND open > 0 AND pre_close > 0
+        ),
+        base AS (
+            SELECT k.ts_code, k.trade_date, k.open, k.high, k.low, k.close, k.pre_close, k.amount,
+                   AVG(k.amount) OVER (PARTITION BY k.ts_code ORDER BY k.trade_date
+                       ROWS BETWEEN 6 PRECEDING AND 1 PRECEDING) AS avg5_amount
+            FROM kline_day k
+            INNER JOIN active_stocks a ON k.ts_code = a.ts_code
+            WHERE k.trade_date >= %s AND k.trade_date <= %s
+              AND k.open > 0 AND k.pre_close > 0
+        )
+        SELECT trade_date,
+            SUM(CASE WHEN amount >= %s AND amount > avg5_amount
+                      AND open > pre_close AND close < open THEN 1 ELSE 0 END) AS high_open_low_close_cnt,
+            SUM(CASE WHEN amount >= %s AND amount > avg5_amount
+                      AND open > 0 AND (high/open - 1) >= 0.03 AND close < open THEN 1 ELSE 0 END) AS surge_low_close_cnt,
+            SUM(CASE WHEN amount >= %s AND amount > avg5_amount
+                      AND low > 0 AND (open/low - 1) >= 0.03 AND close > open THEN 1 ELSE 0 END) AS dip_recover_cnt,
+            SUM(CASE WHEN amount >= %s AND amount > avg5_amount
+                      AND open < pre_close AND close > pre_close THEN 1 ELSE 0 END) AS low_open_high_close_cnt,
+            SUM(CASE WHEN amount >= %s AND amount > avg5_amount THEN 1 ELSE 0 END) AS total_qualified_cnt
+        FROM base
+        WHERE trade_date BETWEEN %s AND %s
+        GROUP BY trade_date
+        ORDER BY trade_date
+    """, [start_date, end_date, AMOUNT_THRESH,
+          lookback_start, end_date,
+          AMOUNT_THRESH, AMOUNT_THRESH, AMOUNT_THRESH, AMOUNT_THRESH, AMOUNT_THRESH,
+          start_date, end_date])
+
+    return [{
+        "date": str(r["trade_date"]),
+        "high_open_low_close": int(r["high_open_low_close_cnt"] or 0),
+        "surge_low_close": int(r["surge_low_close_cnt"] or 0),
+        "dip_recover": int(r["dip_recover_cnt"] or 0),
+        "low_open_high_close": int(r["low_open_high_close_cnt"] or 0),
+        "total_qualified": int(r["total_qualified_cnt"] or 0),
+    } for r in rows]
+
+
+@app.get("/api/long/daily_stats")
+def get_long_daily_stats(
+    agent_id: str = Query(...),
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+):
+    """长线策略逐买入日统计（用于详情页主图表）"""
+    if not start_date:
+        start_date = (date.today() - timedelta(days=365)).strftime("%Y-%m-%d")
+    if not end_date:
+        end_date = date.today().strftime("%Y-%m-%d")
+
+    rows = query("""
+        SELECT buy_date,
+            COUNT(*) AS signal_cnt,
+            SUM(CASE WHEN status=1 THEN 1 ELSE 0 END) AS closed_cnt,
+            AVG(CASE WHEN status=1 THEN period_return END) AS avg_return,
+            AVG(CASE WHEN status=1 AND period_return > 0 THEN period_return END) AS avg_win,
+            AVG(CASE WHEN status=1 AND period_return < 0 THEN period_return END) AS avg_loss,
+            AVG(CASE WHEN status=1 THEN trading_days END) AS avg_days,
+            SUM(CASE WHEN status=1 AND period_return > 0 THEN 1 ELSE 0 END) AS win_cnt
+        FROM agent_long_position_stats
+        WHERE agent_id = %s AND buy_date BETWEEN %s AND %s
+        GROUP BY buy_date
+        ORDER BY buy_date
+    """, [agent_id, start_date, end_date])
+
+    result = []
+    for r in rows:
+        closed = int(r["closed_cnt"] or 0)
+        win = int(r["win_cnt"] or 0)
+        result.append({
+            "date": str(r["buy_date"]),
+            "signal_cnt": int(r["signal_cnt"] or 0),
+            "closed_cnt": closed,
+            "avg_return": _to_float(r["avg_return"]),
+            "avg_win": _to_float(r["avg_win"]),
+            "avg_loss": _to_float(r["avg_loss"]),
+            "avg_days": _to_float(r["avg_days"]),
+            "win_rate": round(win / closed * 100, 1) if closed > 0 else None,
         })
     return result
 

@@ -324,6 +324,10 @@ const S = {
   shortRows: {},       // trade_date → row，供日期点击弹窗用
   cumTab: 'intraday',  // 'intraday' | 't1' — 概览累计图 tab
   ovData: null,        // 缓存最新 overview API 返回
+  ovLimitDays: 0,
+  ovBreadthN: 30,
+  ovBreadthX: 10,
+  longDailyMetrics: ['avg_return', 'win_rate'],
 };
 
 // ══════════════════════════════════════════════════════════════════
@@ -352,13 +356,7 @@ function updateClock() {
 function buildNav() {
   const shorts = document.getElementById('sub-short');
   const longs  = document.getElementById('sub-long');
-  // 模型组合置顶
-  const modelGroupItem = `<div class="nav-item" id="nav-model-group" onclick="navigate('model-group')" style="color:var(--accent2)">
-    <span class="nav-icon">◑</span>
-    <span style="flex:1">模型组合对比</span>
-    <span class="nav-badge" style="background:rgba(129,140,248,.15);color:var(--accent2)">3合1</span>
-  </div>`;
-  shorts.innerHTML = modelGroupItem + S.agents.short.map(a => navItem(a,'short')).join('');
+  shorts.innerHTML = S.agents.short.map(a => navItem(a,'short')).join('');
   longs.innerHTML  = S.agents.long.map(a  => navItem(a,'long')).join('');
 }
 
@@ -391,11 +389,6 @@ function navigate(view) {
     document.getElementById('nav-overview').classList.add('active');
     document.getElementById('topbar-title').innerHTML = '<strong>全局概览</strong>';
     renderOverview();
-  } else if (view === 'model-group') {
-    const el = document.getElementById('nav-model-group');
-    if (el) el.classList.add('active');
-    document.getElementById('topbar-title').innerHTML = '<span style="color:var(--text3)">短线 /</span> <strong>模型组合对比</strong>';
-    renderModelGroup();
   } else {
     const [type, agentId] = view.split(':');
     S.agentType = type;
@@ -670,6 +663,48 @@ function buildOverviewHTML(data) {
     <div class="chart-title">长线策略 · 月度盈亏均值（已平仓）</div>
     <div class="chart-body" id="ov-long-perf" style="height:260px"></div>
   </div>` : ''}
+
+  <!-- ── 市场统计 ── -->
+  <div style="font-size:12px;font-weight:600;color:var(--text2);margin:20px 0 10px;padding-left:4px;border-left:3px solid var(--accent)">市场统计</div>
+
+  <div class="chart-card" style="margin-bottom:14px">
+    <div class="chart-title-row">
+      <div class="chart-title">昨日涨停/连板股 · 次日平均涨幅</div>
+      <div class="periods" id="lu-trend-btns">
+        <span class="period-btn ${S.ovLimitDays===0?'active':''}" onclick="setLuTrendDays(0)">全部涨停</span>
+        <span class="period-btn ${S.ovLimitDays===1?'active':''}" onclick="setLuTrendDays(1)">首板</span>
+        <span class="period-btn ${S.ovLimitDays===2?'active':''}" onclick="setLuTrendDays(2)">二板+</span>
+        <span class="period-btn ${S.ovLimitDays===3?'active':''}" onclick="setLuTrendDays(3)">三板+</span>
+        <span class="period-btn ${S.ovLimitDays===4?'active':''}" onclick="setLuTrendDays(4)">四板+</span>
+      </div>
+    </div>
+    <div class="chart-body" id="ov-lu-trend" style="height:220px"><div class="loading-wrap" style="height:220px"><div class="spinner"></div></div></div>
+  </div>
+
+  <div class="charts-grid charts-2" style="margin-bottom:14px">
+    <div class="chart-card">
+      <div class="chart-title-row">
+        <div class="chart-title">N日新高/新低个股数</div>
+        <div class="periods" style="gap:3px">
+          N:
+          <span class="period-btn ${S.ovBreadthN===30?'active':''}" onclick="setBreadth('n',30)">30</span>
+          <span class="period-btn ${S.ovBreadthN===60?'active':''}" onclick="setBreadth('n',60)">60</span>
+          <span class="period-btn ${S.ovBreadthN===90?'active':''}" onclick="setBreadth('n',90)">90</span>
+          <span class="period-btn ${S.ovBreadthN===120?'active':''}" onclick="setBreadth('n',120)">120</span>
+          &nbsp;成交额≥
+          <span class="period-btn ${S.ovBreadthX===10?'active':''}" onclick="setBreadth('x',10)">10亿</span>
+          <span class="period-btn ${S.ovBreadthX===20?'active':''}" onclick="setBreadth('x',20)">20亿</span>
+          <span class="period-btn ${S.ovBreadthX===40?'active':''}" onclick="setBreadth('x',40)">40亿</span>
+          <span class="period-btn ${S.ovBreadthX===60?'active':''}" onclick="setBreadth('x',60)">60亿</span>
+        </div>
+      </div>
+      <div class="chart-body" id="ov-breadth" style="height:220px"><div class="loading-wrap" style="height:220px"><div class="spinner"></div></div></div>
+    </div>
+    <div class="chart-card">
+      <div class="chart-title">成交额≥20亿且大于5日均值 · 量价形态统计</div>
+      <div class="chart-body" id="ov-vol-pattern" style="height:220px"><div class="loading-wrap" style="height:220px"><div class="spinner"></div></div></div>
+    </div>
+  </div>
 `;
 }
 
@@ -698,6 +733,10 @@ function renderOverviewCharts(data) {
   }, 240);
 
   renderLongPerfChart(data.long_perf || {});
+  // 异步加载市场统计图表
+  loadLuTrendChart();
+  loadBreadthChart();
+  loadVolPatternChart();
 }
 
 // ── 累计收益图（支持 tab 切换）───────────────────────────────────────────────
@@ -892,6 +931,189 @@ async function setBarPeriod(days) {
   } catch(e) { console.error('setBarPeriod:', e); }
 }
 
+// ── 市场统计：请求取消控制器（切换参数时取消上次未完成的请求）──────────────
+let _luAbort = null, _breadthAbort = null, _volAbort = null;
+
+function _disposeChart(id) {
+  const c = S.activeCharts.find(c => { try { return c.getDom().id === id; } catch(e){ return false; }});
+  if (c) { c.dispose(); S.activeCharts = S.activeCharts.filter(x => x !== c); }
+}
+
+// ── 市场统计：涨停/连板次日涨幅 ──────────────────────────────────────────────
+async function loadLuTrendChart() {
+  if (_luAbort) _luAbort.abort();
+  _luAbort = new AbortController();
+  const signal = _luAbort.signal;
+  try {
+    const res = await fetch(apiUrl('/api/market/limitup_trend', { min_days: S.ovLimitDays }), { signal });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    if (!signal.aborted) renderLuTrendChart(data);
+  } catch(e) {
+    if (e.name === 'AbortError') return;
+    const el = document.getElementById('ov-lu-trend');
+    if (el) el.innerHTML = `<div class="empty-wrap" style="height:220px;color:var(--neg)">加载失败: ${e.message}</div>`;
+  }
+}
+
+function renderLuTrendChart(data) {
+  if (!data || !data.length) {
+    const el = document.getElementById('ov-lu-trend');
+    if (el) el.innerHTML = '<div class="empty-wrap" style="height:220px">暂无数据</div>';
+    return;
+  }
+  const dates = data.map(d => d.date);
+  const vals  = data.map(d => d.avg_pct_chg);
+  const cnts  = data.map(d => d.cnt);
+  mkChart('ov-lu-trend', {
+    tooltip: {
+      trigger: 'axis', ...TOOLTIP_STYLE,
+      formatter: params => {
+        const i = params[0].dataIndex;
+        return `${params[0].axisValue}<br/>`+
+          `<span style="color:${params[0].color}">●</span> 次日平均涨幅: <b>${params[0].value>=0?'+':''}${params[0].value}%</b><br/>`+
+          `<span style="color:var(--text3);font-size:10px">样本数: ${cnts[i]}</span>`;
+      }
+    },
+    grid: { ...GRID },
+    xAxis: dateAxis(dates),
+    yAxis: { ...valueAxis('%'), axisLabel: { ...AXIS_STYLE.axisLabel, formatter: v => v+'%' } },
+    series: [{
+      type: 'bar', barMaxWidth: 12,
+      data: vals.map(v => ({ value: v, itemStyle: { color: retColor(v) } })),
+    }],
+  }, 220);
+}
+
+async function setLuTrendDays(days) {
+  S.ovLimitDays = days;
+  document.querySelectorAll('[onclick^="setLuTrendDays"]').forEach(btn => {
+    const m = btn.getAttribute('onclick').match(/setLuTrendDays\((\d+)\)/);
+    if (m) btn.classList.toggle('active', parseInt(m[1]) === days);
+  });
+  _disposeChart('ov-lu-trend');
+  const el = document.getElementById('ov-lu-trend');
+  if (el) el.innerHTML = '<div class="loading-wrap" style="height:220px"><div class="spinner"></div></div>';
+  await loadLuTrendChart();
+}
+
+// ── 市场统计：N日新高/新低 ─────────────────────────────────────────────────
+async function loadBreadthChart() {
+  if (_breadthAbort) _breadthAbort.abort();
+  _breadthAbort = new AbortController();
+  const signal = _breadthAbort.signal;
+  try {
+    const res = await fetch(apiUrl('/api/market/breadth', { n_days: S.ovBreadthN, min_amount_yi: S.ovBreadthX }), { signal });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    if (!signal.aborted) renderBreadthChart(data);
+  } catch(e) {
+    if (e.name === 'AbortError') return;
+    const el = document.getElementById('ov-breadth');
+    if (el) el.innerHTML = `<div class="empty-wrap" style="height:220px;color:var(--neg)">加载失败: ${e.message}</div>`;
+  }
+}
+
+function renderBreadthChart(data) {
+  if (!data || !data.length) {
+    const el = document.getElementById('ov-breadth');
+    if (el) el.innerHTML = '<div class="empty-wrap" style="height:220px">暂无数据</div>';
+    return;
+  }
+  const dates    = data.map(d => d.date);
+  const highVals = data.map(d => d.new_high_cnt);
+  const lowVals  = data.map(d => d.new_low_cnt);
+
+  mkChart('ov-breadth', {
+    tooltip: {
+      trigger: 'axis', ...TOOLTIP_STYLE,
+      formatter: params => {
+        const hi = params.find(p => p.seriesName === `${S.ovBreadthN}日新高`);
+        const lo = params.find(p => p.seriesName === `${S.ovBreadthN}日新低`);
+        return `${params[0].axisValue}<br/>`+
+          (hi ? `<span style="color:#10b981">●</span> 新高: <b>${hi.value}</b><br/>` : '') +
+          (lo ? `<span style="color:#ef4444">●</span> 新低: <b>${Math.abs(lo.value)}</b>` : '');
+      }
+    },
+    legend: { data: [`${S.ovBreadthN}日新高`, `${S.ovBreadthN}日新低`], bottom: 0, textStyle: { color: '#94a3b8', fontSize: 10 }, icon: 'roundRect', itemWidth: 10, itemHeight: 4 },
+    grid: { ...GRID, bottom: 50 },
+    xAxis: dateAxis(dates),
+    yAxis: { type: 'value', ...AXIS_STYLE, axisLabel: { ...AXIS_STYLE.axisLabel, formatter: v => Math.abs(v) } },
+    series: [
+      { name: `${S.ovBreadthN}日新高`, type: 'bar', stack: 'breadth', barMaxWidth: 16,
+        itemStyle: { color: '#10b981', opacity: 0.85 }, data: highVals },
+      { name: `${S.ovBreadthN}日新低`, type: 'bar', stack: 'breadth', barMaxWidth: 16,
+        itemStyle: { color: '#ef4444', opacity: 0.85 }, data: lowVals.map(v => -v) },
+    ],
+  }, 220);
+}
+
+async function setBreadth(type, val) {
+  if (type === 'n') S.ovBreadthN = val;
+  else S.ovBreadthX = val;
+  // 更新按钮 active 状态
+  document.querySelectorAll('[onclick^="setBreadth"]').forEach(btn => {
+    const m = btn.getAttribute('onclick').match(/setBreadth\('(\w+)',(\d+)\)/);
+    if (m) {
+      const t = m[1], v = parseInt(m[2]);
+      btn.classList.toggle('active',
+        (t === 'n' && S.ovBreadthN === v) || (t === 'x' && S.ovBreadthX === v));
+    }
+  });
+  // 处置旧图表（保证 legend 名称随 N 刷新）
+  _disposeChart('ov-breadth');
+  const el = document.getElementById('ov-breadth');
+  if (el) el.innerHTML = '<div class="loading-wrap" style="height:220px"><div class="spinner"></div></div>';
+  await loadBreadthChart();
+}
+
+// ── 市场统计：量价形态 ────────────────────────────────────────────────────
+async function loadVolPatternChart() {
+  if (_volAbort) _volAbort.abort();
+  _volAbort = new AbortController();
+  const signal = _volAbort.signal;
+  try {
+    const res = await fetch(apiUrl('/api/market/volume_pattern'), { signal });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    if (!signal.aborted) renderVolPatternChart(data);
+  } catch(e) {
+    if (e.name === 'AbortError') return;
+    const el = document.getElementById('ov-vol-pattern');
+    if (el) el.innerHTML = `<div class="empty-wrap" style="height:220px;color:var(--neg)">加载失败: ${e.message}</div>`;
+  }
+}
+
+function renderVolPatternChart(data) {
+  if (!data || !data.length) {
+    const el = document.getElementById('ov-vol-pattern');
+    if (el) el.innerHTML = '<div class="empty-wrap" style="height:220px">暂无数据</div>';
+    return;
+  }
+  const dates = data.map(d => d.date);
+  mkChart('ov-vol-pattern', {
+    tooltip: {
+      trigger: 'axis', ...TOOLTIP_STYLE,
+      formatter: params => {
+        const i = params[0].dataIndex;
+        const total = data[i].total_qualified;
+        return `${params[0].axisValue} (活跃股共 ${total} 只)<br/>` +
+          params.map(p => `<span style="color:${p.color}">●</span> ${p.seriesName}: <b>${p.value}</b> 只`).join('<br/>');
+      }
+    },
+    legend: { data: ['高开低走','冲高低走','探底回升','低开高走'], bottom: 0, type: 'scroll', textStyle: { color: '#94a3b8', fontSize: 10 }, icon: 'roundRect', itemWidth: 10, itemHeight: 4, inactiveColor: '#334155' },
+    grid: { ...GRID, bottom: 50 },
+    xAxis: dateAxis(dates),
+    yAxis: { type: 'value', ...AXIS_STYLE, name: '只', nameTextStyle: { color: '#475569', fontSize: 10 } },
+    series: [
+      { name: '高开低走', type: 'line', smooth: true, symbol: 'none', lineStyle: { width: 1.5, color: '#ef4444' }, itemStyle: { color: '#ef4444' }, data: data.map(d => d.high_open_low_close) },
+      { name: '冲高低走', type: 'line', smooth: true, symbol: 'none', lineStyle: { width: 1.5, color: '#f59e0b' }, itemStyle: { color: '#f59e0b' }, data: data.map(d => d.surge_low_close) },
+      { name: '探底回升', type: 'line', smooth: true, symbol: 'none', lineStyle: { width: 1.5, color: '#10b981' }, itemStyle: { color: '#10b981' }, data: data.map(d => d.dip_recover) },
+      { name: '低开高走', type: 'line', smooth: true, symbol: 'none', lineStyle: { width: 1.5, color: '#38bdf8' }, itemStyle: { color: '#38bdf8' }, data: data.map(d => d.low_open_high_close) },
+    ],
+  }, 220);
+}
+
 // 今日持仓弹窗
 async function openAgentTodayDetail(agentId, agentName) {
   document.getElementById('modal').style.display = 'flex';
@@ -932,137 +1154,6 @@ async function openAgentTodayDetail(agentId, agentName) {
   } catch(e) {
     document.getElementById('modal-body').innerHTML = `<div class="loading-wrap"><div style="color:var(--neg)">加载失败：${e.message}</div></div>`;
   }
-}
-
-// ══════════════════════════════════════════════════════════════════
-//  ── MODEL GROUP ──────────────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════
-const MODEL_IDS = ['model_dip_buy','model_open_buy','model_surge_buy'];
-const MODEL_NAMES = {model_dip_buy:'模型低吸', model_open_buy:'模型开盘', model_surge_buy:'模型拉升'};
-const MODEL_COLORS = ['#38bdf8','#818cf8','#f472b6'];
-
-async function renderModelGroup() {
-  showContent('<div class="loading-wrap"><div class="spinner"></div><div>加载中...</div></div>');
-  try {
-    const results = await Promise.all(MODEL_IDS.map(id => apiFetch(apiUrl('/api/short/daily',{agent_id:id}))));
-    const dataMap = {};
-    MODEL_IDS.forEach((id,i) => { dataMap[id] = results[i]; });
-    showContent(buildModelGroupHTML(dataMap));
-    renderModelGroupCharts(dataMap);
-  } catch(e) {
-    showContent(`<div class="loading-wrap"><div style="color:var(--neg)">加载失败：${e.message}</div></div>`);
-  }
-}
-
-function buildModelGroupHTML(dataMap) {
-  // 汇总统计
-  let totalDays=0, totalWin=0, totalValid=0, bestRet=-Infinity, bestName='';
-  MODEL_IDS.forEach(id => {
-    const valid = (dataMap[id]||[]).filter(r=>!r.has_error&&r.next_day_avg_close_return!=null);
-    const wins = valid.filter(r=>r.next_day_avg_close_return>0);
-    totalDays += valid.length; totalWin += wins.length; totalValid += valid.length;
-    const avg = valid.length ? valid.reduce((s,r)=>s+r.next_day_avg_close_return,0)/valid.length : -Infinity;
-    if (avg > bestRet) { bestRet=avg; bestName=MODEL_NAMES[id]; }
-  });
-  const winRate = totalValid ? (totalWin/totalValid*100).toFixed(1) : '--';
-  const rows = buildModelTableRows(dataMap);
-  return `
-  <div class="cards-row cards-4">
-    <div class="card accent"><div class="card-label">合计有效天数</div><div class="card-value">${totalDays}</div><div class="card-sub">3个模型策略</div></div>
-    <div class="card ${parseFloat(winRate)>=50?'pos':'neg'}"><div class="card-label">综合胜率</div><div class="card-value ${parseFloat(winRate)>=50?'pos':'neg'}">${winRate}%</div><div class="card-sub">${totalWin}胜/${totalValid-totalWin}负</div></div>
-    <div class="card purple"><div class="card-label">最优模型</div><div class="card-value" style="font-size:18px">${bestName}</div><div class="card-sub">${fmt2(bestRet)} 均收益</div></div>
-    <div class="card accent"><div class="card-label">策略类型</div><div class="card-value" style="font-size:16px">XGBoost</div><div class="card-sub">板块热度信号</div></div>
-  </div>
-  <div class="charts-grid charts-6040">
-    <div class="chart-card">
-      <div class="chart-title">三模型累计收益对比</div>
-      <div class="chart-body" id="mg-cum" style="height:260px"></div>
-    </div>
-    <div class="chart-card">
-      <div class="chart-title">平均日收益对比</div>
-      <div class="chart-body" id="mg-bar" style="height:260px"></div>
-    </div>
-  </div>
-  <div class="charts-grid charts-3">
-    ${MODEL_IDS.map((id,i)=>`
-    <div class="chart-card">
-      <div class="chart-title" style="color:${MODEL_COLORS[i]}">${MODEL_NAMES[id]} · 日收益</div>
-      <div class="chart-body" id="mg-daily-${i}" style="height:200px"></div>
-    </div>`).join('')}
-  </div>
-  <div class="table-card">
-    <div class="table-header"><div class="title">三模型逐日对比</div></div>
-    <div class="table-wrap"><table>
-      <thead><tr><th>日期</th>
-        ${MODEL_IDS.map(id=>`<th style="color:${MODEL_COLORS[MODEL_IDS.indexOf(id)]}">${MODEL_NAMES[id]}</th>`).join('')}
-      </tr></thead>
-      <tbody>${rows}</tbody>
-    </table></div>
-  </div>`;
-}
-
-function buildModelTableRows(dataMap) {
-  const allDates = [...new Set(MODEL_IDS.flatMap(id=>(dataMap[id]||[]).map(r=>r.trade_date)))].sort().reverse();
-  return allDates.slice(0,60).map(d => {
-    const cols = MODEL_IDS.map(id => {
-      const r = (dataMap[id]||[]).find(x=>x.trade_date===d);
-      if (!r) return '<td style="color:var(--text3)">--</td>';
-      if (r.has_error) return '<td><span class="badge badge-err">ERR</span></td>';
-      const v = r.next_day_avg_close_return;
-      if (v==null) return '<td style="color:var(--text3)">待更新</td>';
-      return `<td class="${v>=0?'val-pos':'val-neg'}">${fmt2(v)}</td>`;
-    }).join('');
-    return `<tr><td style="color:var(--text2)">${d}</td>${cols}</tr>`;
-  }).join('');
-}
-
-function renderModelGroupCharts(dataMap) {
-  // 累计收益多线
-  const allDates = [...new Set(MODEL_IDS.flatMap(id=>(dataMap[id]||[]).filter(r=>!r.has_error&&r.next_day_avg_close_return!=null).map(r=>r.trade_date)))].sort();
-  const cumSeries = MODEL_IDS.map((id,i) => {
-    const byDate = Object.fromEntries((dataMap[id]||[]).filter(r=>r.next_day_avg_close_return!=null).map(r=>[r.trade_date,r.next_day_avg_close_return]));
-    let cum=0;
-    return { name:MODEL_NAMES[id], type:'line', smooth:true, symbol:'none',
-      lineStyle:{width:2,color:MODEL_COLORS[i]}, itemStyle:{color:MODEL_COLORS[i]},
-      data: allDates.map(d=>{ if(byDate[d]!=null) cum+=byDate[d]; return parseFloat(cum.toFixed(2)); }) };
-  });
-  mkChart('mg-cum',{
-    tooltip:{trigger:'axis',...TOOLTIP_STYLE},
-    legend:{data:MODEL_IDS.map(id=>MODEL_NAMES[id]),bottom:0,textStyle:{color:'#94a3b8',fontSize:10},icon:'roundRect',itemWidth:10,itemHeight:4},
-    grid:{...GRID,bottom:50},
-    xAxis:dateAxis(allDates),
-    yAxis:{...valueAxis('%'),axisLabel:{...AXIS_STYLE.axisLabel,formatter:v=>v+'%'}},
-    series:cumSeries,
-  },260);
-  // 平均日收益柱状图
-  const avgRets = MODEL_IDS.map(id=>{
-    const valid=(dataMap[id]||[]).filter(r=>!r.has_error&&r.next_day_avg_close_return!=null);
-    return valid.length?(valid.reduce((s,r)=>s+r.next_day_avg_close_return,0)/valid.length):0;
-  });
-  mkChart('mg-bar',{
-    tooltip:{trigger:'axis',...TOOLTIP_STYLE},
-    grid:{top:20,bottom:40,left:16,right:16,containLabel:true},
-    xAxis:{type:'category',data:MODEL_IDS.map(id=>MODEL_NAMES[id]),axisLabel:{color:'#64748b',fontSize:11},axisLine:{lineStyle:{color:'#1a2744'}}},
-    yAxis:{...valueAxis('%'),axisLabel:{...AXIS_STYLE.axisLabel,formatter:v=>v+'%'}},
-    series:[{type:'bar',barMaxWidth:48,
-      data:avgRets.map((v,i)=>({value:parseFloat(v.toFixed(2)),itemStyle:{color:MODEL_COLORS[i]}})),
-      label:{show:true,position:'top',color:'#94a3b8',fontSize:11,formatter:p=>(p.value>=0?'+':'')+p.value+'%'},
-    }],
-  },260);
-  // 各自逐日柱状图
-  MODEL_IDS.forEach((id,i)=>{
-    const valid=(dataMap[id]||[]).filter(r=>r.next_day_avg_close_return!=null&&!r.has_error);
-    if(!valid.length) return;
-    mkChart(`mg-daily-${i}`,{
-      tooltip:{trigger:'axis',...TOOLTIP_STYLE},
-      grid:{...GRID},
-      xAxis:dateAxis(valid.map(r=>r.trade_date)),
-      yAxis:{...valueAxis('%'),axisLabel:{...AXIS_STYLE.axisLabel,formatter:v=>v+'%'}},
-      series:[{type:'bar',barMaxWidth:10,
-        data:valid.map(r=>({value:r.next_day_avg_close_return,itemStyle:{color:retColor(r.next_day_avg_close_return)}}))
-      }],
-    },200);
-  });
 }
 
 // ══════════════════════════════════════════════════════════════════
@@ -1283,15 +1374,16 @@ function renderShortCharts(rows) {
 async function renderLong(agentId) {
   showContent('<div class="loading-wrap"><div class="spinner"></div><div>加载中...</div></div>');
   try {
-    const [positions, agg, summary, stopStats] = await Promise.all([
+    const [positions, agg, summary, stopStats, dailyStats] = await Promise.all([
       apiFetch(apiUrl('/api/long/positions', { agent_id: agentId })),
       apiFetch(apiUrl('/api/long/aggregate', { agent_id: agentId })),
       apiFetch(apiUrl('/api/long/summary',   { agent_id: agentId })),
       apiFetch(apiUrl('/api/long/stop_stats', { agent_id: agentId })).catch(()=>[]),
+      apiFetch(apiUrl('/api/long/daily_stats', { agent_id: agentId })).catch(()=>[]),
     ]);
     if (!summary.total) { showContent('<div class="empty-wrap">⚡ 该时段暂无持仓数据</div>'); return; }
     showContent(buildLongHTML(positions, agg, summary, agentId));
-    renderLongCharts(positions, agg, stopStats || []);
+    renderLongCharts(positions, agg, stopStats || [], dailyStats || []);
   } catch(e) {
     showContent(`<div class="loading-wrap"><div style="color:var(--neg)">加载失败：${e.message}</div></div>`);
   }
@@ -1328,6 +1420,21 @@ function buildLongHTML(positions, agg, summary, agentId) {
       <div class="card-value neg">${stopRate}%</div>
       <div class="card-sub">均止损 ${stopDays} 天</div>
     </div>
+  </div>
+
+  <!-- Daily stats main chart -->
+  <div class="chart-card" style="margin-bottom:14px">
+    <div class="chart-title-row">
+      <div class="chart-title">逐日买入批次统计 <span style="font-size:10px;color:var(--text3);font-weight:400">· 仅含已平仓记录</span></div>
+      <div style="display:flex;gap:4px;flex-wrap:wrap;align-items:center">
+        <span class="period-btn ${S.longDailyMetrics.includes('avg_return')?'active':''}" onclick="toggleLongMetric('avg_return')">平均收益</span>
+        <span class="period-btn ${S.longDailyMetrics.includes('avg_win')?'active':''}" onclick="toggleLongMetric('avg_win')">盈利均值</span>
+        <span class="period-btn ${S.longDailyMetrics.includes('avg_loss')?'active':''}" onclick="toggleLongMetric('avg_loss')">亏损均值</span>
+        <span class="period-btn ${S.longDailyMetrics.includes('avg_days')?'active':''}" onclick="toggleLongMetric('avg_days')">平均持仓天</span>
+        <span class="period-btn ${S.longDailyMetrics.includes('win_rate')?'active':''}" onclick="toggleLongMetric('win_rate')">胜率</span>
+      </div>
+    </div>
+    <div class="chart-body" id="l-daily-stats" style="height:280px"></div>
   </div>
 
   <div class="charts-grid charts-2">
@@ -1417,7 +1524,7 @@ function longRow(p) {
   </tr>`;
 }
 
-function renderLongCharts(positions, agg, stopStats) {
+function renderLongCharts(positions, agg, stopStats, dailyStats) {
   const closed = positions.filter(p => p.status === 1 && p.period_return != null);
 
   // 平仓收益分布直方图
@@ -1473,6 +1580,91 @@ function renderLongCharts(positions, agg, stopStats) {
       ],
     }, 260);
   }
+
+  // 逐日批次统计图
+  if (dailyStats && dailyStats.length) {
+    renderLongDailyStatsChart(dailyStats);
+  }
+}
+
+// ── 长线策略逐日批次主图表 ────────────────────────────────────────────────
+const LONG_METRIC_CFG = {
+  avg_return: { name: '平均收益(%)',  color: '#38bdf8', yAxis: 0, formatter: v => v!=null?(v>=0?'+':'')+v+'%':'--' },
+  avg_win:    { name: '盈利均值(%)',  color: '#10b981', yAxis: 0, formatter: v => v!=null?(v>=0?'+':'')+v+'%':'--' },
+  avg_loss:   { name: '亏损均值(%)',  color: '#ef4444', yAxis: 0, formatter: v => v!=null?(v>=0?'+':'')+v+'%':'--' },
+  avg_days:   { name: '均持仓天数',   color: '#f59e0b', yAxis: 1, formatter: v => v!=null?v+'天':'--' },
+  win_rate:   { name: '胜率(%)',      color: '#818cf8', yAxis: 0, formatter: v => v!=null?v+'%':'--' },
+};
+
+function renderLongDailyStatsChart(data) {
+  window._longDailyStatsCache = data;
+  if (!data || !data.length) return;
+  const dates = data.map(d => d.date);
+  const cnts  = data.map(d => d.signal_cnt);
+  const closed = data.map(d => d.closed_cnt);
+
+  const series = S.longDailyMetrics.filter(m => LONG_METRIC_CFG[m]).map(m => {
+    const cfg = LONG_METRIC_CFG[m];
+    return {
+      name: cfg.name,
+      type: 'line', smooth: true, symbol: 'circle', symbolSize: 4,
+      yAxisIndex: cfg.yAxis,
+      lineStyle: { color: cfg.color, width: 2 },
+      itemStyle: { color: cfg.color },
+      connectNulls: false,
+      data: data.map(d => d[m]),
+    };
+  });
+
+  if (!series.length) return;
+
+  mkChart('l-daily-stats', {
+    tooltip: {
+      trigger: 'axis', ...TOOLTIP_STYLE,
+      formatter: params => {
+        const i = params[0].dataIndex;
+        const head = `<div style="font-weight:600;margin-bottom:4px">${params[0].axisValue}</div>` +
+          `<div style="color:var(--text3);font-size:10px;margin-bottom:4px">信号数: ${cnts[i]}  已平仓: ${closed[i]}</div>`;
+        return head + params.filter(p=>p.value!=null).map(p =>
+          `<span style="color:${p.color}">●</span> ${p.seriesName}: <b>${LONG_METRIC_CFG[S.longDailyMetrics.find(m=>LONG_METRIC_CFG[m].name===p.seriesName)]?.formatter(p.value)||p.value}</b>`
+        ).join('<br/>');
+      }
+    },
+    legend: { data: series.map(s=>s.name), bottom: 0, type: 'scroll', textStyle: { color: '#94a3b8', fontSize: 10 }, icon: 'roundRect', itemWidth: 10, itemHeight: 4, inactiveColor: '#334155' },
+    grid: { ...GRID, bottom: 55, right: S.longDailyMetrics.includes('avg_days') ? 50 : 16 },
+    xAxis: dateAxis(dates),
+    yAxis: [
+      { type: 'value', name: '%', ...AXIS_STYLE, axisLabel: { ...AXIS_STYLE.axisLabel, formatter: v => v+'%' } },
+      { type: 'value', name: '天', ...AXIS_STYLE, axisLabel: { ...AXIS_STYLE.axisLabel, formatter: v => v+'天' }, splitLine: { show: false } },
+    ],
+    series,
+  }, 280);
+}
+
+function toggleLongMetric(metric) {
+  const idx = S.longDailyMetrics.indexOf(metric);
+  if (idx >= 0) {
+    if (S.longDailyMetrics.length > 1) S.longDailyMetrics.splice(idx, 1);
+  } else {
+    S.longDailyMetrics.push(metric);
+  }
+  // 更新按钮状态
+  document.querySelectorAll('#l-daily-stats')?.forEach(()=>{});
+  // 重渲染图表
+  const chart = S.activeCharts.find(c => { try { return c.getDom().id === 'l-daily-stats'; } catch(e){ return false; }});
+  if (chart) {
+    chart.dispose();
+    S.activeCharts = S.activeCharts.filter(c => c !== chart);
+  }
+  // 重新从当前数据渲染（需要 dailyStats 缓存）
+  if (window._longDailyStatsCache) {
+    renderLongDailyStatsChart(window._longDailyStatsCache);
+  }
+  // Update button states
+  document.querySelectorAll('.period-btn[onclick^="toggleLongMetric"]').forEach(btn => {
+    const m = btn.getAttribute('onclick').match(/'(\w+)'/)?.[1];
+    if (m) btn.classList.toggle('active', S.longDailyMetrics.includes(m));
+  });
 }
 
 // ══════════════════════════════════════════════════════════════════
