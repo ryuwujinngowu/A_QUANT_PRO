@@ -122,15 +122,26 @@ class SEIFeature(BaseFeature):
     @staticmethod
     def classify_candle(open_price: float, close_price: float, pre_close: float) -> int:
         """
-        K 线结构四分类（仅需日线 OHLC，不依赖分钟线）
-        :return: 2=真阳, 1=假阳, -1=假阴, -2=真阴
+        K 线结构分类（仅需日线 OHLC，不依赖分钟线）
+        :return: 2=真阳, 1=假阳, 0=平盘/十字星, -1=假阴, -2=真阴
+
+        平盘/十字星单独归 0（中性，不引入方向性偏差）：
+          - close ≈ pre_close（平盘）：价格无变化，无信号
+          - close ≈ open（十字星）：多空拮抗，无明确方向
         """
+        eps = 1e-6
+        # 平盘：收盘价与前收接近 → 无方向信号，返回 0（中性）
+        if abs(close_price - pre_close) < eps:
+            return 0
+        # 十字星：收盘价与开盘接近（多空均衡）→ 返回 0（中性）
+        if abs(close_price - open_price) < eps:
+            return 0
         is_yang = close_price > open_price    # 收 > 开 = 阳线
         is_up   = close_price > pre_close     # 收 > 前收 = 实涨
-        if is_yang and is_up:    return  2
-        elif is_yang:            return  1
-        elif is_up:              return -1
-        else:                    return -2
+        if is_yang and is_up:    return  2    # 真阳：阳线+实涨
+        elif is_yang:            return  1    # 假阳：阳线但实跌
+        elif is_up:              return -1    # 假阴：阴线但实涨
+        else:                    return -2    # 真阴：阴线+实跌
 
     # ------------------------------------------------------------------ #
     # 无分钟线时的日线回退计算

@@ -30,11 +30,11 @@ Bollinger Bands 系列：
     boll_width          : (上轨 - 下轨) / 中轨，带宽相对中轨，量化波动扩张/收缩
 
 其他技术指标（直接使用原始值，量纲已天然可比）：
-    bias1               : BIAS 乖离率 1（6 日）
-    bias2               : BIAS 乖离率 2（12 日）
-    bias3               : BIAS 乖离率 3（24 日）
     cci                 : CCI 顺势指标（±100 为超买超卖分界）
     wr                  : W&R 威廉指标（-100~0，靠近 0=超买，靠近 -100=超卖）
+
+已移除列（避免与现有模块重复）：
+    bias1/2/3（6/12/24日乖离率）→ 由 ma_position 模块提供 bias5/10/13，语义相同且本地计算更快
 
 设计说明：
     - boll_pct / boll_width 需要 close 价格，从 data_bundle.daily_grouped 取。
@@ -58,13 +58,19 @@ from utils.log_utils import logger
 # 从 DB 读取的原始列（与 Tushare 实际返回列名一致，_bfq = 不复权口径）
 # 振荡类指标（RSI/KDJ/BIAS/CCI/WR/MACD）bfq=hfq=qfq，取 bfq 即可。
 # 价格类（Bollinger）用 bfq 与不复权 close 保持同口径。
+#
+# bias1/2/3（6/12/24日乖离率）已从输出中移除：
+#   ma_position 模块已通过本地计算提供 bias5/10/13（5/10/13日），
+#   语义相同（乖离率），本地计算快，无需重复引入 API 数据。
+#   如需更多乖离率周期，建议在 ma_position 中扩展（MA_PERIODS 配置），
+#   而非依赖本模块的 API 数据。
 _DB_COLS = [
     "ts_code", "trade_date",
     "macd_dif_bfq", "macd_dea_bfq", "macd_bfq",
     "kdj_k_bfq", "kdj_d_bfq", "kdj_bfq",
     "rsi_bfq_6", "rsi_bfq_12", "rsi_bfq_24",
     "boll_upper_bfq", "boll_mid_bfq", "boll_lower_bfq",
-    "bias1_bfq", "bias2_bfq", "bias3_bfq",
+    # "bias1_bfq", "bias2_bfq", "bias3_bfq",  # 已由 ma_position 覆盖，避免重复
     "cci_bfq", "wr_bfq",
 ]
 
@@ -174,9 +180,7 @@ class StkFactorProFeature(BaseFeature):
         boll_mid   = _f("boll_mid_bfq")
         boll_lower = _f("boll_lower_bfq")
 
-        bias1 = _f("bias1_bfq")
-        bias2 = _f("bias2_bfq")
-        bias3 = _f("bias3_bfq")
+        # bias1/2/3 已移除（由 ma_position 模块覆盖，避免重复）
         cci   = _f("cci_bfq")
         wr    = _f("wr_bfq")
 
@@ -236,10 +240,7 @@ class StkFactorProFeature(BaseFeature):
             # Bollinger
             "boll_pct":          boll_pct,
             "boll_width":        boll_width,
-            # BIAS / CCI / WR（直接透传）
-            "bias1":             _safe(bias1),
-            "bias2":             _safe(bias2),
-            "bias3":             _safe(bias3),
+            # CCI / WR（bias1/2/3 已移除，由 ma_position 覆盖）
             "cci":               _safe(cci),
             "wr":                _safe(wr),
         }
@@ -274,9 +275,7 @@ class StkFactorProFeature(BaseFeature):
             "rsi_diverge":       0.0,
             "boll_pct":          0.5,
             "boll_width":        0.0,
-            "bias1":             0.0,
-            "bias2":             0.0,
-            "bias3":             0.0,
+            # bias1/2/3 已移除（由 ma_position 覆盖）
             "cci":               0.0,
             "wr":                0.0,
         }

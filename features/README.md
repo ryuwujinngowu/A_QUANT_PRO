@@ -235,6 +235,54 @@ sei = clip(base + gap_adj + trend_adj + vwap_adj + candle_adj + limit_adj, 0, 10
 
 ---
 
+---
+
+### 5. stk_factor_pro — Tushare 技术指标因子（个股级）
+
+**文件**: `technical/stk_factor_feature.py`
+**输出类型**: 个股级（含 stock_code），D 日截面（无 d0-d4 后缀）
+**数据来源**: `stk_factor_pro` 表（`ensure_stk_factor_pro_data()` 确保当日数据存在）
+**启用状态**: ⚠️ 当前在 `__init__.py:62` 被注释，需取消注释启用
+
+| 因子名 | 计算逻辑 |
+|--------|----------|
+| `macd_dif` | DIF 快线（EMA12-EMA26），正=短期强势 |
+| `macd_dea` | DEA 慢线（信号线），正=趋势向上 |
+| `macd_bar` | MACD 柱（DIF-DEA），正=金叉趋势 |
+| `macd_golden_cross` | 1=金叉, 0=未穿, -1=死叉 |
+| `kdj_k` / `kdj_d` / `kdj_j` | KDJ 三线（K快速/D慢速/J超买超卖敏感） |
+| `kdj_overbought` | 1=超买(K>80 && D>80), -1=超卖(K<20 && D<20), 0=中性 |
+| `rsi_6` / `rsi_12` / `rsi_24` | RSI 短/中/长周期 |
+| `rsi_diverge` | rsi_6 - rsi_24，正=短强长弱（超短线强势） |
+| `boll_pct` | (close-下轨)/(上轨-下轨)，0=下轨1=上轨，跨股可比 |
+| `boll_width` | (上轨-下轨)/中轨，量化波动扩张/收缩 |
+| `bias1/2/3` | BIAS 乖离率（6/12/24日）|
+| `cci` | 顺势指标（±100 超买超卖） |
+| `wr` | 威廉指标（-100~0，靠近0=超买） |
+
+**小计**: 17 列（均为 D 日截面，close 用 data_bundle.daily_grouped O(1) 取，无额外 IO）
+
+---
+
+## 已知问题（Review 2026-03-26）
+
+### 计算 bug
+| 位置 | 问题 | 风险 |
+|------|------|------|
+| `emotion/sei_feature.py` | candle_type: close==pre_close 时归为 -2（真阴），应为 0（平盘） | 中 |
+| `emotion/sei_feature.py` | SEI gap_coeff=20 过大，实际调整幅度可达 ±200 分，大量 clip 截断 | 中 |
+| `macro/market_macro_feature.py:141` | market_vol_ratio_d0 自引用：d0 成交量参与了自身分母均值计算 | 高 |
+| `sector/sector_heat_feature.py:229` | adapt_score HHI 固定 total_seats=25，应改为实际出现次数之和 | 中 |
+
+### 训练集生成 bug
+| 位置 | 问题 | 风险 |
+|------|------|------|
+| `learnEngine/label.py:95` | label1 阈值代码(3%)与文档注释(5%)不符 | 高 |
+| `learnEngine/dataset.py:142` | fillna(0) 导致 pos_20d 缺失填为 0（20日最低位，非中性） | 中 |
+| `learnEngine/dataset.py:434` | 涨停基因过滤窗口仅10日，沉默期后爆发股被系统性丢弃 | 高 |
+
+---
+
 ## 扩展指南
 
 新增因子只需 3 步：
