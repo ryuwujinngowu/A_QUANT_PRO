@@ -246,6 +246,41 @@ class FeatureDataBundle:
             self.macro_cache["limit_up_counts_5d"] = limit_up_counts_5d
             self.macro_cache["consec_max_5d"]      = consec_max_5d
 
+            # ── 20日上证指数涨跌幅（个股强势因子 factor 11 用）─────────────
+            # 批量查询全部 20d 日期，单次 SQL，存为 {date: pct_chg} dict
+            try:
+                hist_sh_pct_chg: dict = {}
+                # d0 已在 index_df 中
+                d0_idx_df = self.macro_cache.get("index_df", pd.DataFrame())
+                if not d0_idx_df.empty and "ts_code" in d0_idx_df.columns:
+                    d0_row = d0_idx_df[d0_idx_df["ts_code"] == "000001.SH"]
+                    if not d0_row.empty:
+                        hist_sh_pct_chg[td] = float(d0_row.iloc[0].get("pct_chg", 0.0) or 0.0)
+                # 批量查询其余历史日期
+                hist_20d_dates = [d for d in self.lookback_dates_20d if d != td]
+                if hist_20d_dates:
+                    dates_fmt_list = [d.replace("-", "") for d in hist_20d_dates]
+                    placeholders   = ", ".join(["%s"] * len(dates_fmt_list))
+                    from utils.db_utils import db as _db
+                    hist_idx_rows = _db.query(
+                        f"SELECT trade_date, pct_chg FROM index_daily "
+                        f"WHERE ts_code = '000001.SH' AND trade_date IN ({placeholders})",
+                        params=tuple(dates_fmt_list),
+                    ) or []
+                    for r in hist_idx_rows:
+                        raw_td = str(r.get("trade_date", "")).replace("-", "")
+                        # 统一转成 yyyy-mm-dd 匹配 lookback_dates_20d 格式
+                        if len(raw_td) == 8:
+                            std_td = f"{raw_td[:4]}-{raw_td[4:6]}-{raw_td[6:]}"
+                        else:
+                            std_td = str(r.get("trade_date", ""))
+                        hist_sh_pct_chg[std_td] = float(r.get("pct_chg", 0.0) or 0.0)
+                self.macro_cache["hist_sh_pct_chg"] = hist_sh_pct_chg
+                logger.debug(f"[DataBundle] 20日上证指数涨跌幅加载完成 | {len(hist_sh_pct_chg)} 条")
+            except Exception as e:
+                logger.warning(f"[DataBundle] 20日指数历史加载失败（非致命）：{e}")
+                self.macro_cache["hist_sh_pct_chg"] = {}
+
             logger.debug(
                 f"[DataBundle] 宏观数据加载完成 | "
                 f"涨停:{len(self.macro_cache['limit_up_df'])} "

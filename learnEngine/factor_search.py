@@ -13,7 +13,7 @@
     搜索策略：
       1. 按「因子家族」分组（如 stock_max_dd 家族 = d0~d4），每组 4 种选择
       2. 独立因子单独 on/off
-      3. 同时搜索 XGBoost 超参数 + 亏损惩罚参数
+      3. 同时搜索 XGBoost 超参数
       → 搜索空间 ≈ 4^N_families × 2^N_standalone × 连续超参数
       → Optuna TPE 采样器可在 200~500 轮内收敛
 
@@ -23,7 +23,7 @@
 
 输出：
     - learnEngine/search_results/best_config.json：最优因子列表 + 参数
-    - 可直接粘贴到 train.py 的 EXCLUDE_PATTERNS 和 RiskPenaltyConfig
+    - 可直接粘贴到 train.py 的 EXCLUDE_PATTERNS
 """
 
 import argparse
@@ -213,61 +213,9 @@ def time_series_split(df: pd.DataFrame, feature_cols: List[str]):
     y_train, y_val = y[:split_point], y[split_point:]
 
     df_sorted = df.iloc[sort_idx].reset_index(drop=True)
-    df_train = df_sorted.iloc[:split_point]
+    df_train = df_sorted.iloc[:split_point]  # 保留以备后续扩展
 
     return X_train, X_val, y_train, y_val, df_train
-
-
-# ============================================================
-# 样本权重生成（搜索专用轻量版）
-# ============================================================
-
-def _generate_search_weights(
-    df_train: pd.DataFrame,
-    y_train: np.ndarray,
-    loss_multiplier: float,
-    severity_heavy: float,
-    severity_medium: float,
-    severity_light: float,
-) -> np.ndarray:
-    """
-    与 risk_penalty_core.generate_sample_weights 逻辑一致的轻量版。
-    含类别平衡（正样本 × class_balance_ratio）+ 亏损分级惩罚。
-    独立实现避免搜索过程中的重量级依赖和日志噪声。
-    """
-    n = len(y_train)
-    weights = np.ones(n, dtype=np.float64)
-
-    pos_count = int(y_train.sum())
-    neg_count = n - pos_count
-    class_balance = min(neg_count / pos_count, 4.0) if pos_count > 0 else 1.0
-
-    has_raw_return = "label_raw_return" in df_train.columns
-    raw_returns = df_train["label_raw_return"].values if has_raw_return else None
-
-    for i in range(n):
-        if y_train[i] == 1:
-            weights[i] = class_balance
-        else:
-            if has_raw_return and raw_returns is not None:
-                ret = raw_returns[i]
-                if ret < -0.07:
-                    sev = severity_heavy
-                elif ret < -0.03:
-                    sev = severity_medium
-                elif ret < 0.00:
-                    sev = severity_light
-                else:
-                    sev = 1.0
-                weights[i] = loss_multiplier * sev
-            else:
-                weights[i] = loss_multiplier
-
-    # 均值归一化
-    mean_w = weights.mean()
-    if mean_w > 0:
-        weights /= mean_w
-    return weights
 
 
 # ============================================================
@@ -282,7 +230,6 @@ class FactorSearchEngine:
       1. 因子家族选择（exclude / d0_only / d0_d1 / all_days）
       2. 独立因子 on/off
       3. XGBoost 超参数（max_depth, learning_rate, n_estimators 等）
-      4. 亏损惩罚参数（loss_multiplier, severity 各档）
 
     优化目标：
       综合分 = w_recall × Recall + w_precision × Precision + w_auc × AUC
@@ -345,30 +292,18 @@ class FactorSearchEngine:
             "verbosity":          0,
         }
 
-        # ── 3. 亏损惩罚参数 ────────────────────────────────────
-        loss_multiplier  = trial.suggest_float("loss_multiplier", 1.0, 3.0)
-        severity_heavy   = trial.suggest_float("severity_heavy", 1.0, 2.5)
-        severity_medium  = trial.suggest_float("severity_medium", 1.0, 2.0)
-        severity_light   = trial.suggest_float("severity_light", 0.8, 1.5)
+        # ── 3. 准备数据 ────────────────────────────────────────
+        X_train, X_val, y_train, y_val, _ = time_series_split(self.df, selected)
 
-        # ── 4. 准备数据 ────────────────────────────────────────
-        X_train, X_val, y_train, y_val, df_train = time_series_split(self.df, selected)
-
-        weights = _generate_search_weights(
-            df_train, y_train,
-            loss_multiplier, severity_heavy, severity_medium, severity_light,
-        )
-
-        # ── 5. 训练 ────────────────────────────────────────────
+        # ── 4. 训练 ────────────────────────────────────────────
         model = xgb.XGBClassifier(**xgb_params)
         model.fit(
             X_train, y_train,
-            sample_weight=weights,
             eval_set=[(X_val, y_val)],
             verbose=False,
         )
 
-        # ── 6. 评估 ────────────────────────────────────────────
+        # ── 5. 评估 ────────────────────────────────────────────
         y_pred  = model.predict(X_val)
         y_proba = model.predict_proba(X_val)[:, 1]
 
@@ -463,12 +398,6 @@ class SearchResultExporter:
                            "colsample_bytree", "min_child_weight", "gamma", "reg_alpha", "reg_lambda"]
                 if k in best.params
             },
-            "risk_penalty": {
-                "loss_multiplier":  round(best.params.get("loss_multiplier", 1.5), 4),
-                "severity_heavy":   round(best.params.get("severity_heavy", 1.8), 4),
-                "severity_medium":  round(best.params.get("severity_medium", 1.4), 4),
-                "severity_light":   round(best.params.get("severity_light", 1.1), 4),
-            },
             "factor_families": factor_families,
             "standalone_factors": standalone_factors,
             "selected_features": sorted(best.user_attrs.get("features", [])),
@@ -503,7 +432,7 @@ class SearchResultExporter:
         sorted_trials = sorted(valid_trials, key=lambda t: t.value, reverse=True)
 
         logger.info(f"\nTop 10 试验:")
-        header = f"  {'#':>4s}  {'Score':>7s}  {'Recall':>7s}  {'Prec':>7s}  {'AUC':>7s}  {'F1':>7s}  {'Nfeat':>5s}  {'loss_m':>6s}"
+        header = f"  {'#':>4s}  {'Score':>7s}  {'Recall':>7s}  {'Prec':>7s}  {'AUC':>7s}  {'F1':>7s}  {'Nfeat':>5s}"
         logger.info(header)
         for t in sorted_trials[:10]:
             logger.info(
@@ -512,8 +441,7 @@ class SearchResultExporter:
                 f"{t.user_attrs.get('precision', 0):7.4f}  "
                 f"{t.user_attrs.get('auc', 0):7.4f}  "
                 f"{t.user_attrs.get('f1', 0):7.4f}  "
-                f"{t.user_attrs.get('n_features', 0):5d}  "
-                f"{t.params.get('loss_multiplier', 0):6.2f}"
+                f"{t.user_attrs.get('n_features', 0):5d}"
             )
 
         # 输出最优因子列表
@@ -522,13 +450,6 @@ class SearchResultExporter:
             logger.info(f"\n最优因子组合 ({len(features)} 个):")
             for feat in sorted(features):
                 logger.info(f"  - {feat}")
-
-        # 输出关键惩罚参数
-        logger.info(f"\n最优亏损惩罚参数:")
-        logger.info(f"  loss_multiplier = {best.params.get('loss_multiplier', 0):.4f}")
-        logger.info(f"  severity_heavy  = {best.params.get('severity_heavy', 0):.4f}")
-        logger.info(f"  severity_medium = {best.params.get('severity_medium', 0):.4f}")
-        logger.info(f"  severity_light  = {best.params.get('severity_light', 0):.4f}")
 
     def print_train_config(self, result: dict):
         """输出可直接粘贴到 train.py 的配置代码"""
@@ -573,19 +494,6 @@ class SearchResultExporter:
                 logger.info(line)
         logger.info("]")
 
-        # RiskPenaltyConfig
-        rp = result["risk_penalty"]
-        logger.info("")
-        logger.info("# --- RiskPenaltyConfig（粘贴到 train.py）---")
-        logger.info(f"config.loss_weight_multiplier = {rp['loss_multiplier']}")
-        logger.info(f"config.high_risk_env_extra_multiplier = 1.15")
-        logger.info(f"config.loss_severity_tiers = (")
-        logger.info(f"    (-0.07, {rp['severity_heavy']}),")
-        logger.info(f"    (-0.03, {rp['severity_medium']}),")
-        logger.info(f"    ( 0.00, {rp['severity_light']}),")
-        logger.info(f"    ( 0.03, 1.0),")
-        logger.info(f")")
-
         # XGBoost base_params
         xp = result["xgb_params"]
         logger.info("")
@@ -617,7 +525,7 @@ def main():
     args = parser.parse_args()
 
     logger.info("=" * 70)
-    logger.info("Optuna 因子组合 + 超参数 + 亏损惩罚 联合搜索")
+    logger.info("Optuna 因子组合 + 超参数联合搜索")
     logger.info(f"试验次数: {args.n_trials} | 超时: {args.timeout}s")
     logger.info("=" * 70)
 

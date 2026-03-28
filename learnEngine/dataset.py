@@ -20,7 +20,7 @@ import sys
 import warnings
 from collections import defaultdict
 from datetime import datetime, timedelta
-from typing import List, Dict
+from typing import List, Dict, Tuple
 
 import pandas as pd
 
@@ -118,10 +118,10 @@ class DataSetAssembler:
             return pd.DataFrame()
 
         df = df.drop_duplicates(subset=["stock_code", "trade_date"])
-        # label1/label2 是核心必需列，D+1 停牌时整行已被 LabelEngine 跳过，此处 dropna 正常
-        df = df.dropna(subset=["label1", "label2"])
-        # 涉及 D+2 或 D close 的标签（D+2 无数据时可为 None），允许 NaN 保留行
-        # 训练时按 TARGET_LABEL 各自 dropna，不在此处强制清洗
+        # label1 是唯一必需列（D+1 停牌时 LabelEngine 跳过，dropna 正常）
+        # label2 依赖 D+2 数据，最新日期可能 D+2 尚未收盘，保留 NaN 行而非丢弃
+        # 训练时按 TARGET_LABEL 各自 dropna，在此只保证 label1 非空
+        df = df.dropna(subset=["label1"])
 
         # ── 丢弃 D 日收盘价缺失或为零的行 ───────────────────────────────
         # 该列为零必然是停牌 / 数据入库异常，宁可损失训练样本，
@@ -332,24 +332,35 @@ if __name__ == "__main__":
     warnings.filterwarnings("ignore")
 
     # ==================== 可配置参数 ====================
-    # START_DATE            = "2023-01-02"
-    # END_DATE              = "2023-12-30"
-    START_DATE            = "2024-11-02"
-    END_DATE              = "2026-03-11"
+    # 支持多时间段：每个元素为 (start_date, end_date)，格式 yyyy-mm-dd
+    # 各段内的交易日会合并去重后统一处理（跨段间隙不纳入）
+    DATE_RANGES: List[Tuple[str, str]] = [
+        ("2024-01-02", "2024-06-30"),
+        ("2024-11-02", "2026-03-27"),
+    ]
     OUTPUT_CSV_PATH       = os.path.join(os.getcwd(), "datasets", "train_dataset_latest.csv")
     PROCESSED_DATES_FILE  = "processed_dates.json"
     # 因子逻辑有变更（新增列、修改计算公式）时必须更新版本号，否则旧数据不会重跑
-    FACTOR_VERSION        = "v4.0_loss_severity_raw_return"
+    FACTOR_VERSION        = "v5.0_individual_factors"
     # =====================================================
+
+    # ---------- 从多段日期范围收集全部交易日 ----------
+    _date_set: set = set()
+    for _s, _e in DATE_RANGES:
+        _date_set.update(get_trade_dates(_s, _e))
+    all_trade_dates: List[str] = sorted(_date_set)
+
+    # LabelEngine 需要覆盖所有段的完整跨度（计算 D+1/D+2 标签）
+    _label_start = min(s for s, _ in DATE_RANGES)
+    _label_end   = max(e for _, e in DATE_RANGES)
 
     # ---------- 初始化核心组件 ----------
     feature_engine    = FeatureEngine()          # 使用 features/__init__.py 的新引擎
-    label_engine      = LabelEngine(START_DATE, END_DATE)
+    label_engine      = LabelEngine(_label_start, _label_end)
     sector_heat       = SectorHeatFeature()
     dates_manager     = ProcessedDatesManager(PROCESSED_DATES_FILE, FACTOR_VERSION)
 
     # ---------- 确定待处理日期 ----------
-    all_trade_dates = get_trade_dates(START_DATE, END_DATE)
     to_process      = [d for d in all_trade_dates if not dates_manager.is_processed(d)]
 
     # ── 启动一致性检查 ─────────────────────────────────────────────────────

@@ -140,7 +140,7 @@ class LabelEngine:
 
             # ── 开盘溢价（需要 D close）──────────────────────────────────────
             d0_row   = d0_map.get(ts_code)
-            d0_close = float(d0_row.get("close", 0) or 0) if d0_row else 0
+            d0_close = float(d0_row.get("close", 0) or 0) if d0_row is not None else 0
             label_open_gap = round((d1_open - d0_close) / d0_close, 6) if d0_close > 0 else None
 
             rows.append({
