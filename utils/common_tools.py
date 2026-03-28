@@ -188,8 +188,8 @@ def filter_st_stocks(ts_code_list: List[str], trade_date: str) -> List[str]:
             logger.debug(f"[filter_st_stocks] 当日被剔除的ST股：{st_removed}")
         return normal_codes
     except Exception as e:
-        logger.error(f"[filter_st_stocks] 批量过滤ST股票失败 | 交易日：{trade_date} | 错误：{e}", exc_info=True)
-        return []
+        logger.error(f"[filter_st_stocks] 批量过滤ST股票失败（返回原始列表，不过滤）| 交易日：{trade_date} | 错误：{e}", exc_info=True)
+        return list(ts_code_list)  # 中性值：失败时不过滤，避免清空候选池
 
 def get_trade_dates(start_date: str, end_date: str) -> List[str]:
     """
@@ -1789,19 +1789,23 @@ def ensure_stk_factor_pro_data(trade_date: str) -> None:
 
 def get_st_set(trade_date: str) -> set:
     """
-    查询当日 ST/ST* 股票代码集合（来自 stock_st 自动更新表）。
-    失败时返回空集合（中性值：不过滤），避免引入虚假偏差。
+    查询当日 ST/ST* 股票代码集合。
+    优先查 stock_st（自动更新表），失败时降级查 stock_risk_warning（按需入库表）。
+    两表均失败时返回空集合（中性值：不过滤），避免引入虚假偏差。
 
     :param trade_date: 交易日（YYYY-MM-DD 或 YYYYMMDD 均可）
     :return: {ts_code, ...}
     """
     trade_date_fmt = trade_date.replace("-", "")
-    sql = "SELECT DISTINCT ts_code FROM stock_st WHERE trade_date = %s"
-    try:
-        rows = db.query(sql, params=(trade_date_fmt,)) or []
-        return {r["ts_code"] for r in rows if r.get("ts_code")}
-    except Exception as e:
-        logger.warning(f"[get_st_set] 查询失败（返回空集合）| {trade_date} | {e}")
+    for table in ("stock_st", "stock_risk_warning"):
+        try:
+            sql = f"SELECT DISTINCT ts_code FROM {table} WHERE trade_date = %s"
+            rows = db.query(sql, params=(trade_date_fmt,)) or []
+            result = {r["ts_code"] for r in rows if r.get("ts_code")}
+            if rows:  # 找到数据则直接返回（不再尝试下一张表）
+                return result
+        except Exception as e:
+            logger.warning(f"[get_st_set] {table} 查询失败，尝试下一张表 | {trade_date} | {e}")
     return set()
 
 
