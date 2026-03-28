@@ -335,13 +335,13 @@ if __name__ == "__main__":
     # 支持多时间段：每个元素为 (start_date, end_date)，格式 yyyy-mm-dd
     # 各段内的交易日会合并去重后统一处理（跨段间隙不纳入）
     DATE_RANGES: List[Tuple[str, str]] = [
-        ("2024-01-02", "2024-06-30"),
-        ("2024-11-02", "2026-03-27"),
+        ("2023-01-01", "2023-09-30"),
+        ("2024-11-01", "2026-03-10"),
     ]
     OUTPUT_CSV_PATH       = os.path.join(os.getcwd(), "datasets", "train_dataset_latest.csv")
     PROCESSED_DATES_FILE  = "processed_dates.json"
     # 因子逻辑有变更（新增列、修改计算公式）时必须更新版本号，否则旧数据不会重跑
-    FACTOR_VERSION        = "v5.0_individual_factors"
+    FACTOR_VERSION        = "v5.1_individual_factors_fixed"
     # =====================================================
 
     # ---------- 从多段日期范围收集全部交易日 ----------
