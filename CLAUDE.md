@@ -1,8 +1,8 @@
 # a_quant 项目记忆文档
 
-> 最后更新：2026-03-26
+> 最后更新：2026-03-28
 > 分支：`claude/review-feature-factors-b6CUx`
-> **新增**: 特征层全面 Review（因子覆盖 + 数据正确性 + stk_factor_pro 评估）
+> **新增**: 特征层全面 Review（因子覆盖 + 数据正确性 + stk_factor_pro 评估）+ P7 新增4个全局因子（hp_stage/hp_style/hp_cycle/liquid_stats）
 
 ---
 
@@ -172,6 +172,25 @@
   - `compute_ma_from_hfq_range(preloaded_kline=None)` — 支持预加载 DataFrame 零 DB 查询，无预加载时降级查库
   - `compute_ma_from_qfq_range()` — QFQ 版本
 - **`features/macro/market_macro_feature.py`**：市场宏观特征（依赖 `data_bundle.macro_cache`，不能在长线引擎直接用）
+- **`features/utils/high_position_utils.py`**（P7新增）：高位股统一计算口径（无IO，纯计算）
+  - 常量：`HP_BASE_PCT=0.01` / `HP_HIGH_PCT=0.10` / `HP_MIN_HIGH=3` / `HP_IPO_LOOKBACK=21`
+  - `compute_high_pos_selection(d0_df, d21_df, st_set, list_date_map, d21_date_str)` → `(base_pool_df, high_pos_df)`
+- **`features/emotion/hp_stage_feature.py`**（P7新增，注册为 `"hp_stage"`）：高位股阶段因子（全局因子）
+  - `hp_stage_vwap_bias`（MA5乖离率%，clip[-30,30]）/ `hp_stage_pct_chg`（涨跌幅%）/ `hp_stage_amount_ratio`（量能倍数，clip[0.01,20]）
+  - 成交额加权；**按 trade_date 列显式对齐 D0/D-1，不用位置索引，防停牌缺行错位**
+- **`features/emotion/hp_style_feature.py`**（P7新增，注册为 `"hp_style"`）：市场高宽风格因子（全局因子）
+  - `hp_style_breadth_ratio`（cnt_100/max(1,cnt_50)）/ `hp_style_height_pct`（cnt_100/20，最大1.0）
+  - 过滤 ST/BJ/近10日新股；数据来源：全市场不复权D0/D-10日线
+- **`features/macro/hp_cycle_feature.py`**（P7新增，注册为 `"hp_cycle"`）：120日高位股涨幅周期（全局因子）
+  - `hp_cycle_height_pct`（当前/历史最高，clip[0,2.0]）/ `hp_cycle_peak_dist_pct`（峰值距今，0=当前是峰值）
+  - 12切片×10交易日；全零/单值切片时返回中性值(0.5, 0.5)，不返回0.0
+- **`features/macro/liquid_stats_feature.py`**（P7新增，注册为 `"liquid_stats"`）：液态股广度因子（全局因子）
+  - `liquid_60d_breakout_ratio`（60日新高/低占比，历史区间[D-60, D-1]不含D0）/ `liquid_holf_ratio`（高开低走占比）
+  - 液态股定义：5日均成交额 ≥ 20亿（2,000,000 千元）
+- **`features/data_bundle.py`**（P7扩展）：
+  - 新增 `self.lookback_dates_22d`（22个交易日，含D-21，用于20日涨幅基准）
+  - 新增 `self.hp_ext_cache`（高位股+市场广度扩展数据缓存）
+  - 新增 `_load_hp_ext_cache()` 两轮IO：Round1并发拉全市场D0/D10/D21日线+ST+上市日+12切片SQL+液态股SQL；Round2批量拉基础池近5日日线
 
 ---
 
@@ -310,6 +329,31 @@
 | ⭐⭐⭐⭐ | 板块内多维排名 | 今日涨幅排名、今日量能排名、5日动量排名 | 已有数据推导 |
 | ⭐⭐⭐ | 市值控制 | 流通市值、市值/成交额比 | 日线 close×流通股本 |
 | ⭐⭐⭐ | K线形态 | 实体比、锤子线/上吊线识别 | 已有 OHLC 推导 |
+
+### P7 高位股情绪 + 市场广度因子新增（2026-03-28）
+
+23. **新增4个全局因子（hp_stage / hp_style / hp_cycle / liquid_stats）**
+    - 全部注册到 `feature_registry`，已在 `features/__init__.py` import
+    - 全部为全局因子（无 stock_code），由 FeatureEngine 通过 `trade_date` left join 到个股级结果
+    - 所有 IO 集中在 `FeatureDataBundle._load_hp_ext_cache()` 完成，因子 `calculate()` 内零 DB 查询
+
+24. **`utils/common_tools.py` 新增4个辅助函数（仅供 `_load_hp_ext_cache` 调用）**
+    - `get_st_set(trade_date)` — 查 stock_st，失败返回空集（中性值）
+    - `get_stock_list_date_map()` — 查 stock_basic 全市场上市日期，用于新股过滤
+    - `get_hp_cycle_slice_avg_gain(slice_end_date, d21_date, top_n=52)` — DB端SQL聚合，返回切片内前1%股票的平均20日涨幅（%），避免传输原始行情
+    - `get_liquid_stock_stats(trade_date, d5_start, d60_start, prev_trade_date)` — 两条聚合SQL返回液态股广度统计，60日历史区间严格排除D0
+
+25. **`features/utils/high_position_utils.py` 统一高位股口径**
+    - 定义规范常量（HP_BASE_PCT/HP_HIGH_PCT/HP_MIN_HIGH/HP_IPO_LOOKBACK），特征层与 agent 层共同参照
+    - 过滤顺序：ST → BJ → 近21交易日新股 → 按不复权20日涨幅降序
+
+26. **Review Agent P1 修复：hp_stage_pct_chg 日期对齐**
+    - 原实现：`closes[-2]` 取D-1，停牌缺行时实际取到D-2 → 涨跌幅计算偏大
+    - 修复：改为按 `trade_date` 列显式过滤D0行 + `prior_rows.iloc[-1]` 取最近前收日
+
+27. **Review Agent P2 修复**
+    - `hp_stage_vwap_bias` 加 `np.clip(-30, 30)` 防止异常极值拉偏加权均值
+    - `hp_cycle_feature.py` 注释更正：全零/单值时返回中性值 0.5（不是 0.0）
 
 ### 历史修复（本会话前）
 - **日期格式 Bug**：DB 存储 `trade_date` 为 `YYYY-MM-DD`，代码比较用 `YYYYMMDD`，修复：`.astype(str).str.replace("-", "")`

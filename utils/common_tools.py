@@ -1783,6 +1783,221 @@ def ensure_stk_factor_pro_data(trade_date: str) -> None:
         logger.warning(f"[ensure_stk_factor_pro_data] {trade_date} 补拉失败：{e}")
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# 高位股情绪 + 市场广度因子辅助查询（供 FeatureDataBundle._load_hp_ext_cache 使用）
+# ──────────────────────────────────────────────────────────────────────────────
+
+def get_st_set(trade_date: str) -> set:
+    """
+    查询当日 ST/ST* 股票代码集合（来自 stock_st 自动更新表）。
+    失败时返回空集合（中性值：不过滤），避免引入虚假偏差。
+
+    :param trade_date: 交易日（YYYY-MM-DD 或 YYYYMMDD 均可）
+    :return: {ts_code, ...}
+    """
+    trade_date_fmt = trade_date.replace("-", "")
+    sql = "SELECT DISTINCT ts_code FROM stock_st WHERE trade_date = %s"
+    try:
+        rows = db.query(sql, params=(trade_date_fmt,)) or []
+        return {r["ts_code"] for r in rows if r.get("ts_code")}
+    except Exception as e:
+        logger.warning(f"[get_st_set] 查询失败（返回空集合）| {trade_date} | {e}")
+    return set()
+
+
+def get_stock_list_date_map() -> Dict[str, str]:
+    """
+    查询全市场股票上市日期映射 {ts_code: list_date}（YYYYMMDD 格式）。
+    用于过滤近期新股（list_date >= 近21个交易日截止日期的剔除）。
+    逻辑与 agent_stats/agents/_position_stock_helpers.get_list_date_map() 相同，
+    独立放在 common_tools 中供特征层使用，避免跨层依赖。
+    """
+    sql = "SELECT ts_code, list_date FROM stock_basic WHERE list_date IS NOT NULL"
+    try:
+        df = db.query(sql, return_df=True)
+        if df is not None and not df.empty:
+            return dict(zip(df["ts_code"], df["list_date"].astype(str)))
+    except Exception as e:
+        logger.warning(f"[get_stock_list_date_map] 查询失败：{e}")
+    return {}
+
+
+def get_hp_cycle_slice_avg_gain(
+    slice_end_date: str,
+    d21_date: str,
+    top_n: int = 52,
+) -> float:
+    """
+    查询指定切片结束日的高位股平均涨幅（DB 端聚合，不传输原始行情数据）。
+
+    计算逻辑：
+        以 slice_end_date 的前 top_n 名个股的 20 日涨幅（基准日 = d21_date）均值为结果。
+        top_n 默认 52 ≈ 全市场（~5200只）× 1%，近似高位股基础池规模。
+        - 过滤：剔除北交所（.BJ），不过滤 ST（宏观趋势因子允许粗略近似）
+        - 不复权：d0 与 d21 同口径，相除得涨幅，无需复权
+
+    :param slice_end_date: 切片结束日（YYYY-MM-DD）
+    :param d21_date:       切片结束日往前第 21 个交易日（YYYY-MM-DD）
+    :param top_n:          近似 1% 的股票数量
+    :return: 平均涨幅（%），失败或无数据时返回 0.0
+    """
+    d0_fmt  = slice_end_date.replace("-", "")
+    d21_fmt = d21_date.replace("-", "")
+    sql = """
+        SELECT AVG(gain) AS avg_gain
+        FROM (
+            SELECT (d0.close / d21.close - 1) * 100 AS gain
+            FROM kline_day AS d0
+            INNER JOIN kline_day AS d21
+                ON d0.ts_code = d21.ts_code
+                AND d21.trade_date = %s
+            WHERE d0.trade_date = %s
+              AND d0.close  > 0
+              AND d21.close > 0
+              AND d0.ts_code NOT LIKE '%%.BJ'
+            ORDER BY gain DESC
+            LIMIT %s
+        ) AS top_stocks
+        WHERE gain > 0
+    """
+    try:
+        rows = db.query(sql, params=(d21_fmt, d0_fmt, top_n), return_df=True)
+        if rows is not None and not rows.empty:
+            val = rows["avg_gain"].iloc[0]
+            return float(val) if val is not None else 0.0
+    except Exception as e:
+        logger.warning(
+            f"[get_hp_cycle_slice_avg_gain] 查询失败 | {slice_end_date} | {e}"
+        )
+    return 0.0
+
+
+def get_liquid_stock_stats(
+    trade_date: str,
+    d5_start_date: str,
+    d60_start_date: str,
+    prev_trade_date: str,
+    amount_threshold: float = 2_000_000.0,
+) -> Dict[str, object]:
+    """
+    查询液态股（5日均成交额 ≥ 20亿）的广度统计（DB 端 SQL 聚合）。
+
+    :param trade_date:       D 日（YYYY-MM-DD）
+    :param d5_start_date:    D-4 日（5日均量区间起始，含 D0，共5天）
+    :param d60_start_date:   D-60 日（60日历史区间起始）
+    :param prev_trade_date:  D-1 日（60日历史区间截止，不含 D0 避免自引用）
+    :param amount_threshold: 5日均成交额阈值（千元，默认 2,000,000 = 20亿元）
+    :return: {
+        "liquid_total":            int,   液态股总数（D0有数据的）,
+        "liquid_60d_breakout_cnt": int,   破60日新高或新低的只数,
+        "liquid_holf_cnt":         int,   高开低走的只数,
+        "liquid_60d_breakout_ratio": float,
+        "liquid_holf_ratio":         float,
+    }
+
+    注意：
+        - 60日历史范围为 [d60_start_date, prev_trade_date]（不含 D0），避免未来函数
+        - kline_day.amount 单位：千元；20亿元 = 2,000,000 千元
+        - pre_close 列：D0 的前收价（= D-1 收盘价），已在 kline_day 中
+    """
+    d0_fmt   = trade_date.replace("-", "")
+    d5_fmt   = d5_start_date.replace("-", "")
+    d60_fmt  = d60_start_date.replace("-", "")
+    d1_fmt   = prev_trade_date.replace("-", "")
+
+    _default = {
+        "liquid_total": 0,
+        "liquid_60d_breakout_cnt": 0,
+        "liquid_holf_cnt":         0,
+        "liquid_60d_breakout_ratio": 0.0,
+        "liquid_holf_ratio":         0.0,
+    }
+
+    # ── 因子6：高开低走（open > pre_close AND close < open）────────────────
+    sql_holf = """
+        SELECT
+            COUNT(*)  AS liquid_total,
+            SUM(CASE WHEN k0.open > k0.pre_close AND k0.close < k0.open THEN 1 ELSE 0 END)
+                      AS holf_cnt
+        FROM kline_day AS k0
+        WHERE k0.trade_date = %s
+          AND k0.ts_code NOT LIKE '%%.BJ'
+          AND k0.ts_code IN (
+              SELECT ts_code
+              FROM kline_day
+              WHERE trade_date BETWEEN %s AND %s
+              GROUP BY ts_code
+              HAVING AVG(amount) >= %s
+          )
+    """
+
+    # ── 因子5：破60日新高或新低 ──────────────────────────────────────────
+    # 分组计算每只液态股的60日（D-60到D-1）最高/低收盘价，再与D0比较
+    sql_breakout = """
+        SELECT
+            COUNT(DISTINCT k0.ts_code) AS liquid_total,
+            SUM(CASE
+                WHEN k0.close >= hist.max_close OR k0.close <= hist.min_close THEN 1
+                ELSE 0
+            END) AS breakout_cnt
+        FROM kline_day AS k0
+        JOIN (
+            SELECT ts_code,
+                   MAX(close) AS max_close,
+                   MIN(close) AS min_close
+            FROM kline_day
+            WHERE trade_date BETWEEN %s AND %s
+            GROUP BY ts_code
+        ) AS hist ON hist.ts_code = k0.ts_code
+        WHERE k0.trade_date = %s
+          AND k0.ts_code NOT LIKE '%%.BJ'
+          AND k0.ts_code IN (
+              SELECT ts_code
+              FROM kline_day
+              WHERE trade_date BETWEEN %s AND %s
+              GROUP BY ts_code
+              HAVING AVG(amount) >= %s
+          )
+    """
+
+    result = dict(_default)
+
+    try:
+        r_holf = db.query(
+            sql_holf,
+            params=(d0_fmt, d5_fmt, d0_fmt, amount_threshold),
+            return_df=True,
+        )
+        if r_holf is not None and not r_holf.empty:
+            total     = int(r_holf["liquid_total"].iloc[0] or 0)
+            holf_cnt  = int(r_holf["holf_cnt"].iloc[0]    or 0)
+            result["liquid_total"]      = total
+            result["liquid_holf_cnt"]   = holf_cnt
+            result["liquid_holf_ratio"] = round(holf_cnt / total, 4) if total > 0 else 0.0
+    except Exception as e:
+        logger.warning(f"[get_liquid_stock_stats] holf 查询失败 | {trade_date} | {e}")
+
+    try:
+        r_brkout = db.query(
+            sql_breakout,
+            params=(d60_fmt, d1_fmt, d0_fmt, d5_fmt, d0_fmt, amount_threshold),
+            return_df=True,
+        )
+        if r_brkout is not None and not r_brkout.empty:
+            total_b   = int(r_brkout["liquid_total"].iloc[0] or 0)
+            brkout    = int(r_brkout["breakout_cnt"].iloc[0] or 0)
+            if result["liquid_total"] == 0:
+                result["liquid_total"] = total_b
+            result["liquid_60d_breakout_cnt"]   = brkout
+            result["liquid_60d_breakout_ratio"] = round(
+                brkout / total_b, 4
+            ) if total_b > 0 else 0.0
+    except Exception as e:
+        logger.warning(f"[get_liquid_stock_stats] breakout 查询失败 | {trade_date} | {e}")
+
+    return result
+
+
 if __name__ == "__main__":
     import json
     import logging

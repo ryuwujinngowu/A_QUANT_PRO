@@ -23,6 +23,10 @@
     ma_position      → MAPositionFeature（均线 + 乖离率 + 个股位置，D 日截面）
     stk_factor_pro   → StkFactorProFeature（MACD/KDJ/RSI/Bollinger，来源Tushare stk_factor_pro）
     market_macro     → MarketMacroFeature（涨跌停 + 连板 + 最强板块 + 指数，全局因子）
+    hp_stage         → HPStageFeature（高位股阶段：成交额加权MA5乖离率/涨跌幅/量能倍数，全局因子）
+    hp_style         → HPStyleFeature（市场高宽风格 + 高度历史水分位，全局因子）
+    hp_cycle         → HPCycleFeature（120日高位股涨幅周期，全局因子）
+    liquid_stats     → LiquidStatsFeature（液态股60日突破 + 高开低走，全局因子）
 """
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -61,12 +65,17 @@ from features.sector.sector_stock_feature import SectorStockFeature        # noq
 from features.technical.ma_position_feature import MAPositionFeature       # noqa: F401  # 均线 + 乖离率 + 位置（个股因子，用前复权数据）
 from features.technical.stk_factor_feature import StkFactorProFeature  # noqa: F401  # 技术面因子：MACD/KDJ/RSI/Boll/CCI/WR（个股因子，来源Tushare stk_factor_pro，已剔除 bias 重复列）
 from features.macro.market_macro_feature import MarketMacroFeature         # noqa: F401  # 市场宏观因子：涨跌停/连板/指数（全局因子）
+from features.emotion.hp_stage_feature import HPStageFeature               # noqa: F401  # 高位股阶段：成交额加权MA5乖离率/涨跌幅/量能倍数（全局因子）
+from features.emotion.hp_style_feature import HPStyleFeature               # noqa: F401  # 市场高宽风格 + 高度历史水分位（全局因子）
+from features.macro.hp_cycle_feature import HPCycleFeature                 # noqa: F401  # 120日高位股涨幅周期（全局因子）
+from features.macro.liquid_stats_feature import LiquidStatsFeature         # noqa: F401  # 液态股60日突破 + 高开低走（全局因子）
 
 __all__ = [
     "FeatureEngine", "FeatureDataBundle",
     "SectorHeatFeature", "SectorStockFeature", "SEIFeature", "MAPositionFeature",
     # "StkFactorProFeature",  # 模块预留，暂未实现
     "MarketMacroFeature",
+    "HPStageFeature", "HPStyleFeature", "HPCycleFeature", "LiquidStatsFeature",
     "feature_registry",
 ]
 

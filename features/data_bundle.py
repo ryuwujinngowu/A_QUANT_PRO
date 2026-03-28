@@ -15,9 +15,15 @@ from utils.common_tools import (
     get_trade_dates, get_daily_kline_data,
     get_limit_list_ths, get_limit_step, get_limit_cpt_list, get_index_daily,
     get_market_total_volume,
+    get_st_set, get_stock_list_date_map,
+    get_hp_cycle_slice_avg_gain, get_liquid_stock_stats,
+    get_kline_day_range,
 )
 from data.data_cleaner import data_cleaner
 from utils.log_utils import logger
+from features.utils.high_position_utils import (
+    compute_high_pos_selection, HP_BASE_PCT,
+)
 
 # 并发加载线程数（IO 密集型，可设较大值）
 _IO_WORKERS = 8
@@ -62,13 +68,16 @@ class FeatureDataBundle:
 
         self.lookback_dates_5d: List[str] = []
         self.lookback_dates_20d: List[str] = []
+        self.lookback_dates_22d: List[str] = []   # D-21 ~ D0（高位股20日涨幅计算所需）
         self.daily_grouped: Dict[tuple, dict] = {}
         self.minute_cache: Dict[tuple, pd.DataFrame] = {}
         self.macro_cache: Dict[str, pd.DataFrame] = {}
+        self.hp_ext_cache: Dict = {}               # 高位股情绪 + 市场广度因子扩展数据
 
         self._load_trade_dates()
         self._load_daily_data()
         self._load_macro_data()
+        self._load_hp_ext_cache()
         if load_minute:
             self._load_minute_data()
 
@@ -79,6 +88,9 @@ class FeatureDataBundle:
             self.lookback_dates_5d = get_trade_dates(start_5d, self.trade_date)[-5:]
             start_20d = (d_date - timedelta(days=40)).strftime("%Y-%m-%d")
             self.lookback_dates_20d = get_trade_dates(start_20d, self.trade_date)[-20:]
+            # lookback_dates_22d：含 D-21 到 D0 共 22 个交易日，用于高位股 20 日涨幅基准
+            start_22d = (d_date - timedelta(days=50)).strftime("%Y-%m-%d")
+            self.lookback_dates_22d = get_trade_dates(start_22d, self.trade_date)[-22:]
             logger.info(f"[DataBundle] {self.trade_date} 交易日加载完成 | 5日: {self.lookback_dates_5d}")
         except Exception as e:
             logger.error(f"[DataBundle] 交易日加载失败：{e}")
@@ -245,6 +257,152 @@ class FeatureDataBundle:
             )
         except Exception as e:
             logger.warning(f"[DataBundle] 宏观数据加载异常（非致命）：{str(e)[:120]}")
+
+    def _load_hp_ext_cache(self):
+        """
+        预加载高位股情绪 + 市场广度因子所需的扩展数据。
+
+        分两轮 IO：
+          Round 1（并发）：全市场关键日期日线、ST集合、上市日期、120日切片统计、液态股统计
+          Round 2（顺序）：识别高位股基础池后，针对性拉取其近5日日线（用于 MA5 乖离率计算）
+
+        hp_ext_cache 结构：
+          market_all_d0          : D0 全市场日线 DataFrame
+          market_all_d10         : D-10 全市场日线 DataFrame（10日涨幅基准）
+          market_all_d21         : D-21 全市场日线 DataFrame（20日涨幅基准/高位股定义）
+          st_set                 : 当日 ST 股票代码集合
+          list_date_map          : {ts_code: list_date(YYYYMMDD)}
+          hp_base_pool           : 高位股基础池 DataFrame（全市场前1%，约50只）
+          hp_base_pool_recent5d  : 基础池近5日日线（用于 MA5 + 量比计算）
+          hp_cycle_slices        : 12个切片的高位股平均涨幅 List[float]（索引0=D0切片）
+          liquid_stats           : 液态股广度统计 Dict
+          key_dates              : 各关键日期 Dict（d0/d1/d4/d10/d21/d60）
+        """
+        try:
+            td = self.trade_date
+
+            # ── 校验关键日期 ─────────────────────────────────────────────────
+            if len(self.lookback_dates_5d) < 5 or len(self.lookback_dates_22d) < 22:
+                logger.warning(f"[DataBundle] hp_ext_cache: 历史日期不足，跳过高位股因子")
+                self.hp_ext_cache = {}
+                return
+
+            d0_date  = self.lookback_dates_5d[-1]   # D0
+            d1_date  = self.lookback_dates_5d[-2]   # D-1
+            d4_date  = self.lookback_dates_5d[0]    # D-4（5日均量区间起始）
+            d10_date = self.lookback_dates_20d[-11] if len(self.lookback_dates_20d) >= 11 else None
+            d21_date = self.lookback_dates_22d[0]   # D-21
+
+            if not d10_date:
+                logger.warning(f"[DataBundle] hp_ext_cache: lookback_dates_20d 不足11天，跳过")
+                self.hp_ext_cache = {}
+                return
+
+            # D-60：用于60日新高/低区间（额外获取扩展历史）
+            d_date   = datetime.strptime(td, "%Y-%m-%d")
+            start_ext = (d_date - timedelta(days=280)).strftime("%Y-%m-%d")
+            trade_dates_ext = get_trade_dates(start_ext, td)
+            d60_date = trade_dates_ext[-61] if len(trade_dates_ext) >= 61 else None
+
+            self.hp_ext_cache["key_dates"] = {
+                "d0": d0_date, "d1": d1_date, "d4": d4_date,
+                "d10": d10_date, "d21": d21_date, "d60": d60_date,
+            }
+
+            # ── 构建120日切片任务（12次 SQL 聚合，并发执行）────────────────
+            slice_tasks: List[tuple] = []   # (k, slice_end_date, d21_for_slice)
+            if len(trade_dates_ext) >= 132:
+                for k in range(12):
+                    s_idx = -(k * 10 + 1)      # 切片末日索引（-1=D0, -11=D-10, ...）
+                    d_idx = s_idx - 21           # 对应 D-21 索引
+                    if abs(d_idx) > len(trade_dates_ext):
+                        break
+                    slice_tasks.append((k, trade_dates_ext[s_idx], trade_dates_ext[d_idx]))
+
+            # ── Round 1：全部并发提交 ─────────────────────────────────────
+            with ThreadPoolExecutor(max_workers=_IO_WORKERS) as pool:
+                fut_d0     = pool.submit(get_daily_kline_data, d0_date)
+                fut_d10    = pool.submit(get_daily_kline_data, d10_date)
+                fut_d21    = pool.submit(get_daily_kline_data, d21_date)
+                fut_st     = pool.submit(get_st_set,               td)
+                fut_ldmap  = pool.submit(get_stock_list_date_map)
+
+                # 液态股统计（需要 d60 和 d1）
+                if d60_date:
+                    fut_liquid = pool.submit(
+                        get_liquid_stock_stats, d0_date, d4_date, d60_date, d1_date
+                    )
+                else:
+                    fut_liquid = None
+
+                # 120日切片统计（并发提交12个 SQL 聚合）
+                slice_futures: Dict = {}
+                for k, s_date, d21_s in slice_tasks:
+                    f = pool.submit(get_hp_cycle_slice_avg_gain, s_date, d21_s)
+                    slice_futures[f] = k
+
+                # 收集结果（在 with 块内等待所有任务完成）
+                # 注意：DataFrame 不能用 or 运算符（会触发 "truth value is ambiguous"），
+                #       改用显式 None 判断
+                def _df_or_empty(r):
+                    return r if isinstance(r, pd.DataFrame) else pd.DataFrame()
+
+                market_d0    = _df_or_empty(fut_d0.result())
+                market_d10   = _df_or_empty(fut_d10.result())
+                market_d21   = _df_or_empty(fut_d21.result())
+                st_set       = fut_st.result()     or set()
+                ldmap        = fut_ldmap.result()  or {}
+                liquid_stats = fut_liquid.result() if fut_liquid else {}
+
+                hp_cycle_slices: List[float] = [0.0] * 12
+                for fut, k in slice_futures.items():
+                    try:
+                        hp_cycle_slices[k] = fut.result() or 0.0
+                    except Exception as e:
+                        logger.warning(f"[DataBundle] hp_cycle 切片{k}查询失败：{e}")
+
+            self.hp_ext_cache.update({
+                "market_all_d0":    market_d0,
+                "market_all_d10":   market_d10,
+                "market_all_d21":   market_d21,
+                "st_set":           st_set,
+                "list_date_map":    ldmap,
+                "liquid_stats":     liquid_stats,
+                "hp_cycle_slices":  [g for g in hp_cycle_slices if g is not None],
+                "d21_date_str":     d21_date.replace("-", ""),
+            })
+
+            # ── 识别高位股基础池（基于 Round 1 结果，纯内存计算）────────────
+            base_pool, high_pos = compute_high_pos_selection(
+                market_d0, market_d21, st_set, ldmap,
+                d21_date.replace("-", ""),
+            )
+            self.hp_ext_cache["hp_base_pool"]  = base_pool
+            self.hp_ext_cache["hp_high_pos"]   = high_pos
+
+            # ── Round 2：拉取基础池近5日日线（约50只 × 5天，单次批量查询）──
+            if not base_pool.empty:
+                base_codes = base_pool["ts_code"].tolist()
+                try:
+                    recent5d = get_kline_day_range(base_codes, d4_date, d0_date)
+                    self.hp_ext_cache["hp_base_pool_recent5d"] = recent5d
+                except Exception as e:
+                    logger.warning(f"[DataBundle] hp_ext_cache Round2近5日数据失败：{e}")
+                    self.hp_ext_cache["hp_base_pool_recent5d"] = pd.DataFrame()
+            else:
+                self.hp_ext_cache["hp_base_pool_recent5d"] = pd.DataFrame()
+
+            logger.info(
+                f"[DataBundle] hp_ext_cache加载完成 | "
+                f"市场D0:{len(market_d0)}行 "
+                f"基础池:{len(base_pool)}只 高位股:{len(high_pos)}只 "
+                f"切片统计:{len(self.hp_ext_cache['hp_cycle_slices'])}个 "
+                f"液态股:{liquid_stats.get('liquid_total', 0)}只"
+            )
+
+        except Exception as e:
+            logger.warning(f"[DataBundle] hp_ext_cache加载异常（非致命，高位股因子将返回中性值）：{str(e)[:200]}")
+            self.hp_ext_cache = {}
 
     def _load_minute_data(self):
         """

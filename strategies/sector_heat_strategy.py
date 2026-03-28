@@ -64,7 +64,7 @@ class SectorHeatStrategy(BaseStrategy):
         self.strategy_params = {
             "buy_top_k":   6,        # 每日最多买入 N 只
             "sell_type":   "close",   # D+1 卖出类型：open=次日开盘，close=次日收盘
-            "min_prob":    0.65,      # 最低买入概率阈值（0 = 不过滤）
+            "min_prob":    0.55,      # 最低买入概率阈值（0 = 不过滤）
             "load_minute": True,     # 是否加载分钟线（保证特征与训练口径一致）
             "model_path": os.path.join(
                 os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
