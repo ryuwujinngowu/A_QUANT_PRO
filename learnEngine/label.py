@@ -136,7 +136,8 @@ class LabelEngine:
             label_raw_return = round(d1_intra_return, 6)
             label_d1_high    = round((d1_high - d1_open) / d1_open, 6) if d1_high > 0 else None
             label_d1_low     = round((d1_low  - d1_open) / d1_open, 6) if d1_low  > 0 else None
-            label_d1_pct_chg = float(d1_row.get("pct_chg", None) or None) if d1_row.get("pct_chg") is not None else None
+            _pct = d1_row.get("pct_chg")
+            label_d1_pct_chg = float(_pct) if _pct is not None else None
 
             # ── 开盘溢价（需要 D close）──────────────────────────────────────
             d0_row   = d0_map.get(ts_code)
