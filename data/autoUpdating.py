@@ -114,6 +114,92 @@ def update_kline_day(date_list: list) -> tuple:
     return total, per_date
 
 
+# def update_ths_index() -> int:
+#     """全量 upsert ths_index（同花顺板块指数），返回影响行数"""
+#     logger.info("── ths_index 全量更新 ──")
+#     try:
+#         affected = cleaner.clean_and_insert_ths_index() or 0
+#         logger.info(f"ths_index 完成，影响 {affected} 行")
+#         return affected
+#     except Exception as e:
+#         logger.error(f"ths_index 更新失败：{e}", exc_info=True)
+#         return 0
+#
+#
+# def update_ths_member() -> int:
+#     """
+#     全量 upsert ths_member（同花顺板块成分），返回累计 upsert 行数。
+#     自动从 ths_index 读取 A 股全量板块列表，逐板块拉取（约 5~8 分钟）。
+#     含"今日已更新"幂等检查：若 update_time >= 今日 00:00 则跳过，避免重复拉取。
+#     """
+#     logger.info("── ths_member 全量更新 ──")
+#     try:
+#         today = datetime.datetime.now().strftime("%Y-%m-%d")
+#         check = db.query(
+#             "SELECT 1 FROM ths_member WHERE DATE(update_time) >= %s LIMIT 1",
+#             (today,)
+#         )
+#         if check:
+#             logger.info("ths_member 今日已更新，跳过")
+#             return 0
+#         affected = cleaner.clean_and_insert_ths_member_batch() or 0
+#         logger.info(f"ths_member 完成，影响 {affected} 行")
+#         return affected
+#     except Exception as e:
+#         logger.error(f"ths_member 更新失败：{e}", exc_info=True)
+#         return 0
+#
+
+# def update_moneyflow(trade_date: str) -> int:
+#     """每日盘后更新资金流向双源数据（THS + DC），返回入库行数"""
+#     logger.info(f"── moneyflow 双源资金流向更新（{trade_date}）──")
+#     try:
+#         affected = cleaner.clean_and_insert_moneyflow_combined(
+#             trade_date=trade_date.replace("-", "")
+#         ) or 0
+#         logger.info(f"moneyflow 完成，入库 {affected} 行")
+#         return affected
+#     except Exception as e:
+#         logger.error(f"moneyflow 更新失败：{e}", exc_info=True)
+#         return 0
+
+
+def update_ths_hot(trade_date: str) -> int:
+    """
+    更新当日同花顺热股榜，返回入库行数。
+
+    19:00 cron 时市场收盘已 4 小时，22:30 最终榜尚未发布，
+    使用 is_new='N' 获取盘后最新小时快照（通常为 17:00 或 18:00 数据）。
+    次日或历史补拉时，ensure_ths_hot_data 会以 is_new='Y' 获取最终榜。
+    """
+    logger.info(f"── ths_hot 当日热股榜更新（{trade_date}，is_new=N）──")
+    try:
+        affected = cleaner.clean_and_insert_ths_hot(
+            trade_date=trade_date.replace("-", ""),
+            market="热股",
+            is_new="N",
+        ) or 0
+        logger.info(f"ths_hot 完成，入库 {affected} 行")
+        return affected
+    except Exception as e:
+        logger.error(f"ths_hot 更新失败：{e}", exc_info=True)
+        return 0
+
+
+def update_ths_daily(trade_date: str) -> int:
+    """每日盘后更新同花顺板块指数日行情，返回入库行数"""
+    logger.info(f"── ths_daily 板块指数日行情更新（{trade_date}）──")
+    try:
+        affected = cleaner.clean_and_insert_ths_daily(
+            trade_date=trade_date.replace("-", "")
+        ) or 0
+        logger.info(f"ths_daily 完成，入库 {affected} 行")
+        return affected
+    except Exception as e:
+        logger.error(f"ths_daily 更新失败：{e}", exc_info=True)
+        return 0
+
+
 def update_index_daily(start_date: str) -> int:
     """增量更新核心指数日线，返回入库行数"""
     logger.info("── index_daily 增量更新 ──")
@@ -154,6 +240,11 @@ def _build_push(
         f"  stock_st    : {rows.get('stock_st',    0):>7,} 行",
         f"  kline_day   : {rows.get('kline_day',   0):>7,} 行",
         f"  index_daily : {rows.get('index_daily', 0):>7,} 行",
+        # f"  moneyflow   : {rows.get('moneyflow',   0):>7,} 行",
+        f"  ths_hot     : {rows.get('ths_hot',     0):>7,} 行",
+        f"  ths_daily   : {rows.get('ths_daily',   0):>7,} 行",
+        # f"  ths_index   : {rows.get('ths_index',   0):>7,} 行",
+        # f"  ths_member  : {rows.get('ths_member',  0):>7,} 行",
         f"  ──────────────────────────",
         f"  合计        : {total:>7,} 行",
     ]
@@ -181,6 +272,11 @@ def main():
     rows["stock_st"]    = update_stock_st(last_date, today)
     rows["kline_day"], per_date = update_kline_day(inc_dates)
     rows["index_daily"] = update_index_daily(last_date)
+    # rows["moneyflow"]   = update_moneyflow(today)
+    rows["ths_hot"]     = update_ths_hot(today)
+    rows["ths_daily"]   = update_ths_daily(today)
+    # rows["ths_index"]   = update_ths_index()
+    # rows["ths_member"]  = update_ths_member()
 
     # 无论数据是否完整，均将记录推进至今日
     # 如有缺漏，手动再次运行本脚本即可（本次运行后 last_date 仍是 today，

@@ -123,63 +123,6 @@ def is_rate_limit_aborted() -> bool:
 class DataCleaner:
     """数据清洗+入库核心类（优化版：精简冗余、提升效率、保留核心契约）"""
 
-    # # ===================== 通用工具方法（提取重复逻辑） =====================
-    # @staticmethod
-    # def _normalize_db_date(value: Optional[Union[str, datetime.date, datetime.datetime]]) -> str:
-    #     if value is None:
-    #         return ""
-    #     return str(value).replace("-", "")[:8]
-    #
-    # def _estimate_expected_trade_days(self, start_date: str, end_date: str) -> int:
-    #     try:
-    #         start_fmt = f"{start_date[:4]}-{start_date[4:6]}-{start_date[6:8]}"
-    #         end_fmt = f"{end_date[:4]}-{end_date[4:6]}-{end_date[6:8]}"
-    #         return len(get_trade_dates(start_fmt, end_fmt))
-    #     except Exception as e:
-    #         logger.debug(f"[kline coverage] 交易日估算失败：{start_date}~{end_date} | {e}")
-    #         return 0
-
-    # def _get_kline_range_coverage(
-    #     self,
-    #     table_name: str,
-    #     ts_code: str,
-    #     start_date: str,
-    #     end_date: str,
-    # ) -> dict:
-    #     check_sql = f"""
-    #         SELECT
-    #             MIN(trade_date) AS min_d,
-    #             MAX(trade_date) AS max_d,
-    #             COUNT(DISTINCT trade_date) AS row_count
-    #         FROM {table_name}
-    #         WHERE ts_code = %s AND trade_date >= %s AND trade_date <= %s
-    #     """
-    #     result = db.query(check_sql, (ts_code, start_date, end_date))
-    #     row = result[0] if result else {}
-    #     min_d = self._normalize_db_date(row.get("min_d"))
-    #     max_d = self._normalize_db_date(row.get("max_d"))
-    #     row_count = int(row.get("row_count") or 0)
-    #     expected_trade_days = self._estimate_expected_trade_days(start_date, end_date)
-    #     coverage_ratio = (row_count / expected_trade_days) if expected_trade_days > 0 else 0.0
-    #     edge_covered = bool(min_d and max_d and min_d <= start_date and max_d >= end_date)
-    #     # 尾部边缘覆盖：确保最新日期数据已入库（停牌导致首部缺口可豁免，尾部缺失必须补拉）
-    #     end_edge_ok = bool(max_d and max_d >= end_date)
-    #     return {
-    #         "min_d": min_d,
-    #         "max_d": max_d,
-    #         "row_count": row_count,
-    #         "expected_trade_days": expected_trade_days,
-    #         "coverage_ratio": coverage_ratio,
-    #         "edge_covered": edge_covered,
-    #         "is_complete": (
-    #             # 标准判定：首尾日期覆盖 + 覆盖率达标
-    #             (edge_covered and (expected_trade_days == 0 or coverage_ratio >= _KLINE_MIN_COVERAGE_RATIO))
-    #             # 高覆盖率豁免：>95% 覆盖 + 尾部已覆盖（首部缺口几乎必然是停牌，可豁免；
-    #             # 尾部缺失说明最新数据未入库，必须触发补拉，否则 Phase2 找不到 today_row）
-    #             or (expected_trade_days > 0 and coverage_ratio >= _KLINE_HIGH_COVERAGE_RATIO and end_edge_ok)
-    #         ),
-    #     }
-
     def _get_db_columns(self, table_name: str, exclude_columns: List[str] = None) -> List[str]:
         """通用方法：获取数据库表字段（过滤排除字段）"""
         exclude_columns = exclude_columns or ["id", "created_at", "updated_at"]
@@ -372,19 +315,7 @@ class DataCleaner:
             logger.warning("stock_basic清洗后数据为空，跳过入库")
             return 0
 
-        # 3. 自动新增缺失字段（复用自身通用方法，删除冗余逻辑）
-        db_cols = self._get_db_columns(table_name)
-        missing_cols = [col for col in cleaned_df.columns if col not in db_cols]
-        # if missing_cols:
-        #     logger.info(f"表{table_name}缺失字段：{missing_cols}，开始自动新增")
-        #     add_success = auto_add_missing_table_columns(
-        #         table_name=table_name,
-        #         missing_columns=missing_cols
-        #     )
-        #     if not add_success:
-        #         logger.warning(f"表{table_name}部分字段新增失败，继续执行")
-
-        # 4. 对齐数据库字段并入库
+        # 3. 对齐数据库字段并入库
         final_df = self._align_df_with_db(cleaned_df, table_name)
         try:
             affected_rows = db.batch_insert_df(
@@ -461,111 +392,6 @@ class DataCleaner:
 
         logger.debug(f"日K数据清洗完成：原始{len(raw_df)}行 → 清洗后{len(df_cleaned)}行")
         return df_cleaned
-
-    # def clean_and_insert_kline_day(self, table_name: str = "kline_day") -> Optional[int]:
-    #     """全市场A股近15年日K数据清洗入库（优化：减少数据库查询次数）"""
-    #     logger.info("===== 开始全市场A股日K数据清洗入库 =====")
-    #
-    #     # 1. 前置准备（一次性获取，避免循环内重复查询）
-    #     stock_codes = db.get_all_a_stock_codes()
-    #     if not stock_codes:
-    #         logger.error("无有效股票代码，终止入库")
-    #         return 0
-    #
-    #     start_date, end_date = calc_15_years_date_range()
-    #     # 提前获取数据库字段（循环内复用）
-    #     db_cols = self._get_db_columns(table_name)
-    #     # 提前定义kline_day字段类型映射
-    #     kline_col_map = {
-    #         "ts_code": "VARCHAR(9) NOT NULL DEFAULT 'UNKNOWN'",
-    #         "trade_date": "DATE NOT NULL DEFAULT '1970-01-01'",
-    #         "open": "FLOAT DEFAULT 0",
-    #         "high": "FLOAT DEFAULT 0",
-    #         "low": "FLOAT DEFAULT 0",
-    #         "close": "FLOAT DEFAULT 0",
-    #         "pre_close": "FLOAT DEFAULT 0",
-    #         "change1": "FLOAT DEFAULT 0",
-    #         "pct_chg": "FLOAT DEFAULT 0",
-    #         "volume": "BIGINT DEFAULT 0",
-    #         "amount": "DECIMAL(18,2) DEFAULT 0.00",
-    #         "turnover_rate": "FLOAT DEFAULT 0",
-    #         "swing": "FLOAT DEFAULT 0",
-    #         "limit_up": "FLOAT DEFAULT 0",
-    #         "limit_down": "FLOAT DEFAULT 0",
-    #         "update_time": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
-    #         "reserved": "VARCHAR(128) DEFAULT ''"
-    #     }
-    #
-    #     # 2. 初始化统计指标
-    #     total_success = 0
-    #     total_failed = 0
-    #     total_ingest_rows = 0
-    #     failed_codes = []
-    #
-    #     # 3. 循环处理股票（优化：减少重复逻辑）
-    #     for idx, ts_code in enumerate(stock_codes):
-    #         logger.info(f"处理进度：{idx + 1}/{len(stock_codes)} | 股票代码：{ts_code}")
-    #         try:
-    #             # 获取原始数据
-    #             raw_df = data_fetcher.fetch_kline_day(ts_code=ts_code, start_date=start_date, end_date=end_date)
-    #             if raw_df.empty:
-    #                 logger.warning(f"{ts_code} 无日K数据，跳过")
-    #                 total_failed += 1
-    #                 failed_codes.append(ts_code)
-    #                 continue
-    #
-    #             # 清洗数据
-    #             cleaned_df = self._clean_kline_day_data(raw_df)
-    #             if cleaned_df.empty:
-    #                 logger.warning(f"{ts_code} 清洗后无有效数据，跳过")
-    #                 total_failed += 1
-    #                 failed_codes.append(ts_code)
-    #                 continue
-    #
-    #             # 自动新增缺失字段（复用通用方法）
-    #             missing_cols = [col for col in cleaned_df.columns if col not in db_cols]
-    #             # if missing_cols:
-    #             #     logger.info(f"表{table_name}缺失字段：{missing_cols}，开始自动新增")
-    #             #     auto_add_missing_table_columns(
-    #             #         table_name=table_name,
-    #             #         missing_columns=missing_cols,
-    #             #         col_type_mapping=kline_col_map
-    #             #     )
-    #             #     # 刷新数据库字段（仅当有新增时）
-    #             #     db_cols = self._get_db_columns(table_name)
-    #
-    #             # 对齐数据库字段
-    #             final_df = self._align_df_with_db(cleaned_df, table_name)
-    #
-    #             # 批量入库
-    #             affected_rows = db.batch_insert_df(
-    #                 df=final_df,
-    #                 table_name=table_name,
-    #                 ignore_duplicate=True
-    #             )
-    #             if affected_rows:
-    #                 total_ingest_rows += affected_rows
-    #                 total_success += 1
-    #                 logger.info(f"{ts_code} 日K数据入库完成，影响行数：{affected_rows}")
-    #             else:
-    #                 logger.warning(f"{ts_code} 入库无影响行数")
-    #                 total_failed += 1
-    #                 failed_codes.append(ts_code)
-    #
-    #         except Exception as e:
-    #             logger.error(f"{ts_code} 处理失败：{str(e)}", exc_info=True)
-    #             total_failed += 1
-    #             failed_codes.append(ts_code)
-    #             continue
-    #
-    #     # 4. 汇总结果（精简日志）
-    #     logger.info("===== 全市场日K数据入库汇总 =====")
-    #     logger.info(f"总处理股票数：{len(stock_codes)} | 成功：{total_success} | 失败：{total_failed}")
-    #     logger.info(f"累计入库/更新行数：{total_ingest_rows}")
-    #     if failed_codes:
-    #         logger.warning(f"失败股票代码（前20）：{failed_codes}")
-    #
-    #     return total_ingest_rows
 
     def clean_and_insert_index_daily(
             self,
@@ -1175,115 +1001,347 @@ class DataCleaner:
             return None
 
 
+    def clean_and_insert_moneyflow_combined(
+            self,
+            trade_date: str,
+            table_name: str = "moneyflow_combined"
+    ) -> Optional[int]:
+        """
+        双源资金流向数据清洗合并入库（按交易日，一次拉取全市场）。
+
+        建表 SQL：sql/create_moneyflow_combined.sql
+        数据源：
+          THS (moneyflow_ths)  — 大/中/小单净占比，历史更长
+          DC  (moneyflow_dc)   — 超大/大/中/小单净占比 + 主力净占比，自 20230911 起
+
+        合并策略：outer join on ts_code，两源各自填充对应字段列，NULL = 该源无当日数据。
+        因子计算时对两源均值处理，单源可用时降级使用单源。
+
+        :param trade_date: 交易日，支持 YYYYMMDD / YYYY-MM-DD
+        :param table_name: 目标表名，默认 moneyflow_combined
+        :return: 入库行数，失败返回 None
+        """
+        trade_date_fmt = trade_date.replace("-", "")
+        logger.info(f"===== 开始资金流向双源入库 | trade_date={trade_date_fmt} =====")
+
+        # ── 拉取两个数据源 ─────────────────────────────────────────────────
+        ths_df = data_fetcher.fetch_moneyflow_ths(trade_date=trade_date_fmt)
+        dc_df  = data_fetcher.fetch_moneyflow_dc(trade_date=trade_date_fmt)
+
+        if ths_df.empty and dc_df.empty:
+            logger.warning(f"资金流向两源均为空，trade_date={trade_date_fmt}，跳过入库")
+            return 0
+
+        # ── 清洗 THS ──────────────────────────────────────────────────────
+        ths_clean = pd.DataFrame()
+        if not ths_df.empty:
+            ths_df = self._clean_special_fields(ths_df)
+            if not ths_df.empty and "ts_code" in ths_df.columns:
+                ths_clean = ths_df[["ts_code", "trade_date"]].copy()
+                for src_col, dst_col in [
+                    ("buy_lg_amount_rate", "ths_lg_net_rate"),
+                    ("buy_md_amount_rate", "ths_md_net_rate"),
+                    ("buy_sm_amount_rate", "ths_sm_net_rate"),
+                    ("net_amount",         "ths_net_amount"),
+                ]:
+                    ths_clean[dst_col] = pd.to_numeric(
+                        ths_df.get(src_col), errors="coerce"
+                    ) if src_col in ths_df.columns else None
+
+        # ── 清洗 DC ───────────────────────────────────────────────────────
+        dc_clean = pd.DataFrame()
+        if not dc_df.empty:
+            dc_df = self._clean_special_fields(dc_df)
+            if not dc_df.empty and "ts_code" in dc_df.columns:
+                dc_clean = dc_df[["ts_code", "trade_date"]].copy()
+                for src_col, dst_col in [
+                    ("buy_elg_amount_rate", "dc_elg_net_rate"),
+                    ("buy_lg_amount_rate",  "dc_lg_net_rate"),
+                    ("buy_md_amount_rate",  "dc_md_net_rate"),
+                    ("buy_sm_amount_rate",  "dc_sm_net_rate"),
+                    ("net_amount_rate",     "dc_main_net_rate"),
+                    ("net_amount",          "dc_net_amount"),
+                ]:
+                    dc_clean[dst_col] = pd.to_numeric(
+                        dc_df.get(src_col), errors="coerce"
+                    ) if src_col in dc_df.columns else None
+
+        # ── 双源 outer merge ──────────────────────────────────────────────
+        if not ths_clean.empty and not dc_clean.empty:
+            merged = pd.merge(
+                ths_clean, dc_clean,
+                on=["ts_code", "trade_date"], how="outer"
+            )
+        elif not ths_clean.empty:
+            merged = ths_clean
+        else:
+            merged = dc_clean
+
+        if merged.empty:
+            logger.warning(f"资金流向合并后为空，trade_date={trade_date_fmt}，跳过入库")
+            return 0
+
+        final_df = self._align_df_with_db(merged, table_name)
+        if final_df.empty:
+            logger.warning(f"资金流向对齐DB列后为空（表{table_name}可能未建立），跳过入库")
+            return 0
+
+        try:
+            affected = db.batch_insert_df(df=final_df, table_name=table_name, ignore_duplicate=True)
+            logger.info(f"资金流向双源入库完成 | trade_date={trade_date_fmt} | 影响行数：{affected}")
+            return affected
+        except Exception as e:
+            logger.error(f"资金流向双源入库失败 | trade_date={trade_date_fmt}：{e}", exc_info=True)
+            return None
+
+    def clean_and_insert_ths_hot(
+            self,
+            trade_date: str,
+            market: str = "热股",
+            is_new: str = "Y",
+            table_name: str = "ths_hot"
+    ) -> Optional[int]:
+        """
+        同花顺热榜数据清洗入库（按交易日，一次拉取当日热股榜）。
+
+        接口文档：同花顺热榜数据 - ths_hot
+        建表 SQL：sql/create_ths_hot.sql
+
+        参数约定：
+          历史因子补全：is_new='Y'（22:30后已固定的每日最终榜，无未来函数）
+          每日自动更新（19:00）：is_new='N'（盘后最新小时快照，22:30前的最佳近似）
+
+        :param trade_date: 交易日，支持 YYYYMMDD / YYYY-MM-DD
+        :param market:     热榜类型，默认 '热股'
+        :param is_new:     'Y' 取最终日榜，'N' 取最新小时快照
+        :param table_name: 目标表名，默认 ths_hot
+        :return: 入库行数，失败返回 None
+        """
+        trade_date_fmt = trade_date.replace("-", "")
+        logger.info(f"===== 开始同花顺热榜数据入库 | trade_date={trade_date_fmt} is_new={is_new} =====")
+
+        raw_df = data_fetcher.fetch_ths_hot(
+            trade_date=trade_date_fmt, market=market, is_new=is_new
+        )
+        if raw_df.empty:
+            logger.warning(f"同花顺热榜原始数据为空，trade_date={trade_date_fmt}，跳过入库")
+            return 0
+
+        # 旧数据 trade_date 可能含尾部空格（如 '20230928 '），需先 strip
+        if "trade_date" in raw_df.columns:
+            raw_df = raw_df.copy()
+            raw_df["trade_date"] = raw_df["trade_date"].astype(str).str.strip()
+
+        cleaned_df = self._clean_special_fields(raw_df)
+        if cleaned_df.empty:
+            return 0
+
+        final_df = self._align_df_with_db(cleaned_df, table_name)
+        if final_df.empty:
+            logger.warning(f"同花顺热榜对齐DB列后为空（表{table_name}可能未建立），跳过入库")
+            return 0
+
+        try:
+            affected_rows = db.batch_insert_df(df=final_df, table_name=table_name, ignore_duplicate=True)
+            logger.info(f"同花顺热榜入库完成 | trade_date={trade_date_fmt} | 影响行数：{affected_rows}")
+            return affected_rows
+        except Exception as e:
+            logger.error(f"同花顺热榜入库失败 | trade_date={trade_date_fmt}：{str(e)}", exc_info=True)
+            return None
+
+
+    def clean_and_insert_ths_daily(
+            self,
+            trade_date: str,
+            table_name: str = "ths_daily",
+    ) -> int:
+        """
+        同花顺板块指数日行情清洗入库（按交易日，一次拉取全量板块当日数据）。
+
+        接口文档：doc_id=260（ths_daily）
+        建表 SQL：sql/create_ths_daily.sql
+
+        注意：API 返回字段 `change` 是 MySQL 保留字，入库前重命名为 `change_val`。
+
+        :param trade_date: 交易日，支持 YYYYMMDD / YYYY-MM-DD
+        :param table_name: 目标表名，默认 ths_daily
+        :return: 入库行数，失败返回 0
+        """
+        trade_date_fmt = trade_date.replace("-", "")
+        logger.info(f"===== 开始 ths_daily 板块日行情入库 | trade_date={trade_date_fmt} =====")
+
+        raw_df = data_fetcher.fetch_ths_daily(trade_date=trade_date_fmt)
+        if raw_df.empty:
+            logger.warning(f"[ths_daily] 原始数据为空，trade_date={trade_date_fmt}，跳过入库")
+            return 0
+
+        # API 返回字段 `change` 是 MySQL 保留字，重命名为 change_val
+        if "change" in raw_df.columns:
+            raw_df = raw_df.rename(columns={"change": "change_val"})
+
+        cleaned_df = self._clean_special_fields(raw_df)
+        if cleaned_df.empty:
+            return 0
+
+        final_df = self._align_df_with_db(cleaned_df, table_name)
+        if final_df.empty:
+            logger.warning(f"[ths_daily] 对齐DB列后为空（表 {table_name} 可能未建立），跳过入库")
+            return 0
+
+        try:
+            affected = db.batch_insert_df(df=final_df, table_name=table_name, ignore_duplicate=True)
+            logger.info(f"[ths_daily] 入库完成 | trade_date={trade_date_fmt} | 影响行数：{affected}")
+            return affected or 0
+        except Exception as e:
+            logger.error(f"[ths_daily] 入库失败 | trade_date={trade_date_fmt}：{e}", exc_info=True)
+            return 0
+
+    def clean_and_insert_ths_index(
+            self,
+            table_name: str = "ths_index",
+    ) -> Optional[int]:
+        """
+        全量拉取同花顺板块指数并入库（ths_index 表）。
+        一次 API 调用即可获取全部板块，无需循环，幂等（ON DUPLICATE KEY UPDATE）。
+
+        数据粒度：板块维度（一行一个板块）
+        更新策略：全量 upsert，适合每日刷新 count 和新增板块
+
+        :param table_name: 目标表名，默认 ths_index
+        :return: 入库行数，失败返回 None
+        """
+        logger.info("===== 开始同花顺板块指数入库（ths_index）=====")
+
+        raw_df = data_fetcher.fetch_ths_index()
+        if raw_df.empty:
+            logger.warning("[ths_index] 原始数据为空，跳过入库")
+            return 0
+
+        df = raw_df.copy()
+
+        # list_date：YYYYMMDD → YYYY-MM-DD（无效值设 None）
+        if "list_date" in df.columns:
+            df["list_date"] = pd.to_datetime(
+                df["list_date"], format="%Y%m%d", errors="coerce"
+            ).apply(lambda x: x.strftime("%Y-%m-%d") if pd.notna(x) else None)
+
+        # count 强制 INT，NaN 填 0
+        if "count" in df.columns:
+            df["count"] = pd.to_numeric(df["count"], errors="coerce").fillna(0).astype(int)
+
+        # 字符串字段空值填 ''
+        for col in ["name", "exchange", "type"]:
+            if col in df.columns:
+                df[col] = df[col].fillna("")
+
+        df["update_time"] = pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")
+        final_df = self._align_df_with_db(df, table_name)
+        if final_df.empty:
+            logger.warning(f"[ths_index] 对齐 DB 列后为空（表 {table_name} 可能未建立），跳过入库")
+            return 0
+
+        try:
+            affected = db.batch_insert_df(final_df, table_name, ignore_duplicate=True)
+            logger.info(f"[ths_index] 入库完成，影响行数：{affected}")
+            return affected or 0
+        except Exception as e:
+            logger.error(f"[ths_index] 入库失败：{e}", exc_info=True)
+            return None
+
+    def clean_and_insert_ths_member_batch(
+            self,
+            ts_code_list: Optional[List[str]] = None,
+            table_name: str = "ths_member",
+    ) -> int:
+        """
+        批量拉取同花顺板块成分并入库（ths_member 表）。
+
+        数据粒度：板块-股票关系（一行一个 (板块, 股票) 对）
+        更新策略：
+          1. 对每个板块，先将该板块所有现有记录标记为 is_new='N'（旧成员退出标记）
+          2. 再 upsert 当前最新成员（is_new='Y'），ON DUPLICATE KEY UPDATE
+          → 退出板块的股票自动降为 is_new='N'，新入板块的股票被正确写入
+
+        :param ts_code_list: 要更新的板块代码列表；None 则自动从 ths_index 表取全量 A 股板块
+        :param table_name:   目标表名，默认 ths_member
+        :return: 累计 upsert 行数
+        """
+        # 若未指定板块列表，从 ths_index 取全量 A 股板块
+        if ts_code_list is None:
+            try:
+                rows = db.query("SELECT ts_code FROM ths_index WHERE exchange = 'A'")
+                ts_code_list = [r["ts_code"] for r in rows if r.get("ts_code")]
+            except Exception as e:
+                logger.error(f"[ths_member] 读取 ths_index 板块列表失败：{e}")
+                return 0
+
+        if not ts_code_list:
+            logger.warning("[ths_member] 板块列表为空，跳过入库")
+            return 0
+
+        total = len(ts_code_list)
+        logger.info(f"===== 开始同花顺板块成分入库（ths_member），共 {total} 个板块 =====")
+
+        total_affected = 0
+        failed_boards = []
+
+        for idx, board_code in enumerate(ts_code_list, 1):
+            try:
+                raw_df = data_fetcher.fetch_ths_member(ts_code=board_code)
+                if raw_df.empty:
+                    logger.debug(f"[ths_member] {board_code} 无成员数据，跳过")
+                    continue
+
+                df = raw_df.copy()
+
+                # 日期字段：YYYYMMDD → YYYY-MM-DD（暂无数据，保持鲁棒）
+                for col in ["in_date", "out_date"]:
+                    if col in df.columns:
+                        df[col] = pd.to_datetime(
+                            df[col], format="%Y%m%d", errors="coerce"
+                        ).apply(lambda x: x.strftime("%Y-%m-%d") if pd.notna(x) else None)
+
+                # weight：数值，NaN 保持 None（暂无数据）
+                if "weight" in df.columns:
+                    df["weight"] = pd.to_numeric(df["weight"], errors="coerce")
+
+                # 字符串字段
+                for col in ["con_name", "is_new"]:
+                    if col in df.columns:
+                        df[col] = df[col].fillna("")
+
+                df["update_time"] = pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")
+                final_df = self._align_df_with_db(df, table_name)
+                if final_df.empty:
+                    continue
+
+                # Step 1：将该板块已有记录全部标记为 is_new='N'（先降级旧成员）
+                try:
+                    db.execute(
+                        "UPDATE ths_member SET is_new='N', update_time=NOW() WHERE ts_code=%s",
+                        (board_code,)
+                    )
+                except Exception as e:
+                    logger.warning(f"[ths_member] {board_code} 降级旧成员失败：{e}，继续插入")
+
+                # Step 2：upsert 当前最新成员（is_new='Y'）
+                affected = db.batch_insert_df(final_df, table_name, ignore_duplicate=True)
+                total_affected += affected or 0
+
+                if idx % 100 == 0 or idx == total:
+                    logger.info(f"[ths_member] 进度 {idx}/{total}，累计入库 {total_affected} 行")
+
+            except Exception as e:
+                logger.warning(f"[ths_member] {board_code} 处理异常：{e}，跳过")
+                failed_boards.append(board_code)
+
+        if failed_boards:
+            logger.warning(f"[ths_member] {len(failed_boards)} 个板块处理失败：{failed_boards[:10]}...")
+
+        logger.info(f"[ths_member] 全部完成，累计 upsert {total_affected} 行，失败 {len(failed_boards)} 个板块")
+        return total_affected
+
+
 # 全局实例（保持不变，确保下游调用）
 data_cleaner = DataCleaner()
 
-if __name__ == "__main__":
-
-    # """基础信息表入库/更新"""
-    # affected_rows = data_cleaner.clean_and_insert_stockbase(table_name="stock_basic")
-    """stock_company表入库"""
-    # affected_rows = data_cleaner.clean_and_insert_stockcompany(table_name="stock_company")
-    # logger.info(f"stock_company入库测试完成：入库/更新行数 {affected_rows}")
-
-    # """日K数据全市场入库（核心测试）"""
-    # # # 方式1：全量测试
-    # # kline_affected_rows = data_cleaner.clean_and_insert_kline_day(table_name="kline_day")
-    # # logger.info(f"全市场日K数据入库完成，累计入库/更新行数：{kline_affected_rows}")
-
-    """测试指数日线数据清洗入库"""
-    # try:
-    # #     # 测试1：单指数单日数据入库
-    # #     affected = data_cleaner.clean_and_insert_index_daily(
-    # #         ts_code="000001.SH",
-    # #         trade_date="20241231"
-    # #     )
-    # #     logger.info(f"单指数单日入库影响行数：{affected}")
-    #
-    #     # 测试2：多指数日期范围数据入库
-    #     affected_multi = data_cleaner.clean_and_insert_index_daily(
-    #         ts_code="399107.SZ",
-    #         start_date="20260211",
-    #         end_date="20260213"
-    #     )
-    #     logger.info(f"多指数日期范围入库影响行数：{affected_multi}")
-    #
-    #     logger.info("===== 指数日线数据清洗入库测试完成 ✅ =====")
-    # except Exception as e:
-    #     logger.error(f"指数日线数据清洗入库测试失败：{str(e)} ❌")
-    #
-    # # ====================== 新增：get_kline_min_by_stock_date 测试用例 ======================
-    # 3. 测试场景2：正常参数调用（查库→接口→入库流程）
-    # print("\n===== 测试场景2：正常参数调用 =====")
-    # test_ts_code = "301550.SZ"
-    # test_trade_date = "2026-01-16"
-    # result_df =  data_cleaner.get_kline_min_by_stock_date(
-    #     ts_code=test_ts_code,
-    #     trade_date=test_trade_date,
-    #     table_name="kline_min"
-    # )
-    # print(result_df)
-    # """测试分钟线数据（单股票+批量）清洗入库"""
-    # try:
-    #     # 初始化cleaner实例
-    #     data_cleaner = DataCleaner()
-    #     test_trade_date = "2026-02-19"  # 测试交易日（可根据实际调整）
-    #
-    #     logger.info("\n===== 测试2：批量股票分钟线拉取+入库 =====")
-    #     test_stock_list = ["000001.SZ", "000002.SZ", "002208.SZ"]  # 测试候选池
-    #     batch_result = data_cleaner.batch_get_kline_min_by_date(
-    #         stock_codes=test_stock_list,
-    #         trade_date=test_trade_date,
-    #     )
-    #     # 输出批量测试结果
-    #     valid_count = len([code for code, df in batch_result.items() if not df.empty])
-    #     logger.info(f"批量测试 - 传入股票数：{len(test_stock_list)}")
-    #     logger.info(f"批量测试 - 有效数据股票数：{valid_count}")
-    #     for ts_code, df in batch_result.items():
-    #         logger.info(f"  {ts_code}：拉取数据行数 = {len(df)}")
-    #
-    #     logger.info("\n===== 分钟线数据（单股票+批量）测试完成 ✅ =====")
-    # except Exception as e:
-    #     logger.error(f"分钟线数据测试失败：{str(e)} ❌")
-    #
-    # '''方式2：多股票+仅指定开始日期（默认到当日）测试'''
-    # qfq_affected_rows2 = data_cleaner.clean_and_insert_kline_day_qfq(
-    #     ts_code=["600000.SH", "000001.SZ"],
-    #     start_date="20250201"
-    # )
-    # logger.info(f"多股票前复权日K入库完成，累计入库/更新行数：{qfq_affected_rows2}")
-
-    # # =================== 测试：获取交易详细信息数据 =====")
-    # pd.set_option('display.max_columns', None)
-    # pd.set_option('display.max_rows', None)
-    # pd.set_option('display.width', None)
-    # df = data_cleaner.insert_stock_daily_basic(
-    #     ts_code= '300436.SZ',
-    #     trade_date = '',
-    #     start_date='20260210',
-    #     end_date='20260213',
-    # )
-    # # 数据预览
-    # print(df)
-
-
-    # ===================== 测试配置（按需修改） =====================
-    # TEST_START_DATE = "20160101"
-    # TEST_END_DATE = "20260226"
-    try:
-        logger.info("===== 开始测试 insert_stock_st 方法 =====")
-        # 执行单日测试
-        data_cleaner = DataCleaner()
-        affected_rows =data_cleaner.insert_stock_st(trade_date='20260105')
-
-        # 执行批量范围测试（切换时注释上面的单日代码，放开这行）
-        # affected_rows =data_cleaner.insert_stock_st(start_date=TEST_START_DATE, end_date=TEST_END_DATE)
-
-        # 输出测试结果
-        if affected_rows is not None:
-            logger.info(f"===== 测试完成！成功入库 StockRiskWarning 表行数：{affected_rows} =====")
-        else:
-            logger.error("===== 测试失败！方法返回异常，请查看上方错误日志 =====")
-
-    except Exception as e:
-        logger.error(f"===== 测试执行异常：{str(e)} =====", exc_info=True)

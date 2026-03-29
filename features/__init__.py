@@ -27,7 +27,9 @@
     hp_stage         → HPStageFeature（高位股阶段：成交额加权MA5乖离率/涨跌幅/量能倍数，全局因子）
     hp_style         → HPStyleFeature（市场高宽风格 + 高度历史水分位，全局因子）
     hp_cycle         → HPCycleFeature（120日高位股涨幅周期，全局因子）
-    liquid_stats     → LiquidStatsFeature（液态股60日突破 + 高开低走，全局因子）
+    active_stats     → ActiveStatsFeature（活跃股60日突破 + 高开低走，全局因子）
+    ths_hot          → THSHotFeature（同花顺热股榜 d0~d4 排名归一化得分，个股因子）
+    moneyflow        → MoneyflowFeature（个股资金面双源因子：大单/超大单/主力/小单净占比 d0~d4，个股因子）
 """
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -70,14 +72,17 @@ from features.individual.individual_feature import IndividualFeature        # no
 from features.emotion.hp_stage_feature import HPStageFeature               # noqa: F401  # 高位股阶段：成交额加权MA5乖离率/涨跌幅/量能倍数（全局因子）
 from features.emotion.hp_style_feature import HPStyleFeature               # noqa: F401  # 市场高宽风格 + 高度历史水分位（全局因子）
 from features.macro.hp_cycle_feature import HPCycleFeature                 # noqa: F401  # 120日高位股涨幅周期（全局因子）
-from features.macro.liquid_stats_feature import LiquidStatsFeature         # noqa: F401  # 液态股60日突破 + 高开低走（全局因子）
+from features.macro.active_stats_feature import ActiveStatsFeature         # noqa: F401  # 活跃股60日突破 + 高开低走（全局因子）
+from features.emotion.ths_hot_feature import THSHotFeature                 # noqa: F401  # 同花顺热股榜 d0~d4 排名归一化得分（个股因子）
+from features.individual.moneyflow_feature import MoneyflowFeature         # noqa: F401  # 个股资金面因子：大单/超大单/主力/小单净占比 d0~d4（个股因子，双源融合）
 
 __all__ = [
     "FeatureEngine", "FeatureDataBundle",
     "SectorHeatFeature", "SectorStockFeature", "SEIFeature", "MAPositionFeature",
     # "StkFactorProFeature",  # 模块预留，暂未实现
     "MarketMacroFeature", "IndividualFeature",
-    "HPStageFeature", "HPStyleFeature", "HPCycleFeature", "LiquidStatsFeature",
+    "HPStageFeature", "HPStyleFeature", "HPCycleFeature", "ActiveStatsFeature",
+    "THSHotFeature", "MoneyflowFeature",
     "feature_registry",
 ]
 

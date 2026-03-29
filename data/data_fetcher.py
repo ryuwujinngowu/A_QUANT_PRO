@@ -410,6 +410,83 @@ class DataFetcher:
             return pd.DataFrame()
 
 
+    @retry_decorator(max_retries=3, retry_interval=2.0)
+    def fetch_moneyflow_ths(
+            self,
+            trade_date: Optional[str] = None,
+            ts_code: Optional[str] = None,
+            start_date: Optional[str] = None,
+            end_date: Optional[str] = None,
+    ) -> pd.DataFrame:
+        """
+        获取同花顺个股资金流向数据（moneyflow_ths），每日盘后更新。
+        单次最大 6000 条，按 trade_date 查全市场单日数据即可覆盖所有 A 股。
+
+        Args:
+            trade_date : 交易日（YYYYMMDD），按日查全市场时使用
+            ts_code    : 股票代码，按股查历史时使用
+            start_date : 开始日期（YYYYMMDD）
+            end_date   : 结束日期（YYYYMMDD）
+
+        Returns:
+            DataFrame，关键字段：trade_date / ts_code / buy_lg_amount_rate /
+            buy_md_amount_rate / buy_sm_amount_rate / net_amount
+        """
+        params = _filter_empty_params({
+            "trade_date": trade_date,
+            "ts_code":    ts_code,
+            "start_date": start_date,
+            "end_date":   end_date,
+        })
+        try:
+            df = self.pro.moneyflow_ths(**params)
+            logger.debug(f"[moneyflow_ths] 参数={params}，行数={len(df)}")
+            if df.empty:
+                logger.warning(f"[moneyflow_ths] 数据为空，参数={params}")
+            return df
+        except Exception as e:
+            logger.error(f"[moneyflow_ths] 获取失败，参数={params}，错误={e}")
+            return pd.DataFrame()
+
+    @retry_decorator(max_retries=3, retry_interval=2.0)
+    def fetch_moneyflow_dc(
+            self,
+            trade_date: Optional[str] = None,
+            ts_code: Optional[str] = None,
+            start_date: Optional[str] = None,
+            end_date: Optional[str] = None,
+    ) -> pd.DataFrame:
+        """
+        获取东方财富个股资金流向数据（moneyflow_dc），每日盘后更新。
+        数据从 20230911 开始，含超大单（buy_elg_amount_rate）字段。
+
+        Args:
+            trade_date : 交易日（YYYYMMDD），按日查全市场时使用
+            ts_code    : 股票代码，按股查历史时使用
+            start_date : 开始日期（YYYYMMDD）
+            end_date   : 结束日期（YYYYMMDD）
+
+        Returns:
+            DataFrame，关键字段：trade_date / ts_code / buy_elg_amount_rate /
+            buy_lg_amount_rate / buy_md_amount_rate / buy_sm_amount_rate /
+            net_amount / net_amount_rate
+        """
+        params = _filter_empty_params({
+            "trade_date": trade_date,
+            "ts_code":    ts_code,
+            "start_date": start_date,
+            "end_date":   end_date,
+        })
+        try:
+            df = self.pro.moneyflow_dc(**params)
+            logger.debug(f"[moneyflow_dc] 参数={params}，行数={len(df)}")
+            if df.empty:
+                logger.warning(f"[moneyflow_dc] 数据为空，参数={params}")
+            return df
+        except Exception as e:
+            logger.error(f"[moneyflow_dc] 获取失败，参数={params}，错误={e}")
+            return pd.DataFrame()
+
     def fetch_ths_hot(
             self,
             trade_date: Optional[str] = None,
@@ -693,6 +770,98 @@ class DataFetcher:
             return df if df is not None else pd.DataFrame()
         except Exception as e:
             logger.error(f"[dividend] 获取失败，参数：{params}，错误：{e}")
+            return pd.DataFrame()
+
+
+    def fetch_ths_index(
+            self,
+            ts_code: Optional[str] = None,
+            exchange: Optional[str] = None,
+            type_: Optional[str] = None,
+    ) -> pd.DataFrame:
+        """
+        获取同花顺板块指数列表（概念/行业/特色/风格/主题/宽基）。
+        接口文档：ths_index（需 6000 积分）
+        限量：单次最大返回 5000 行，一次即可提取全部数据，请勿循环提取。
+
+        :param ts_code:  指数代码（可选，不传则返回全部）
+        :param exchange: 市场类型：A-a股 HK-港股 US-美股（可选）
+        :param type_:    类型：N-概念 I-行业 R-地域 S-特色 ST-风格 TH-主题 BB-宽基（可选）
+        :return: DataFrame，列：ts_code / name / count / exchange / list_date / type
+        """
+        params = _filter_empty_params({"ts_code": ts_code, "exchange": exchange, "type": type_})
+        try:
+            time.sleep(API_REQUEST_INTERVAL)
+            df = self.pro.ths_index(**params)
+            logger.debug(f"[ths_index] 参数：{params}，行数：{len(df)}")
+            return df if df is not None else pd.DataFrame()
+        except Exception as e:
+            logger.error(f"[ths_index] 获取失败，参数：{params}，错误：{e}")
+            return pd.DataFrame()
+
+    def fetch_ths_member(
+            self,
+            ts_code: Optional[str] = None,
+            con_code: Optional[str] = None,
+    ) -> pd.DataFrame:
+        """
+        获取同花顺概念板块成分列表（按板块代码拉取）。
+        接口文档：ths_member（需 6000 积分）
+        限量：每分钟最多 200 次调用，需按板块 ts_code 循环提取。
+
+        :param ts_code:  板块指数代码（如 885800.TI）
+        :param con_code: 股票代码（可选，反查某股票所在板块）
+        :return: DataFrame，列：ts_code / con_code / con_name / weight / in_date / out_date / is_new
+        """
+        params = _filter_empty_params({"ts_code": ts_code, "con_code": con_code})
+        try:
+            time.sleep(0.35)  # 200次/分钟限制，间隔 ≥ 0.3s；取 0.35s 留余量
+            df = self.pro.ths_member(**params)
+            logger.debug(f"[ths_member] ts_code={ts_code}，行数：{len(df)}")
+            return df if df is not None else pd.DataFrame()
+        except Exception as e:
+            logger.error(f"[ths_member] 获取失败，ts_code={ts_code}，错误：{e}")
+            return pd.DataFrame()
+
+
+    @retry_decorator(max_retries=3, retry_interval=2.0)
+    def fetch_ths_daily(
+            self,
+            trade_date: Optional[str] = None,
+            ts_code: Optional[str] = None,
+            start_date: Optional[str] = None,
+            end_date: Optional[str] = None,
+    ) -> pd.DataFrame:
+        """
+        获取同花顺板块指数日行情（ths_daily）。
+        不传 ts_code 时返回指定交易日全量板块数据（单次约 3000 条以内）。
+
+        接口文档：doc_id=260
+        积分要求：6000 积分
+        单次限量：3000 条
+
+        :param trade_date: 交易日 YYYYMMDD
+        :param ts_code:    板块代码（不传则取全量）
+        :param start_date: 开始日期 YYYYMMDD
+        :param end_date:   结束日期 YYYYMMDD
+        :return: DataFrame，字段含 ts_code/trade_date/pct_change 等
+        """
+        params = _filter_empty_params({
+            "trade_date": trade_date,
+            "ts_code": ts_code,
+            "start_date": start_date,
+            "end_date": end_date,
+        })
+        time.sleep(1.2)
+        try:
+            df = self.pro.ths_daily(**params)
+            logger.debug(f"[ths_daily] 参数={params}，行数={len(df) if df is not None else 0}")
+            if df is None or df.empty:
+                logger.warning(f"[ths_daily] 数据为空，参数={params}")
+                return pd.DataFrame()
+            return df
+        except Exception as e:
+            logger.error(f"[ths_daily] 获取失败，参数={params}，错误：{e}")
             return pd.DataFrame()
 
 

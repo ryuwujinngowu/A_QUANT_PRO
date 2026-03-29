@@ -1789,24 +1789,20 @@ def ensure_stk_factor_pro_data(trade_date: str) -> None:
 
 def get_st_set(trade_date: str) -> set:
     """
-    查询当日 ST/ST* 股票代码集合。
-    优先查 stock_st（自动更新表），失败时降级查 stock_risk_warning（按需入库表）。
-    两表均失败时返回空集合（中性值：不过滤），避免引入虚假偏差。
+    查询当日 ST/ST* 股票代码集合（来自 stock_risk_warning 自动更新表）。
+    失败时返回空集合（中性值：不过滤），避免引入虚假偏差。
 
     :param trade_date: 交易日（YYYY-MM-DD 或 YYYYMMDD 均可）
     :return: {ts_code, ...}
     """
     trade_date_fmt = trade_date.replace("-", "")
-    for table in ("stock_st", "stock_risk_warning"):
-        try:
-            sql = f"SELECT DISTINCT ts_code FROM {table} WHERE trade_date = %s"
-            rows = db.query(sql, params=(trade_date_fmt,)) or []
-            result = {r["ts_code"] for r in rows if r.get("ts_code")}
-            if rows:  # 找到数据则直接返回（不再尝试下一张表）
-                return result
-        except Exception as e:
-            logger.warning(f"[get_st_set] {table} 查询失败，尝试下一张表 | {trade_date} | {e}")
-    return set()
+    try:
+        sql = "SELECT DISTINCT ts_code FROM stock_risk_warning WHERE trade_date = %s"
+        rows = db.query(sql, params=(trade_date_fmt,)) or []
+        return {r["ts_code"] for r in rows if r.get("ts_code")}
+    except Exception as e:
+        logger.warning(f"[get_st_set] 查询失败（返回空集合）| {trade_date} | {e}")
+        return set()
 
 
 def get_stock_list_date_map() -> Dict[str, str]:
@@ -1876,7 +1872,7 @@ def get_hp_cycle_slice_avg_gain(
     return 0.0
 
 
-def get_liquid_stock_stats(
+def get_active_stock_stats(
     trade_date: str,
     d5_start_date: str,
     d60_start_date: str,
@@ -1884,7 +1880,7 @@ def get_liquid_stock_stats(
     amount_threshold: float = 2_000_000.0,
 ) -> Dict[str, object]:
     """
-    查询液态股（5日均成交额 ≥ 20亿）的广度统计（DB 端 SQL 聚合）。
+    查询活跃股（5日均成交额 ≥ 20亿）的广度统计（DB 端 SQL 聚合）。
 
     :param trade_date:       D 日（YYYY-MM-DD）
     :param d5_start_date:    D-4 日（5日均量区间起始，含 D0，共5天）
@@ -1892,11 +1888,11 @@ def get_liquid_stock_stats(
     :param prev_trade_date:  D-1 日（60日历史区间截止，不含 D0 避免自引用）
     :param amount_threshold: 5日均成交额阈值（千元，默认 2,000,000 = 20亿元）
     :return: {
-        "liquid_total":            int,   液态股总数（D0有数据的）,
-        "liquid_60d_breakout_cnt": int,   破60日新高或新低的只数,
-        "liquid_holf_cnt":         int,   高开低走的只数,
-        "liquid_60d_breakout_ratio": float,
-        "liquid_holf_ratio":         float,
+        "active_total":            int,   活跃股总数（D0有数据的）,
+        "active_60d_breakout_cnt": int,   破60日新高或新低的只数,
+        "active_holf_cnt":         int,   高开低走的只数,
+        "active_60d_breakout_ratio": float,
+        "active_holf_ratio":         float,
     }
 
     注意：
@@ -1910,17 +1906,17 @@ def get_liquid_stock_stats(
     d1_fmt   = prev_trade_date.replace("-", "")
 
     _default = {
-        "liquid_total": 0,
-        "liquid_60d_breakout_cnt": 0,
-        "liquid_holf_cnt":         0,
-        "liquid_60d_breakout_ratio": 0.0,
-        "liquid_holf_ratio":         0.0,
+        "active_total": 0,
+        "active_60d_breakout_cnt": 0,
+        "active_holf_cnt":         0,
+        "active_60d_breakout_ratio": 0.0,
+        "active_holf_ratio":         0.0,
     }
 
     # ── 因子6：高开低走（open > pre_close AND close < open）────────────────
     sql_holf = """
         SELECT
-            COUNT(*)  AS liquid_total,
+            COUNT(*)  AS active_total,
             SUM(CASE WHEN k0.open > k0.pre_close AND k0.close < k0.open THEN 1 ELSE 0 END)
                       AS holf_cnt
         FROM kline_day AS k0
@@ -1936,10 +1932,10 @@ def get_liquid_stock_stats(
     """
 
     # ── 因子5：破60日新高或新低 ──────────────────────────────────────────
-    # 分组计算每只液态股的60日（D-60到D-1）最高/低收盘价，再与D0比较
+    # 分组计算每只活跃股的60日（D-60到D-1）最高/低收盘价，再与D0比较
     sql_breakout = """
         SELECT
-            COUNT(DISTINCT k0.ts_code) AS liquid_total,
+            COUNT(DISTINCT k0.ts_code) AS active_total,
             SUM(CASE
                 WHEN k0.close >= hist.max_close OR k0.close <= hist.min_close THEN 1
                 ELSE 0
@@ -1973,13 +1969,13 @@ def get_liquid_stock_stats(
             return_df=True,
         )
         if r_holf is not None and not r_holf.empty:
-            total     = int(r_holf["liquid_total"].iloc[0] or 0)
+            total     = int(r_holf["active_total"].iloc[0] or 0)
             holf_cnt  = int(r_holf["holf_cnt"].iloc[0]    or 0)
-            result["liquid_total"]      = total
-            result["liquid_holf_cnt"]   = holf_cnt
-            result["liquid_holf_ratio"] = round(holf_cnt / total, 4) if total > 0 else 0.0
+            result["active_total"]      = total
+            result["active_holf_cnt"]   = holf_cnt
+            result["active_holf_ratio"] = round(holf_cnt / total, 4) if total > 0 else 0.0
     except Exception as e:
-        logger.warning(f"[get_liquid_stock_stats] holf 查询失败 | {trade_date} | {e}")
+        logger.warning(f"[get_active_stock_stats] holf 查询失败 | {trade_date} | {e}")
 
     try:
         r_brkout = db.query(
@@ -1988,18 +1984,306 @@ def get_liquid_stock_stats(
             return_df=True,
         )
         if r_brkout is not None and not r_brkout.empty:
-            total_b   = int(r_brkout["liquid_total"].iloc[0] or 0)
+            total_b   = int(r_brkout["active_total"].iloc[0] or 0)
             brkout    = int(r_brkout["breakout_cnt"].iloc[0] or 0)
-            if result["liquid_total"] == 0:
-                result["liquid_total"] = total_b
-            result["liquid_60d_breakout_cnt"]   = brkout
-            result["liquid_60d_breakout_ratio"] = round(
+            if result["active_total"] == 0:
+                result["active_total"] = total_b
+            result["active_60d_breakout_cnt"]   = brkout
+            result["active_60d_breakout_ratio"] = round(
                 brkout / total_b, 4
             ) if total_b > 0 else 0.0
     except Exception as e:
-        logger.warning(f"[get_liquid_stock_stats] breakout 查询失败 | {trade_date} | {e}")
+        logger.warning(f"[get_active_stock_stats] breakout 查询失败 | {trade_date} | {e}")
 
     return result
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 同花顺板块指数 + 成分（ths_index / ths_member）工具函数
+# ──────────────────────────────────────────────────────────────────────────────
+
+def ensure_ths_index_data() -> None:
+    """
+    确保 ths_index 表有数据（DB→API→DB 链路）。
+    若表为空则触发全量 API 补拉；非空则跳过（日常刷新由 autoUpdating 负责）。
+    调用方在使用 ths_index 数据前调用本函数，保证首次使用时自动建立基线数据。
+    """
+    from data.data_cleaner import data_cleaner
+
+    try:
+        existing = db.query("SELECT 1 FROM ths_index LIMIT 1")
+        if existing:
+            return
+        logger.info("[ensure_ths_index_data] ths_index 表为空，触发全量 API 补拉")
+        data_cleaner.clean_and_insert_ths_index()
+    except Exception as e:
+        logger.warning(f"[ensure_ths_index_data] 补拉失败：{e}")
+
+
+def ensure_ths_member_data(ts_code_list: List[str]) -> None:
+    """
+    确保 ths_member 表有指定板块的成分数据（DB→API→DB 链路）。
+    仅对 DB 中尚无任何记录的板块触发 API 补拉，避免重复请求。
+
+    :param ts_code_list: 板块代码列表（ths_index.ts_code）
+    """
+    from data.data_cleaner import data_cleaner
+
+    if not ts_code_list:
+        return
+
+    try:
+        sql = "SELECT DISTINCT ts_code FROM ths_member WHERE ts_code IN %s"
+        rows = db.query(sql, params=(tuple(ts_code_list),)) or []
+        existing = {r["ts_code"] for r in rows if r.get("ts_code")}
+    except Exception as e:
+        logger.warning(f"[ensure_ths_member_data] 查库失败：{e}，跳过补拉")
+        return
+
+    missing = [ts for ts in ts_code_list if ts not in existing]
+    if not missing:
+        return
+
+    logger.info(f"[ensure_ths_member_data] {len(missing)} 个板块需补拉成分数据")
+    data_cleaner.clean_and_insert_ths_member_batch(ts_code_list=missing)
+
+
+def get_ths_index_list(
+        exchange: str = "A",
+        type_: Optional[str] = None,
+) -> pd.DataFrame:
+    """
+    获取同花顺板块指数列表（从 ths_index 表查询）。
+
+    :param exchange: 市场类型，默认 'A'（A 股）；None 不过滤
+    :param type_:    板块类型，如 'N'（概念）、'I'（行业）；None 不过滤
+    :return: DataFrame，列：ts_code / name / count / exchange / list_date / type
+    """
+    conditions = []
+    params: list = []
+    if exchange:
+        conditions.append("exchange = %s")
+        params.append(exchange)
+    if type_:
+        conditions.append("type = %s")
+        params.append(type_)
+
+    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+    sql = f"SELECT ts_code, name, count, exchange, list_date, type FROM ths_index {where} ORDER BY ts_code"
+    try:
+        df = db.query(sql, params=tuple(params) if params else None, return_df=True)
+        return df if df is not None else pd.DataFrame()
+    except Exception as e:
+        logger.error(f"[get_ths_index_list] 查询失败：{e}")
+        return pd.DataFrame()
+
+
+def get_concept_stocks(ts_code: str, is_new: bool = True) -> List[str]:
+    """
+    获取某同花顺板块（概念/行业）的成分股代码列表。
+
+    :param ts_code: 板块代码（如 885800.TI）
+    :param is_new:  True 只返回最新成员（is_new='Y'），False 返回全部历史成员
+    :return: 股票代码列表，查询失败返回空列表
+    """
+    is_new_cond = "AND is_new = 'Y'" if is_new else ""
+    sql = f"SELECT con_code FROM ths_member WHERE ts_code = %s {is_new_cond}"
+    try:
+        rows = db.query(sql, params=(ts_code,)) or []
+        return [r["con_code"] for r in rows if r.get("con_code")]
+    except Exception as e:
+        logger.error(f"[get_concept_stocks] 查询失败，ts_code={ts_code}：{e}")
+        return []
+
+
+def get_stock_concepts(
+        con_code: str,
+        is_new: bool = True,
+        exchange: str = "A",
+) -> List[str]:
+    """
+    获取某股票所属的同花顺板块代码列表（反查）。
+
+    :param con_code: 股票代码（如 000001.SZ）
+    :param is_new:   True 只返回最新所属板块，False 返回全部历史板块
+    :param exchange: 仅返回指定市场的板块，默认 'A'；None 不过滤
+    :return: 板块代码列表，查询失败返回空列表
+    """
+    is_new_cond = "AND m.is_new = 'Y'" if is_new else ""
+    exchange_cond = "AND i.exchange = %s" if exchange else ""
+    params: list = [con_code]
+    if exchange:
+        params.append(exchange)
+
+    sql = f"""
+        SELECT m.ts_code
+        FROM ths_member m
+        JOIN ths_index i ON m.ts_code = i.ts_code
+        WHERE m.con_code = %s
+          {is_new_cond}
+          {exchange_cond}
+    """
+    try:
+        rows = db.query(sql, params=tuple(params)) or []
+        return [r["ts_code"] for r in rows if r.get("ts_code")]
+    except Exception as e:
+        logger.error(f"[get_stock_concepts] 查询失败，con_code={con_code}：{e}")
+        return []
+
+
+def get_concept_member_map(
+        ts_code_list: Optional[List[str]] = None,
+        is_new: bool = True,
+) -> dict:
+    """
+    批量获取板块-成分映射（避免 N+1 查询）。
+    适用于特征层需要批量判断某股票归属哪些板块的场景。
+
+    :param ts_code_list: 板块代码列表；None 则返回全量 A 股板块的映射
+    :param is_new:       True 只取最新成员
+    :return: dict，格式 {板块ts_code: [con_code, ...]}
+    """
+    conditions = ["is_new = 'Y'"] if is_new else []
+    params: list = []
+    if ts_code_list:
+        conditions.append(f"ts_code IN %s")
+        params.append(tuple(ts_code_list))
+
+    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+    sql = f"SELECT ts_code, con_code FROM ths_member {where}"
+    try:
+        rows = db.query(sql, params=tuple(params) if params else None) or []
+        result: dict = {}
+        for r in rows:
+            result.setdefault(r["ts_code"], []).append(r["con_code"])
+        return result
+    except Exception as e:
+        logger.error(f"[get_concept_member_map] 查询失败：{e}")
+        return {}
+
+
+def ensure_moneyflow_data(trade_date: str) -> None:
+    """
+    确保 moneyflow_combined 表有指定交易日的资金流向数据。
+    若 DB 无数据，走双源 API 补拉（DB→API→DB 链路）。
+
+    :param trade_date: 交易日，支持 YYYY-MM-DD / YYYYMMDD
+    """
+    from data.data_cleaner import data_cleaner
+
+    trade_date_fmt = trade_date.replace("-", "")
+    trade_date_dash = f"{trade_date_fmt[:4]}-{trade_date_fmt[4:6]}-{trade_date_fmt[6:]}"
+    check_sql = "SELECT 1 FROM moneyflow_combined WHERE trade_date = %s LIMIT 1"
+    try:
+        existing = db.query(check_sql, (trade_date_dash,))
+        if existing:
+            return
+        logger.info(f"[ensure_moneyflow_data] {trade_date} 无资金流向数据，触发 API 补拉")
+        data_cleaner.clean_and_insert_moneyflow_combined(trade_date=trade_date_fmt)
+    except Exception as e:
+        logger.warning(f"[ensure_moneyflow_data] {trade_date} 补拉失败：{e}")
+
+
+def ensure_ths_hot_data(trade_date: str) -> None:
+    """
+    确保 ths_hot 表有指定交易日的热股榜数据。
+    若 DB 无数据，走 API 补拉（DB→API→DB 链路）。
+
+    历史补拉使用 is_new='Y'（每日22:30后的最终榜，无未来函数）。
+
+    :param trade_date: 交易日，支持 YYYY-MM-DD / YYYYMMDD
+    """
+    from data.data_cleaner import data_cleaner
+
+    trade_date_fmt = trade_date.replace("-", "")
+    trade_date_dash = f"{trade_date_fmt[:4]}-{trade_date_fmt[4:6]}-{trade_date_fmt[6:]}"
+    check_sql = "SELECT 1 FROM ths_hot WHERE trade_date = %s LIMIT 1"
+    try:
+        existing = db.query(check_sql, (trade_date_dash,))
+        if existing:
+            return
+        logger.info(f"[ensure_ths_hot_data] {trade_date} 无热榜数据，触发 API 补拉")
+        data_cleaner.clean_and_insert_ths_hot(trade_date=trade_date_fmt, is_new="Y")
+    except Exception as e:
+        logger.warning(f"[ensure_ths_hot_data] {trade_date} 补拉失败：{e}")
+
+
+def ensure_ths_daily_data(trade_date: str) -> None:
+    """
+    确保 ths_daily 表有指定交易日的板块指数行情数据。
+    若 DB 无数据，走 API 补拉（DB→API→DB 链路）。
+
+    :param trade_date: 交易日，支持 YYYY-MM-DD / YYYYMMDD
+    """
+    from data.data_cleaner import data_cleaner
+
+    trade_date_fmt  = trade_date.replace("-", "")
+    trade_date_dash = f"{trade_date_fmt[:4]}-{trade_date_fmt[4:6]}-{trade_date_fmt[6:]}"
+    check_sql = "SELECT 1 FROM ths_daily WHERE trade_date = %s LIMIT 1"
+    try:
+        existing = db.query(check_sql, (trade_date_dash,))
+        if existing:
+            return
+        logger.info(f"[ensure_ths_daily_data] {trade_date} 无板块日行情数据，触发 API 补拉")
+        data_cleaner.clean_and_insert_ths_daily(trade_date=trade_date_fmt)
+    except Exception as e:
+        logger.warning(f"[ensure_ths_daily_data] {trade_date} 补拉失败：{e}")
+
+
+def get_stock_sector_gains(
+        con_code: str,
+        trade_date: str,
+        ensure: bool = True,
+) -> Dict[str, float]:
+    """
+    获取某股票在指定交易日所属各 THS 板块的涨幅。
+
+    数据来源：ths_member（板块成分）+ ths_daily（板块日行情 pct_change）
+    比 stock_basic.concept_tags（LLM生成）更准确、更鲜活。
+
+    :param con_code:   股票代码（如 '000001.SZ'）
+    :param trade_date: 交易日，格式 yyyy-mm-dd 或 yyyymmdd
+    :param ensure:     是否先调用 ensure_ths_daily_data 保证数据新鲜（默认 True）
+    :return: {板块名称: pct_change%} 字典，无数据时返回空字典（中性值）
+    """
+    trade_date_fmt  = trade_date.replace("-", "")
+    trade_date_dash = f"{trade_date_fmt[:4]}-{trade_date_fmt[4:6]}-{trade_date_fmt[6:]}"
+
+    if ensure:
+        ensure_ths_daily_data(trade_date_dash)
+
+    try:
+        # 查 ths_member + ths_index，获取该股所属板块代码和名称
+        rows = db.query(
+            "SELECT m.ts_code, i.name "
+            "FROM ths_member m JOIN ths_index i ON m.ts_code = i.ts_code "
+            "WHERE m.con_code = %s AND m.is_new = 'Y'",
+            params=(con_code,),
+        ) or []
+        if not rows:
+            return {}
+
+        concept_codes = [r["ts_code"] for r in rows]
+        name_map      = {r["ts_code"]: r["name"] for r in rows}
+
+        # 查 ths_daily 获取板块当日涨幅
+        ph = ", ".join(["%s"] * len(concept_codes))
+        daily_rows = db.query(
+            f"SELECT ts_code, pct_change FROM ths_daily "
+            f"WHERE trade_date = %s AND ts_code IN ({ph})",
+            params=(trade_date_dash,) + tuple(concept_codes),
+        ) or []
+
+        result = {}
+        for r in daily_rows:
+            name = name_map.get(r["ts_code"], r["ts_code"])
+            pct  = float(r.get("pct_change", 0.0) or 0.0)
+            result[name] = pct
+        return result
+
+    except Exception as e:
+        logger.error(f"[get_stock_sector_gains] {con_code} {trade_date} 查询失败：{e}")
+        return {}
 
 
 if __name__ == "__main__":

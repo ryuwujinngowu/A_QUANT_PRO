@@ -22,6 +22,8 @@ label 定义（完整版）：
     label_d1_low        : (D+1 low  - D+1 open) / D+1 open，日内最大回撤（负数）
     label_d1_pct_chg    : D+1 pct_chg（收盘相对前收涨跌幅 %，与实盘统计口径对齐）
     label_d2_return     : (D+2 close - D+1 open) / D+1 open，持有2日总收益
+    label_5d_30pct      : D+1~D+5 任意交易日盘中高价 >= D0 close × 1.30 → 1，否则 0
+                          D+1 停牌 → 跳过（同 label1）；D+2~D+5 若无数据则中断扫描（保守标0）
 
 过滤逻辑：
     - D+1 停牌（无数据）→ 跳过，不作为负样本
@@ -44,8 +46,8 @@ class LabelEngine:
     def __init__(self, start_date: str, end_date: str):
         self.start_date = start_date
         self.end_date   = end_date
-        # 多预留 10 个自然日，确保 end_date 对应的 D+2 交易日在范围内
-        label_end = (pd.to_datetime(end_date) + pd.Timedelta(days=10)).strftime("%Y-%m-%d")
+        # 多预留 15 个自然日，确保 end_date 对应的 D+5 交易日在范围内
+        label_end = (pd.to_datetime(end_date) + pd.Timedelta(days=15)).strftime("%Y-%m-%d")
         self.all_trade_dates = get_trade_dates(start_date, label_end)
         self.date_idx_map    = {d: i for i, d in enumerate(self.all_trade_dates)}
 
@@ -67,11 +69,19 @@ class LabelEngine:
 
         d1_date = self.all_trade_dates[idx + 1]
         d2_date = self.all_trade_dates[idx + 2]
+        # D+3 ~ D+5：用于 label_5d_30pct，不足时不报错
+        d3_date = self.all_trade_dates[idx + 3] if idx + 3 < len(self.all_trade_dates) else None
+        d4_date = self.all_trade_dates[idx + 4] if idx + 4 < len(self.all_trade_dates) else None
+        d5_date = self.all_trade_dates[idx + 5] if idx + 5 < len(self.all_trade_dates) else None
 
         # 批量拉取 D / D+1 / D+2 日线
         d0_df = get_daily_kline_data(trade_date=trade_date, ts_code_list=stock_list)
         d1_df = get_daily_kline_data(trade_date=d1_date,   ts_code_list=stock_list)
         d2_df = get_daily_kline_data(trade_date=d2_date,   ts_code_list=stock_list)
+        # D+3~D+5（label_5d_30pct 所需，None 日期跳过）
+        d3_df = get_daily_kline_data(trade_date=d3_date, ts_code_list=stock_list) if d3_date else pd.DataFrame()
+        d4_df = get_daily_kline_data(trade_date=d4_date, ts_code_list=stock_list) if d4_date else pd.DataFrame()
+        d5_df = get_daily_kline_data(trade_date=d5_date, ts_code_list=stock_list) if d5_date else pd.DataFrame()
 
         if d1_df.empty:
             logger.warning(f"[LabelEngine] {d1_date} 日线数据为空，跳过")
@@ -87,6 +97,9 @@ class LabelEngine:
         d0_map = {row["ts_code"]: row for _, row in d0_df.iterrows()} if not d0_df.empty else {}
         d1_map = {row["ts_code"]: row for _, row in d1_df.iterrows()}
         d2_map = {row["ts_code"]: row for _, row in d2_df.iterrows()} if not d2_df.empty else {}
+        d3_map = {row["ts_code"]: row for _, row in d3_df.iterrows()} if not d3_df.empty else {}
+        d4_map = {row["ts_code"]: row for _, row in d4_df.iterrows()} if not d4_df.empty else {}
+        d5_map = {row["ts_code"]: row for _, row in d5_df.iterrows()} if not d5_df.empty else {}
 
         rows = []
         for ts_code in stock_list:
@@ -144,6 +157,21 @@ class LabelEngine:
             d0_close = float(d0_row.get("close", 0) or 0) if d0_row is not None else 0
             label_open_gap = round((d1_open - d0_close) / d0_close, 6) if d0_close > 0 else None
 
+            # ── label_5d_30pct：D+1~D+5 任意盘中 high >= D0_close × 1.30 ──
+            # 基准：D0 收盘价；触及目标价即为正样本，盘中高价触及也算
+            # D+1 无数据时已被前面的 continue 跳过；D+3~D+5 无数据时保守标 0
+            label_5d_30pct = 0
+            if d0_close > 0:
+                target_price = d0_close * 1.30
+                for dx_map in (d1_map, d2_map, d3_map, d4_map, d5_map):
+                    row_dx = dx_map.get(ts_code)
+                    if row_dx is None:
+                        continue
+                    high_dx = float(row_dx.get("high", 0) or 0)
+                    if high_dx >= target_price:
+                        label_5d_30pct = 1
+                        break
+
             rows.append({
                 "stock_code":           ts_code,
                 "trade_date":           trade_date,
@@ -160,6 +188,7 @@ class LabelEngine:
                 "label_d1_low":         label_d1_low,
                 "label_d1_pct_chg":     label_d1_pct_chg,
                 "label_d2_return":      label_d2_return,
+                "label_5d_30pct":       label_5d_30pct,
             })
 
         result = pd.DataFrame(rows)
@@ -169,6 +198,7 @@ class LabelEngine:
                 f"样本数:{len(result)} | "
                 f"label1正样本:{result['label1'].sum()} | "
                 f"label1_3pct:{result['label1_3pct'].sum()} | "
-                f"label1_8pct:{result['label1_8pct'].sum()}"
+                f"label1_8pct:{result['label1_8pct'].sum()} | "
+                f"label_5d_30pct:{result['label_5d_30pct'].sum()}"
             )
         return result

@@ -16,7 +16,7 @@ from utils.common_tools import (
     get_limit_list_ths, get_limit_step, get_limit_cpt_list, get_index_daily,
     get_market_total_volume,
     get_st_set, get_stock_list_date_map,
-    get_hp_cycle_slice_avg_gain, get_liquid_stock_stats,
+    get_hp_cycle_slice_avg_gain, get_active_stock_stats,
     get_kline_day_range,
 )
 from data.data_cleaner import data_cleaner
@@ -298,7 +298,7 @@ class FeatureDataBundle:
         预加载高位股情绪 + 市场广度因子所需的扩展数据。
 
         分两轮 IO：
-          Round 1（并发）：全市场关键日期日线、ST集合、上市日期、120日切片统计、液态股统计
+          Round 1（并发）：全市场关键日期日线、ST集合、上市日期、120日切片统计、活跃股统计
           Round 2（顺序）：识别高位股基础池后，针对性拉取其近5日日线（用于 MA5 乖离率计算）
 
         hp_ext_cache 结构：
@@ -310,7 +310,7 @@ class FeatureDataBundle:
           hp_base_pool           : 高位股基础池 DataFrame（全市场前1%，约50只）
           hp_base_pool_recent5d  : 基础池近5日日线（用于 MA5 + 量比计算）
           hp_cycle_slices        : 12个切片的高位股平均涨幅 List[float]（索引0=D0切片）
-          liquid_stats           : 液态股广度统计 Dict
+          active_stats           : 活跃股广度统计 Dict
           key_dates              : 各关键日期 Dict（d0/d1/d4/d10/d21/d60）
         """
         try:
@@ -362,10 +362,10 @@ class FeatureDataBundle:
                 fut_st     = pool.submit(get_st_set,               td)
                 fut_ldmap  = pool.submit(get_stock_list_date_map)
 
-                # 液态股统计（需要 d60 和 d1）
+                # 活跃股统计（需要 d60 和 d1）
                 if d60_date:
                     fut_liquid = pool.submit(
-                        get_liquid_stock_stats, d0_date, d4_date, d60_date, d1_date
+                        get_active_stock_stats, d0_date, d4_date, d60_date, d1_date
                     )
                 else:
                     fut_liquid = None
@@ -387,7 +387,7 @@ class FeatureDataBundle:
                 market_d21   = _df_or_empty(fut_d21.result())
                 st_set       = fut_st.result()     or set()
                 ldmap        = fut_ldmap.result()  or {}
-                liquid_stats = fut_liquid.result() if fut_liquid else {}
+                active_stats = fut_liquid.result() if fut_liquid else {}
 
                 hp_cycle_slices: List[float] = [0.0] * 12
                 for fut, k in slice_futures.items():
@@ -402,7 +402,7 @@ class FeatureDataBundle:
                 "market_all_d21":   market_d21,
                 "st_set":           st_set,
                 "list_date_map":    ldmap,
-                "liquid_stats":     liquid_stats,
+                "active_stats":     active_stats,
                 "hp_cycle_slices":  [g for g in hp_cycle_slices if g is not None],
                 "d21_date_str":     d21_date.replace("-", ""),
             })
@@ -432,7 +432,7 @@ class FeatureDataBundle:
                 f"市场D0:{len(market_d0)}行 "
                 f"基础池:{len(base_pool)}只 高位股:{len(high_pos)}只 "
                 f"切片统计:{len(self.hp_ext_cache['hp_cycle_slices'])}个 "
-                f"液态股:{liquid_stats.get('liquid_total', 0)}只"
+                f"活跃股:{active_stats.get('active_total', 0)}只"
             )
 
         except Exception as e:

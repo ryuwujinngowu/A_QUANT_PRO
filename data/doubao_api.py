@@ -122,12 +122,6 @@ def call_doubao_api(prompt: str) -> dict:
             }
 
             logger.info(f"本次API调用Token消耗：输入{prompt_tokens} | 输出{completion_tokens} | 总计{total_tokens}")
-            update_token_usage(
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-                total_tokens=total_tokens,
-                token_stat=CONFIG["token_stat"]
-            )
 
         return result
 
@@ -239,87 +233,3 @@ def get_stock_tags(stock_list: list, trade_date: str) -> dict:
         api_response["data"] = []
         return api_response
 
-# def group_stocks_by_concept(stock_tags: list) -> dict:
-#     """
-#     按概念自动聚类（A股板块分析）
-#     :param stock_tags: get_stock_tags返回的data字段（个股标签列表）
-#     :return: 板块聚类结果
-#     """
-#     prompt = f"""
-# 你是A股板块聚类分析师，严格按以下要求输出JSON，不要任何多余文字：
-# 1. 输入：个股题材标签列表 {json.dumps(stock_tags, ensure_ascii=False)}
-# 2. 输出格式（按同概念/同逻辑分组）：
-# {{
-#     "groups": [
-#         {{
-#             "group_name": "板块名称（≤10字）",
-#             "stock_codes": ["代码1", "代码2"],
-#             "logic_summary": "板块炒作逻辑（≤20字）"
-#         }}
-#     ]
-# }}
-# """
-#     return call_doubao_api(prompt)
-
-
-# ====================== 测试代码 ======================
-if __name__ == "__main__":
-    # 初始化Token统计文件（仅首次运行需要，后续注释）
-    init_token_file(file_path=CONFIG["token_usage_file"], force=False)
-
-    # 测试数据（模拟真实场景，包含3只股票）
-    test_stocks = [
-        {"ts_code": "002456.SZ", "name": "瑞芯微"},
-        {"ts_code": "600522.SH", "name": "中天科技"},
-        {"ts_code": "300123.SZ", "name": "太阳鸟"}
-    ]
-    test_date = "2026-02-13"
-
-    # 测试1：个股打标签（核心功能）
-    logger.info("===== 开始测试：个股批量打标签 =====")
-    logger.info(f"测试参数：日期={test_date}，股票列表={json.dumps(test_stocks, ensure_ascii=False)}")
-
-    # 调用打标签函数
-    tag_result = get_stock_tags(test_stocks, test_date)
-
-    # 分场景处理结果
-    if tag_result.get("error"):
-        # 场景1：调用/解析失败
-        logger.error(f"❌ 打标签失败：{tag_result['error']}")
-        # 打印原始文本（方便定位大模型返回格式问题）
-        if tag_result.get("raw_text"):
-            logger.error(f"📝 API返回原始文本：\n{tag_result['raw_text']}")
-    else:
-        # 场景2：调用成功，打印完整信息
-        logger.info("✅ 打标签成功，详细结果如下：")
-        # 打印API返回的原始文本（调试关键）
-        logger.info(f"📝 API返回原始文本：\n{tag_result['raw_text']}")
-        # 打印本地组装后的结构化JSON（格式化输出，易读）
-        logger.info(f"🔧 本地组装JSON结果：\n{json.dumps(tag_result['data'], ensure_ascii=False, indent=2)}")
-        # 打印本次Token消耗
-        logger.info(
-            f"💰 本次Token消耗：输入{tag_result['token_usage']['prompt_tokens']} | 输出{tag_result['token_usage']['completion_tokens']} | 总计{tag_result['token_usage']['total_tokens']}")
-
-    # 测试2：打印累计Token统计（验证累加功能）
-    logger.info("\n===== Token累计统计结果 =====")
-    total_data = get_token_usage(CONFIG["token_usage_file"])
-    logger.info(f"📊 累计调用次数：{total_data['call_count']}")
-    logger.info(f"📥 累计输入Token：{total_data['total_prompt_tokens']}")
-    logger.info(f"📤 累计输出Token：{total_data['total_completion_tokens']}")
-    logger.info(f"📈 累计总Token：{total_data['total_tokens']}")
-
-    # 成本估算（基于火山引擎最新单价）
-    cost_input = total_data['total_prompt_tokens'] * 0.005 / 1000  # 输入0.005元/千token
-    cost_output = total_data['total_completion_tokens'] * 0.009 / 1000  # 输出0.009元/千token
-    total_cost = cost_input + cost_output
-    logger.info(f"💸 累计调用成本（估算）：{total_cost:.6f} 元")
-    # # 测试2：板块聚类
-    # if tag_result.get("data"):
-    #     logger.info("===== 开始测试：板块聚类 =====")
-    #     group_result = group_stocks_by_concept(tag_result["data"])
-    #     if group_result.get("error"):
-    #         logger.error(f"聚类失败：{group_result['error']}")
-    #     else:
-    #         logger.info(f"聚类结果：{json.dumps(group_result['data'], ensure_ascii=False, indent=2)}")
-    #         logger.info(f"本次Token消耗：{group_result['token_usage']}")
-    #

@@ -150,38 +150,6 @@ def get_stock_concepts_batch(stock_batch: List[Dict], batch_index: int = 0) -> D
         logger.error(f"批次[{batch_index}] 解析失败：{str(e)}，原始文本：{raw_text}")
         return {"error": f"解析失败：{str(e)}", "data": []}
 
-#
-# def update_concept_tags_for_20_stocks():
-#     """
-#     【原有函数100%保留】批量更新20只股票的concept_tags字段，测试效果
-#     """
-#     logger.info("===== 开始更新20只股票的concept_tags =====")
-#     read_sql = "SELECT ts_code, name FROM stock_basic LIMIT 20"
-#     stocks = db.query(read_sql)
-#     if not stocks:
-#         logger.error("未读取到任何股票数据，终止更新")
-#         return
-#     logger.info(f"成功读取{len(stocks)}只股票：{[s['ts_code'] for s in stocks]}")
-#
-#     concept_result = get_stock_concepts_batch(stocks, batch_index=1)
-#     if concept_result.get("error") or not concept_result.get("data"):
-#         logger.error(f"批量获取概念失败，终止更新：{concept_result.get('error')}")
-#         return
-#
-#     update_sql = "UPDATE stock_basic SET concept_tags = %s WHERE ts_code = %s"
-#     params_list = [(item["concept_tags"], item["ts_code"]) for item in concept_result["data"]]
-#
-#     logger.info(f"准备批量更新{len(params_list)}条记录")
-#     affected_rows = db.batch_execute(update_sql, params_list)
-#
-#     if affected_rows is not None:
-#         logger.info(f"✅ 批量更新成功，影响行数：{affected_rows}")
-#         for item in concept_result["data"]:
-#             logger.info(f"[{item['ts_code']}] concept_tags: {item['concept_tags']}")
-#     else:
-#         logger.error("❌ 批量更新失败")
-
-
 def batch_update_with_single_fail_log(params_list: List[tuple]) -> int:
     """
     【核心新增】批量更新 + 单条失败时记录ERROR级别股票代码

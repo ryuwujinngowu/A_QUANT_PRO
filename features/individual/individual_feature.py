@@ -71,6 +71,8 @@ import pandas as pd
 from features.base_feature import BaseFeature
 from features.data_bundle import FeatureDataBundle
 from features.feature_registry import feature_registry
+from utils.common_tools import ensure_ths_daily_data
+from utils.db_utils import db
 from utils.log_utils import logger
 
 # ── 缩尾分位数 ──────────────────────────────────────────────
@@ -422,13 +424,16 @@ def _compute_behavioral_factors(
         lookback_dates_20d: List[str],
         daily_grouped: Dict[tuple, dict],
         hist_sh_pct_chg: Dict[str, float],
+        concept_pct_map: Optional[Dict[Tuple[str, str], float]] = None,
+        stock_concepts: Optional[List[str]] = None,
 ) -> Dict[str, float]:
     """
     d0 only 的 20 日回看行为因子：追高成功率、低吸成功率、个股强势因子。
 
     - 追高成功率：近20日中，「昨日涨幅>3%」的次日收盘>昨日均价的占比
     - 低吸成功率：近20日中，「昨日跌幅>3%」的次日收盘>昨日均价的占比
-    - 个股强势因子：近20日阳线（close>open）占比，指数下跌日权重×2
+    - 个股强势因子：近20日阳线（close>pre_close）加权占比
+        权重规则：大盘跌超0.1% → 1.5；个股涨幅>最高板块均涨幅×2 → 2（取最大值）
 
     「昨日均价」= prev_day.amount / (prev_day.volume * 100)，单位元/股
     均价计算失败时降级用 prev_day.close 作为成本参考。
@@ -479,10 +484,24 @@ def _compute_behavioral_factors(
             if next_positive:
                 dip_hits += 1.0
 
-        # ── 个股强势因子：阳线（close>open）加权占比 ─────────────
-        is_yang = curr_c > curr_o
-        sh_pct  = hist_sh_pct_chg.get(curr_date, 0.0)
-        weight  = 2.0 if sh_pct < 0.0 else 1.0
+        # ── 个股强势因子：阳线（close>pre_close）加权占比 ─────────
+        prev_close_val = float(prev_day.get("close", 0) or 0)
+        is_yang  = curr_c > prev_close_val if prev_close_val > 0 else False
+        sh_pct   = hist_sh_pct_chg.get(curr_date, 0.0)
+        curr_pct = float(curr_day.get("pct_chg", 0.0) or 0.0)
+
+        # 基础权重：大盘下跌超 0.1% → 1.5，否则 1.0
+        weight = 1.5 if sh_pct < -0.1 else 1.0
+
+        # 板块维度：个股涨幅 > 对应最强板块平均涨幅 × 2 → 权重升至 2.0
+        if concept_pct_map and stock_concepts:
+            max_concept_pct = max(
+                (concept_pct_map.get((c, curr_date), 0.0) for c in stock_concepts),
+                default=0.0,
+            )
+            if max_concept_pct > 0 and curr_pct > max_concept_pct * 2:
+                weight = 2.0
+
         strength_den += weight
         if is_yang:
             strength_num += weight
@@ -575,6 +594,49 @@ class IndividualFeature(BaseFeature):
         # 20d 历史指数涨跌幅（factor 11 用）
         hist_sh_pct_chg: Dict[str, float] = macro_cache.get("hist_sh_pct_chg", {})
 
+        # ── 板块涨幅映射（ths_daily + ths_member，个股强势因子板块维度用）────────────────────────────
+        # 来源：THS 同花顺板块指数日行情（pct_change），比 concept_tags 更准确鲜活
+        # 链路：ensure_ths_daily_data → DB 查 ths_member → DB 查 ths_daily → 构建映射
+        concept_pct_map: Dict[Tuple[str, str], float] = {}
+        stock_concepts_map: Dict[str, List[str]] = {}
+        try:
+            # Step 1: 确保 lookback_20d 每日的板块行情数据已入库
+            for _d in lookback_20d:
+                ensure_ths_daily_data(_d)
+
+            # Step 2: 批量查 ths_member，获取 target_codes 所属板块代码
+            _ph_c = ", ".join(["%s"] * len(target_codes))
+            _member_rows = db.query(
+                f"SELECT ts_code, con_code FROM ths_member "
+                f"WHERE con_code IN ({_ph_c}) AND is_new = 'Y'",
+                params=tuple(target_codes),
+            ) or []
+            _concept_codes_needed: set = set()
+            for _r in _member_rows:
+                stock_concepts_map.setdefault(_r["con_code"], []).append(_r["ts_code"])
+                _concept_codes_needed.add(_r["ts_code"])
+
+            # Step 3: 批量查 ths_daily，获取板块各日涨幅
+            if _concept_codes_needed:
+                _date_params = [
+                    _d if "-" in _d else f"{_d[:4]}-{_d[4:6]}-{_d[6:]}"
+                    for _d in lookback_20d
+                ]
+                _ph_d  = ", ".join(["%s"] * len(_date_params))
+                _ph_cc = ", ".join(["%s"] * len(_concept_codes_needed))
+                _daily_rows = db.query(
+                    f"SELECT ts_code, trade_date, pct_change FROM ths_daily "
+                    f"WHERE trade_date IN ({_ph_d}) AND ts_code IN ({_ph_cc})",
+                    params=tuple(_date_params) + tuple(_concept_codes_needed),
+                ) or []
+                for _r in _daily_rows:
+                    _td = str(_r.get("trade_date", ""))
+                    if "-" not in _td:
+                        _td = f"{_td[:4]}-{_td[4:6]}-{_td[6:]}"
+                    concept_pct_map[(_r["ts_code"], _td)] = float(_r.get("pct_change", 0.0) or 0.0)
+        except Exception as _e:
+            logger.warning(f"[Individual] ths_daily 板块涨幅映射构建失败（非致命）：{_e}")
+
         # ── 预计算 D0 分钟线 peak 缓存（性能关键）────────────────
         # _compute_follower_score 需要所有股票的 peak 数据做跨股比较。
         # 若在每只股票的循环内按需解析 peer 的分钟线，代价为 O(N²×T)。
@@ -655,7 +717,9 @@ class IndividualFeature(BaseFeature):
             # 因子 9/10/11：20 日行为因子
             try:
                 beh = _compute_behavioral_factors(
-                    ts_code, trade_date, lookback_20d, daily_grouped, hist_sh_pct_chg
+                    ts_code, trade_date, lookback_20d, daily_grouped, hist_sh_pct_chg,
+                    concept_pct_map=concept_pct_map,
+                    stock_concepts=stock_concepts_map.get(ts_code),
                 )
                 row["stock_chase_success_d0"] = beh["chase_success"]
                 row["stock_dip_success_d0"]   = beh["dip_success"]
