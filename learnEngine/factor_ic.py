@@ -228,6 +228,9 @@ def calc_factor_ic_report(
     """
     if factor_cols is None:
         _exclude = set(exclude_cols or []) | {return_col, date_col}
+        # 自动过滤所有 label* 列，防止标签列被当作因子计算 IC
+        _label_cols = {c for c in df.columns if c.startswith("label")}
+        _exclude |= _label_cols
         factor_cols = [c for c in df.columns
                        if c not in _exclude and pd.api.types.is_numeric_dtype(df[c])]
 
@@ -539,6 +542,9 @@ def calc_full_factor_report(
     """
     if factor_cols is None:
         _exclude = set(exclude_cols or []) | {return_col, date_col}
+        # 自动过滤所有 label* 列，防止标签列被当作因子计算 IC
+        _label_cols = {c for c in df.columns if c.startswith("label")}
+        _exclude |= _label_cols
         factor_cols = [c for c in df.columns
                        if c not in _exclude and pd.api.types.is_numeric_dtype(df[c])]
 
@@ -640,7 +646,7 @@ if __name__ == "__main__":
     """
     warnings.filterwarnings("ignore")
 
-    CSV_PATH = os.path.join(os.getcwd(), r"history\csv\train_dataset_final.csv")
+    CSV_PATH = os.path.join(os.getcwd(), r"datasets/train_dataset_20260329.csv")
     RETURN_COL = "label1"
     EXCLUDE_COLS = [
         "stock_code", "trade_date", "label1", "label2",
