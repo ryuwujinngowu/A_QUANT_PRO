@@ -14,17 +14,17 @@ _BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # 项�
 # 路径
 # ═══════════════════════════════════════════════
 TRAIN_CSV_PATH = os.path.join(
-    _BASE_DIR, "learnEngine", "datasets", "train_dataset_final.csv"
+    _BASE_DIR, "learnEngine", "datasets", "train_dataset_recent_2411_2602.csv"
 )
 SELECTED_FEATURES_PATH = os.path.join(
-    _BASE_DIR, "learnEngine", "search_results", "selected_features.json"
+    _BASE_DIR, "learnEngine", "search_results", "selected_features_v6.3.json"
 )
 MODEL_DIR = os.path.join(_BASE_DIR, "model")
 
 # ═══════════════════════════════════════════════
 # 训练基础配置
 # ═══════════════════════════════════════════════
-MODEL_VERSION = "v5.2_auc_first"
+MODEL_VERSION = "v6.3_recent_2411_2602_p30"
 TARGET_LABEL  = "label1"   # 切换此处即可更换训练目标（见下方可选值）
 # 可选 TARGET_LABEL 值：
 #   "label1"             — D+1 日内涨幅 >= 5%（主模型）

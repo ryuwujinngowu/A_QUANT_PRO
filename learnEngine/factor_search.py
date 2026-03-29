@@ -66,9 +66,9 @@ VAL_RATIO = 0.2
 
 # 非特征列（绝对排除，不参与搜索）
 _META_COLS = frozenset([
-    "stock_code", "trade_date",
-    "label1", "label2",
-    "label_raw_return",
+    "stock_code", "trade_date",'label_d1_pct_chg','label_d1_high'
+    "label1", "label2","label1_3pct",'label1_8pct','label_raw_return'
+    "label_raw_return",'label_d2_return','label_d1_low'
     "sector_name", "top3_sectors",
 ])
 

@@ -70,9 +70,9 @@ class THSHotFeature(BaseFeature):
         date_params = [f"{d[:4]}-{d[4:6]}-{d[6:]}" for d in date_strs]
         placeholders = ", ".join(["%s"] * len(date_params))
         sql = (
-            f"SELECT ts_code, trade_date, rank FROM ths_hot "
-            f"WHERE trade_date IN ({placeholders}) AND rank <= {_TOP_N} "
-            f"ORDER BY trade_date, rank"
+            f"SELECT ts_code, trade_date, `rank` FROM ths_hot "
+            f"WHERE trade_date IN ({placeholders}) AND `rank` <= {_TOP_N} "
+            f"ORDER BY trade_date, `rank`"
         )
         try:
             rows = db.query(sql, tuple(date_params)) or []

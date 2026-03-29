@@ -250,6 +250,14 @@ class FactorSelector:
         logger.info(f"加载训练集: {self.csv_path}")
         df = pd.read_csv(self.csv_path)
 
+        # 过滤 stk_factor_pro API 超时导致的中性值污染行
+        # 特征：rsi_6==50 & kdj_k==50 & cci==0 → 74列全为占位值，非真实信号
+        if {'rsi_6', 'kdj_k', 'cci'}.issubset(df.columns):
+            bad_mask = (df['rsi_6'] == 50.0) & (df['kdj_k'] == 50.0) & (df['cci'] == 0.0)
+            if bad_mask.sum() > 0:
+                logger.info(f"过滤 stk_factor_pro 中性值污染行: {bad_mask.sum()} 行")
+                df = df[~bad_mask].reset_index(drop=True)
+
         # 自动发现：排除非特征列，只保留数值型
         self._all_features = [
             c for c in df.columns
@@ -383,8 +391,8 @@ class FactorSelector:
         _df_train = df.iloc[:int(len(df) * (1 - val_ratio))]
         _pos = int(_df_train[target].sum())
         _neg = int(len(_df_train) - _pos)
-        _spw = round(_neg / max(_pos, 1), 3)
-        logger.info(f"[Stage 3] scale_pos_weight={_spw:.2f}（数据自然正负比 neg={_neg}/pos={_pos}）")
+        _spw = min(round(_neg / max(_pos, 1), 3), 4.0)  # cap 4.0，与 model.py 默认路径一致，防止过度激进
+        logger.info(f"[Stage 3] scale_pos_weight={_spw:.2f}（数据自然正负比 neg={_neg}/pos={_pos}，已 cap 4.0）")
 
         def objective(trial: optuna.Trial) -> float:
             # ── 因子子集选择（每个因子独立 on/off）──

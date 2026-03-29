@@ -74,7 +74,7 @@ from features.emotion.hp_style_feature import HPStyleFeature               # noq
 from features.macro.hp_cycle_feature import HPCycleFeature                 # noqa: F401  # 120日高位股涨幅周期（全局因子）
 from features.macro.active_stats_feature import ActiveStatsFeature         # noqa: F401  # 活跃股60日突破 + 高开低走（全局因子）
 from features.emotion.ths_hot_feature import THSHotFeature                 # noqa: F401  # 同花顺热股榜 d0~d4 排名归一化得分（个股因子）
-from features.individual.moneyflow_feature import MoneyflowFeature         # noqa: F401  # 个股资金面因子：大单/超大单/主力/小单净占比 d0~d4（个股因子，双源融合）
+# from features.individual.moneyflow_feature import MoneyflowFeature         # noqa: F401  # 个股资金面因子：大单/超大单/主力/小单净占比 d0~d4（个股因子，双源融合）
 
 __all__ = [
     "FeatureEngine", "FeatureDataBundle",
@@ -82,7 +82,8 @@ __all__ = [
     # "StkFactorProFeature",  # 模块预留，暂未实现
     "MarketMacroFeature", "IndividualFeature",
     "HPStageFeature", "HPStyleFeature", "HPCycleFeature", "ActiveStatsFeature",
-    "THSHotFeature", "MoneyflowFeature",
+    "THSHotFeature",
+    # "MoneyflowFeature",
     "feature_registry",
 ]
 

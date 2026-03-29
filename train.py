@@ -109,6 +109,13 @@ def load_and_prepare(csv_path: str, target_label: str):
     df = pd.read_csv(csv_path)
     logger.info(f"加载训练集: {csv_path} | 行数: {len(df)} | 列数: {len(df.columns)}")
 
+    # 过滤 stk_factor_pro API 超时导致的中性值污染行
+    if {'rsi_6', 'kdj_k', 'cci'}.issubset(df.columns):
+        bad_mask = (df['rsi_6'] == 50.0) & (df['kdj_k'] == 50.0) & (df['cci'] == 0.0)
+        if bad_mask.sum() > 0:
+            logger.info(f"过滤 stk_factor_pro 中性值污染行: {bad_mask.sum()} 行")
+            df = df[~bad_mask].reset_index(drop=True)
+
     if target_label not in df.columns:
         raise ValueError(f"目标标签列 '{target_label}' 不存在，可用列: {df.columns.tolist()}")
 

@@ -239,8 +239,8 @@ class DBConnector:
             else:
                 sql = f"INSERT INTO {table_name} ({sql_columns}) VALUES ({placeholders})"
 
-            df = df.where(pd.notnull(df), None)  # NaN/NaT → None → SQL NULL
-            data = list(df.itertuples(index=False, name=None))  # ✅ 内存优化
+            # 先转 object dtype（保证 None 不被还原为 nan），再 where 替换 NaN→None
+            data = df.astype(object).where(pd.notnull(df), None).values.tolist()
 
             CHUNK = 1000
 
