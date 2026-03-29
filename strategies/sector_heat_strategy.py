@@ -1,16 +1,20 @@
 """
-板块热度选股尾盘买入策略（V2 — XGBoost 驱动版）
+板块热度选股开盘买入策略（V3 — XGBoost 驱动版，无未来函数）
 ==================================================
 核心逻辑：
-  D 日：SectorHeatFeature 选出 Top3 板块
-       → 候选池筛选（ST / 板块 / 涨停基因 / 低流动性过滤）
-       → FeatureEngine 计算全量因子
+  D-1 日收盘后（回测中以 D 日开盘前模拟）：
+       → SectorHeatFeature 以 D-1 日为基准选出 Top3 板块
+       → 候选池筛选：以 D-1 日行情（ST / 板块 / 涨停基因 / 低流动性 / 昨日涨停封板）
+       → FeatureDataBundle(trade_date=D-1) 计算全量因子（零未来函数）
        → XGBoost predict_proba 排序选出 Top-K
-       → 收盘价（'close'）尾盘买入
+       → 信号返回 buy_type='open'
 
-  D+2：开盘卖出（sell_type='open'），持股不超过 1 个交易日
+  D 日：开盘价买入（buy_type='open'）
+  D+1 日：收盘价卖出（sell_type='close'），持股 1 个交易日
 
-过滤逻辑与 dataset.py 完全对齐，保证训练/推断口径一致。
+关键原则：
+  - 所有特征/因子均基于 D-1 日及更早数据，无未来函数
+  - 过滤逻辑与 dataset.py 完全对齐，保证训练/推断口径一致
 """
 import os
 import pickle
@@ -60,7 +64,7 @@ class SectorHeatStrategy(BaseStrategy):
 
     def __init__(self):
         super().__init__()
-        self.strategy_name = "板块热度XGBoost选股尾盘买入策略"
+        self.strategy_name = "板块热度XGBoost盘前选股，开盘买入策略"
         self.strategy_params = {
             "buy_top_k":   6,        # 每日最多买入 N 只
             "sell_type":   "close",   # D+1 卖出类型：open=次日开盘，close=次日收盘
@@ -68,7 +72,7 @@ class SectorHeatStrategy(BaseStrategy):
             "load_minute": True,     # 是否加载分钟线（保证特征与训练口径一致）
             "model_path": os.path.join(
                 os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                "model", "sector_heat_xgb_v5.2_auc_first.pkl",
+                "model", "sector_heat_xgb_model.pkl",
             ),
         }
 
@@ -167,7 +171,8 @@ class SectorHeatStrategy(BaseStrategy):
         self, trade_date: str, daily_df: pd.DataFrame
     ) -> Dict[str, str]:
         """
-        返回 {ts_code: 'close'}（尾盘买入）
+        返回 {ts_code: 'open'}（次日开盘买入）
+        所有特征/筛选均基于 D-1（前一交易日）数据，无未来函数。
         返回空 dict = 当日不买入
         """
         # ── 模型加载 ──────────────────────────────────────────────────────
@@ -175,9 +180,23 @@ class SectorHeatStrategy(BaseStrategy):
             logger.error(f"{trade_date} 模型未就绪，跳过买入")
             return {}
 
-        # ── Step 1: Top3 板块 + 轮动分 ────────────────────────────────────
+        # ── 获取前一交易日（D-1）────────────────────────────────────────────
+        # 所有特征/候选池均基于 D-1，确保 D 日开盘前无未来函数
         try:
-            top3_result  = self._sector_heat.select_top3_hot_sectors(trade_date)
+            d_date = datetime.strptime(trade_date, "%Y-%m-%d")
+            start_lookback = (d_date - timedelta(days=20)).strftime("%Y-%m-%d")
+            all_dates = get_trade_dates(start_lookback, trade_date)
+            if len(all_dates) < 2:
+                logger.error(f"{trade_date} 无法获取前一交易日，跳过买入")
+                return {}
+            prev_trade_date = all_dates[-2]  # D-1
+        except Exception as e:
+            logger.error(f"{trade_date} 获取前一交易日失败: {e}")
+            return {}
+
+        # ── Step 1: Top3 板块 + 轮动分（基于 D-1 数据）────────────────────
+        try:
+            top3_result  = self._sector_heat.select_top3_hot_sectors(prev_trade_date)
             top3_sectors = top3_result["top3_sectors"]
             adapt_score  = top3_result["adapt_score"]
         except Exception as e:
@@ -185,10 +204,10 @@ class SectorHeatStrategy(BaseStrategy):
             return {}
 
         if not top3_sectors:
-            logger.warning(f"{trade_date} Top3 板块为空，跳过买入")
+            logger.warning(f"{trade_date} Top3 板块为空（基于 {prev_trade_date}），跳过买入")
             return {}
 
-        logger.info(f"{trade_date} Top3={top3_sectors} | adapt_score={adapt_score}")
+        logger.info(f"{trade_date} Top3={top3_sectors} | adapt_score={adapt_score} (基于 {prev_trade_date})")
         # if adapt_score >=50:
         #     logger.warning(f"{adapt_score} 轮动过快")
         #     return {}
@@ -199,18 +218,25 @@ class SectorHeatStrategy(BaseStrategy):
         except Exception as e:
             logger.warning(f"{trade_date} ST 数据入库失败（忽略）: {e}")
 
-        # ── Step 2: 候选池构建 ────────────────────────────────────────────
+        # ── Step 2: 候选池构建（D-1 行情数据；ST/涨停基因截止 D 日）─────────
+        # 注意：trade_date(D) 用于 ST 过滤和涨停基因截止日（含 D-1），
+        #       prev_daily_df(D-1) 用于流动性/涨停封板过滤，确保无未来函数。
+        prev_daily_df = get_daily_kline_data(prev_trade_date)
+        if prev_daily_df.empty:
+            logger.warning(f"{trade_date} 无 {prev_trade_date} 日线数据，跳过买入")
+            return {}
+
         sector_candidate_map, target_ts_codes = self._build_candidate_pool(
-            trade_date, daily_df, top3_sectors
+            trade_date, prev_daily_df, top3_sectors
         )
         if not target_ts_codes:
             logger.warning(f"{trade_date} 候选池为空，跳过买入")
             return {}
 
-        # ── Step 3: 特征计算（与训练口径完全一致）────────────────────────────
+        # ── Step 3: 特征计算（基于 D-1，与训练口径一致）──────────────────────
         try:
             bundle = FeatureDataBundle(
-                trade_date=trade_date,
+                trade_date=prev_trade_date,
                 target_ts_codes=target_ts_codes,
                 sector_candidate_map=sector_candidate_map,
                 top3_sectors=top3_sectors,
@@ -287,8 +313,8 @@ class SectorHeatStrategy(BaseStrategy):
         #     logger.info(f"{trade_date} 风险过滤后候选为空，跳过买入")
         #     return {}
 
-        # 返回格式 {ts_code: 'close'}，引擎以尾盘收盘价买入
-        buy_signal_map = {row["stock_code"]: "close" for _, row in selected.iterrows()}
+        # 返回格式 {ts_code: 'open'}，引擎以次日开盘价买入（信号基于 D-1 数据，无未来函数）
+        buy_signal_map = {row["stock_code"]: "open" for _, row in selected.iterrows()}
         logger.info(
             f"{trade_date} 最终买入 {len(buy_signal_map)} 只: "
             + " | ".join(
@@ -433,7 +459,8 @@ class SectorHeatStrategy(BaseStrategy):
 
     def _filter_limit_up_on_d0(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        过滤 D 日涨停封板（close ≥ limit_up - 0.01，尾盘买不进去）
+        过滤 D-1 日涨停封板（close ≥ limit_up - 0.01）
+        D-1 收盘涨停的股票次日开盘大概率高开/封板，开盘买入风险高。
         保守策略：价格数据异常时保留（avoid 误过滤）
         """
         if df.empty:
