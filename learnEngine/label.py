@@ -24,11 +24,15 @@ label 定义（完整版）：
     label_d2_return     : (D+2 close - D+1 open) / D+1 open，持有2日总收益
     label_5d_30pct      : D+1~D+5 任意交易日盘中高价 >= D0 close × 1.30 → 1，否则 0
                           D+1 停牌 → 跳过（同 label1）；D+2~D+5 若无数据则中断扫描（保守标0）
+    label_d1_open_up    : D+1 开盘价 > D 开盘价 → 1，否则 0
+                          对齐策略口径：D 开盘买入，D+1 高开代表次日持有有利起点
+                          D 无开盘价数据 → None
 
 过滤逻辑：
     - D+1 停牌（无数据）→ 跳过，不作为负样本
     - D+2 无数据 → 涉及 D+2 的标签填 None（dataset.py 不 dropna 这些列）
     - D close 无法获取 → label_open_gap 填 None
+    - D open 无法获取 → label_d1_open_up 填 None
 """
 import sys
 import os
@@ -152,10 +156,12 @@ class LabelEngine:
             _pct = d1_row.get("pct_chg")
             label_d1_pct_chg = float(_pct) if _pct is not None else None
 
-            # ── 开盘溢价（需要 D close）──────────────────────────────────────
+            # ── 开盘溢价 + D0 开盘价（需要 D 日行情）────────────────────────
             d0_row   = d0_map.get(ts_code)
             d0_close = float(d0_row.get("close", 0) or 0) if d0_row is not None else 0
-            label_open_gap = round((d1_open - d0_close) / d0_close, 6) if d0_close > 0 else None
+            d0_open  = float(d0_row.get("open",  0) or 0) if d0_row is not None else 0
+            label_open_gap   = round((d1_open - d0_close) / d0_close, 6) if d0_close > 0 else None
+            label_d1_open_up = (1 if d1_open > d0_open else 0) if d0_open > 0 else None
 
             # ── label_5d_30pct：D+1~D+5 任意盘中 high >= D0_close × 1.30 ──
             # 基准：D0 收盘价；触及目标价即为正样本，盘中高价触及也算
@@ -189,6 +195,7 @@ class LabelEngine:
                 "label_d1_pct_chg":     label_d1_pct_chg,
                 "label_d2_return":      label_d2_return,
                 "label_5d_30pct":       label_5d_30pct,
+                "label_d1_open_up":     label_d1_open_up,
             })
 
         result = pd.DataFrame(rows)
