@@ -19,11 +19,47 @@ TRAIN_CSV_PATH = os.path.join(
 SELECTED_FEATURES_PATH = os.path.join(
     _BASE_DIR, "learnEngine", "search_results", "selected_features_v6.4.json"
 )
+# T7: frozen split spec 路径（与 TRAIN_CSV_PATH 同目录，由 dataset.py 自动生成）
+SPLIT_SPEC_PATH = os.path.join(
+    _BASE_DIR, "learnEngine", "datasets", "split_spec.json"
+)
 MODEL_DIR = os.path.join(_BASE_DIR, "model")
+
+# ═══════════════════════════════════════════════
+# T11: 模型产物目录结构约定
+# ═══════════════════════════════════════════════
+#
+# 目录规范：
+#   model/<strategy_id>/archive/<version>/  ← 训练写入（只追加，不覆盖）
+#   model/<strategy_id>/runtime/            ← 推理读取（人工验证后手动晋升）
+#
+# 原则：
+#   - 训练脚本只写 archive，不碰 runtime
+#   - runtime 只接受人工手动 cp 过来的已验证模型
+#   - 同一 strategy_id 下不同 version 互不干扰
+
+def get_archive_dir(strategy_id: str, version: str) -> str:
+    """返回指定策略+版本的 archive 目录（不自动创建）。"""
+    return os.path.join(MODEL_DIR, strategy_id, "archive", version)
+
+def get_archive_model_path(strategy_id: str, version: str) -> str:
+    """返回 archive 模型文件路径（.pkl）。"""
+    return os.path.join(get_archive_dir(strategy_id, version), "model.pkl")
+
+def get_runtime_dir(strategy_id: str) -> str:
+    """返回指定策略的 runtime 目录。"""
+    return os.path.join(MODEL_DIR, strategy_id, "runtime")
+
+def get_runtime_model_path(strategy_id: str) -> str:
+    """返回 runtime 模型文件路径（推理层读取此路径）。"""
+    return os.path.join(get_runtime_dir(strategy_id), "model.pkl")
 
 # ═══════════════════════════════════════════════
 # 训练基础配置
 # ═══════════════════════════════════════════════
+# T9: 训练时所用的策略 ID（None = 全策略训练池，不过滤）
+STRATEGY_ID   = "sector_heat"   # 当前单策略训练时设置；全策略多模型时改为 None 并逐策略遍历
+
 MODEL_VERSION = "v6.4_recent_2411_2602_3pct"
 TARGET_LABEL  = "label1_3pct"   # 切换此处即可更换训练目标（见下方可选值）
 # 可选 TARGET_LABEL 值：
@@ -51,6 +87,8 @@ EXCLUDE_COLS = [
     "label_d1_pct_chg", "label_d2_return",
     # 元数据 / 辅助列（非因子，不进入训练）
     "sector_name", "top3_sectors",
+    # T6 全局训练池 schema 新增（不进入特征矩阵）
+    "sample_id", "strategy_id", "strategy_name", "feature_trade_date",
 ]
 
 # ═══════════════════════════════════════════════
@@ -89,3 +127,11 @@ XGB_REG_ALPHA_RANGE        = (0.0, 2.0)
 XGB_REG_LAMBDA_RANGE       = (0.5, 3.0)
 # scale_pos_weight 不再由 Optuna 搜索，改为训练时按数据自然正负比自动计算（neg/pos）
 # 这样模型有足够的"开仓勇气"，同时不人为偏置
+
+# ═══════════════════════════════════════════════
+# Factor selector 自动运行控制
+# ═══════════════════════════════════════════════
+FACTOR_SELECTOR_FORCE_REFRESH = False   # True = 每次训练强制重跑 selector（耗时）
+AUTO_RUN_FACTOR_SELECTOR      = False   # True = 无 selected_features.json 时自动补跑
+FACTOR_SELECTOR_STAGE         = "all"   # "all" / "12" / "3"
+REQUIRE_SELECTED_FEATURES     = False   # True = 无 selected_features.json 时报错拒绝训练

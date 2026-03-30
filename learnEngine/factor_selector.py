@@ -57,17 +57,32 @@ def _time_split(
     features: List[str],
     target: str,
     val_ratio: float,
+    split_spec: Optional[Dict] = None,
 ):
-    """按 trade_date 严格时序切分，返回 (X_tr, X_val, y_tr, y_val)。"""
+    """
+    按 trade_date 严格时序切分，返回 (X_tr, X_val, y_tr, y_val)。
+
+    T8: 优先使用 frozen split_spec（按日期边界），无 spec 时降级用 val_ratio 按行切。
+    T8: 去重键改为 sample_id（存在时），兼容旧数据的 stock_code+trade_date 去重。
+    """
+    _dedup_key = ["sample_id"] if "sample_id" in df.columns else ["stock_code", "trade_date"]
     df = (
         df.dropna(subset=[target])
-        .drop_duplicates(subset=["stock_code", "trade_date"])
+        .drop_duplicates(subset=_dedup_key)
         .sort_values("trade_date")
         .reset_index(drop=True)
     )
-    split = int(len(df) * (1 - val_ratio))
     X = df[features].fillna(0).replace([np.inf, -np.inf], 0)
     y = df[target].astype(int).values
+
+    if split_spec:
+        from learnEngine.split_spec import apply_split_spec
+        tr_df, val_df = apply_split_spec(df, split_spec)
+        tr_idx  = tr_df.index
+        val_idx = val_df.index
+        return X.loc[tr_idx], X.loc[val_idx], y[tr_idx], y[val_idx]
+
+    split = int(len(df) * (1 - val_ratio))
     return X.iloc[:split], X.iloc[split:], y[:split], y[split:]
 
 
@@ -115,16 +130,20 @@ def _train_eval(
     min_top_k_pos: int,
     scale_pos_weight: float = 1.0,
     n_cv_folds: int = 1,
+    split_spec: Optional[Dict] = None,
 ) -> Dict:
     """
     时间序列 CV 训练评估（n_cv_folds>1 时对多个时间窗口取均值）。
 
     评分：score = 0.6 × AUC + 0.4 × Precision@K（AUC主导，保证开仓勇气）
     CV 的意义：防止 Optuna 过拟合到单一验证期的市场行情，泛化更好。
+    T8: 有 split_spec 时使用 frozen 日期边界切分；去重键改为 sample_id。
     """
+    # T8: dedup by sample_id if available
+    _dedup_key = ["sample_id"] if "sample_id" in df.columns else ["stock_code", "trade_date"]
     df_s = (
         df.dropna(subset=[target])
-        .drop_duplicates(subset=["stock_code", "trade_date"])
+        .drop_duplicates(subset=_dedup_key)
         .sort_values("trade_date")
         .reset_index(drop=True)
     )
@@ -135,10 +154,20 @@ def _train_eval(
     X_all = df_s[features].fillna(0).replace([np.inf, -np.inf], 0)
     y_all = df_s[target].astype(int).values
 
-    if n_cv_folds <= 1:
+    # T8: frozen split spec 优先（单折，日期边界冻结）
+    if split_spec and n_cv_folds <= 1:
+        from learnEngine.split_spec import apply_split_spec
+        tr_df, val_df = apply_split_spec(df_s, split_spec)
+        tr_idx  = np.array(tr_df.index)
+        val_idx = np.array(val_df.index)
+        folds = [(tr_idx, val_idx)]
+        _use_spec_fold = True
+    elif n_cv_folds <= 1:
         split = int(n * (1 - val_ratio))
         folds = [(slice(None, split), slice(split, None))]
+        _use_spec_fold = False
     else:
+        _use_spec_fold = False
         # 扩展窗口 CV：最后一折 = 实际部署折（训练80%，验证最后20%）
         # 前 n-1 折覆盖更早的时间段，让 Optuna 感知跨时间段泛化能力
         # 例如 val_ratio=0.2, n_cv_folds=3:
@@ -158,8 +187,13 @@ def _train_eval(
     scores, aucs, paks = [], [], []
     last_model = None
     for tr_sl, val_sl in folds:
-        X_tr, X_val = X_all.iloc[tr_sl], X_all.iloc[val_sl]
-        y_tr, y_val = y_all[tr_sl], y_all[val_sl]
+        # T8: spec 折使用 .loc（整数 index 数组），其余用 .iloc（slice）
+        if _use_spec_fold:
+            X_tr, X_val = X_all.loc[tr_sl], X_all.loc[val_sl]
+            y_tr, y_val = y_all[tr_sl], y_all[val_sl]
+        else:
+            X_tr, X_val = X_all.iloc[tr_sl], X_all.iloc[val_sl]
+            y_tr, y_val = y_all[tr_sl], y_all[val_sl]
         if len(X_tr) < 50 or len(X_val) < 20:
             continue
         res = _single_fold_eval(X_tr, X_val, y_tr, y_val,
@@ -199,6 +233,10 @@ class FactorSelector:
         csv_path:         Optional[str]   = None,
         target:           Optional[str]   = None,
         val_ratio:        Optional[float] = None,
+        # T8: 按 strategy_id 过滤（None = 使用全部数据）
+        strategy_id:      Optional[str]   = None,
+        # T8: frozen split spec 路径（None = 降级用 val_ratio 按行切）
+        split_spec_path:  Optional[str]   = None,
         # Stage 1
         ic_min_icir:      Optional[float] = None,
         ic_min_win_rate:  Optional[float] = None,
@@ -219,6 +257,9 @@ class FactorSelector:
         self.csv_path        = _v(csv_path,        cfg.TRAIN_CSV_PATH)
         self.target          = _v(target,           cfg.TARGET_LABEL)
         self.val_ratio       = _v(val_ratio,        cfg.VAL_RATIO)
+        # T8
+        self.strategy_id     = strategy_id  # None = 不过滤（全策略训练池）
+        self.split_spec_path = _v(split_spec_path, cfg.SPLIT_SPEC_PATH)
         self.ic_min_icir     = _v(ic_min_icir,      cfg.IC_MIN_ICIR)
         self.ic_min_win_rate = _v(ic_min_win_rate,  cfg.IC_MIN_WIN_RATE)
         self.ic_max_pvalue   = _v(ic_max_pvalue,    cfg.IC_MAX_PVALUE)
@@ -233,11 +274,12 @@ class FactorSelector:
         self._df:           Optional[pd.DataFrame] = None
         self._all_features: List[str]              = []
         self._icir_map:     Dict[str, float]       = {}  # Stage 2 排序用
+        self._split_spec:   Optional[Dict]         = None  # T8: frozen split
 
     # ─── 数据加载 ────────────────────────────────────────────────────────
 
     def _load(self) -> pd.DataFrame:
-        """懒加载 CSV，自动发现所有因子列（排除 EXCLUDE_COLS）。"""
+        """懒加载 CSV；T8 新增：strategy_id 过滤 + split spec 加载。"""
         if self._df is not None:
             return self._df
 
@@ -251,22 +293,56 @@ class FactorSelector:
         df = pd.read_csv(self.csv_path)
 
         # 过滤 stk_factor_pro API 超时导致的中性值污染行
-        # 特征：rsi_6==50 & kdj_k==50 & cci==0 → 74列全为占位值，非真实信号
         if {'rsi_6', 'kdj_k', 'cci'}.issubset(df.columns):
             bad_mask = (df['rsi_6'] == 50.0) & (df['kdj_k'] == 50.0) & (df['cci'] == 0.0)
             if bad_mask.sum() > 0:
                 logger.info(f"过滤 stk_factor_pro 中性值污染行: {bad_mask.sum()} 行")
                 df = df[~bad_mask].reset_index(drop=True)
 
-        # 自动发现：排除非特征列，只保留数值型
+        # T8: 按 strategy_id 过滤（支持多策略训练池）
+        if self.strategy_id and "strategy_id" in df.columns:
+            before = len(df)
+            df = df[df["strategy_id"] == self.strategy_id].reset_index(drop=True)
+            logger.info(
+                f"[T8] strategy_id 过滤: '{self.strategy_id}' | "
+                f"{before} → {len(df)} 行"
+            )
+        elif self.strategy_id:
+            logger.warning(
+                f"[T8] strategy_id='{self.strategy_id}' 但训练集无 strategy_id 列，跳过过滤"
+            )
+
+        # T8: 加载 frozen split spec
+        if self.split_spec_path and os.path.exists(self.split_spec_path):
+            from learnEngine.split_spec import load_split_spec
+            try:
+                self._split_spec = load_split_spec(self.split_spec_path)
+                logger.info(
+                    f"[T8] Frozen split spec 加载: "
+                    f"train ≤ {self._split_spec['train_end_date']} | "
+                    f"val ≥ {self._split_spec['val_start_date']}"
+                )
+            except Exception as e:
+                logger.warning(f"[T8] split spec 加载失败（降级用 val_ratio 切）: {e}")
+                self._split_spec = None
+        else:
+            self._split_spec = None
+            logger.info(f"[T8] split spec 不存在，将用 val_ratio={self.val_ratio} 按行切")
+
+        # T8 + strategy_configs: 按策略 ID 动态计算有效排除列
+        # → 自动排除其他策略的专属列（如 adapt_score 对非板块热度策略是无效列）
+        from learnEngine.strategy_configs import get_effective_exclude_cols
+        effective_exclude = get_effective_exclude_cols(self.strategy_id, cfg.EXCLUDE_COLS)
+
         self._all_features = [
             c for c in df.columns
-            if c not in cfg.EXCLUDE_COLS
+            if c not in effective_exclude
             and pd.api.types.is_numeric_dtype(df[c])
         ]
         logger.info(
             f"发现 {len(self._all_features)} 个因子列 "
-            f"（CSV 共 {len(df.columns)} 列，排除非特征列 {len(cfg.EXCLUDE_COLS)} 个）"
+            f"（CSV {len(df.columns)} 列 | 排除: {len(effective_exclude)} | "
+            f"strategy_id={self.strategy_id or '全策略'}）"
         )
         self._df = df
         return df
@@ -385,14 +461,18 @@ class FactorSelector:
         val_ratio       = self.val_ratio
         target          = self.target
         n_cv_folds      = self.n_cv_folds
+        split_spec      = self._split_spec  # T8: frozen spec（None = 降级用 val_ratio）
 
-        # scale_pos_weight 按训练集自然正负比计算，不参与 Optuna 搜索
-        # 保证模型有足够的"开仓勇气"，不被精度目标压制成过度保守
-        _df_train = df.iloc[:int(len(df) * (1 - val_ratio))]
+        # T8: scale_pos_weight 按训练集（frozen split train 部分）自然正负比计算
+        if split_spec:
+            from learnEngine.split_spec import apply_split_spec
+            _df_train, _ = apply_split_spec(df.dropna(subset=[target]), split_spec)
+        else:
+            _df_train = df.dropna(subset=[target]).iloc[:int(len(df) * (1 - val_ratio))]
         _pos = int(_df_train[target].sum())
         _neg = int(len(_df_train) - _pos)
-        _spw = min(round(_neg / max(_pos, 1), 3), 4.0)  # cap 4.0，与 model.py 默认路径一致，防止过度激进
-        logger.info(f"[Stage 3] scale_pos_weight={_spw:.2f}（数据自然正负比 neg={_neg}/pos={_pos}，已 cap 4.0）")
+        _spw = min(round(_neg / max(_pos, 1), 3), 4.0)  # cap 4.0，防止过度激进
+        logger.info(f"[Stage 3] scale_pos_weight={_spw:.2f}（neg={_neg}/pos={_pos}，已 cap 4.0）")
 
         def objective(trial: optuna.Trial) -> float:
             # ── 因子子集选择（每个因子独立 on/off）──
@@ -414,7 +494,8 @@ class FactorSelector:
             }
 
             result = _train_eval(df, selected, params, target, val_ratio, top_k_pct, min_top_k_pos,
-                                 scale_pos_weight=_spw, n_cv_folds=n_cv_folds)
+                                 scale_pos_weight=_spw, n_cv_folds=n_cv_folds,
+                                 split_spec=split_spec)  # T8
             return result["score"]
 
         def _progress_cb(study: optuna.Study, trial: optuna.Trial):
@@ -447,6 +528,7 @@ class FactorSelector:
         final = _train_eval(
             df, best_features, best_xgb, target, val_ratio, top_k_pct, min_top_k_pos,
             scale_pos_weight=_spw, n_cv_folds=1,
+            split_spec=split_spec,  # T8
         )
 
         logger.info(
@@ -513,9 +595,19 @@ class FactorSelector:
             else:
                 logger.warning("[Stage 3] 未找到上次结果，对全部因子直接运行 Stage 3")
 
+        # T8: 公共元数据（写入 JSON，供 train.py 读取时识别对应策略和 split）
+        _common = {
+            "csv_path":          os.path.abspath(self.csv_path),
+            "strategy_id":       self.strategy_id,   # T8: 策略标识（None = 全策略池）
+            "split_spec_path":   self.split_spec_path,
+            "split_train_end":   (self._split_spec or {}).get("train_end_date"),
+            "split_val_start":   (self._split_spec or {}).get("val_start_date"),
+        }
+
         if stage == "12":
             # 不运行 Optuna，只输出筛选结果
             result = {
+                **_common,
                 "stage1_input_count": len(self._all_features),
                 "stage1_removed":     s1_removed,
                 "stage2_input_count": len(self._all_features) - len(s1_removed),
@@ -533,6 +625,7 @@ class FactorSelector:
         else:
             best_features, best_xgb, metrics = self.stage3_optuna(features)
             result = {
+                **_common,
                 "stage1_input_count": len(self._all_features),
                 "stage1_removed":     s1_removed,
                 "stage2_input_count": len(self._all_features) - len(s1_removed),
@@ -576,11 +669,12 @@ if __name__ == "__main__":
         description="三阶段因子筛选器（IC过滤 → 相关性去重 → Optuna精调）",
         formatter_class=argparse.RawTextHelpFormatter,
     )
-    parser.add_argument("--csv",      default=None, help="训练集 CSV 路径（默认 train_config.TRAIN_CSV_PATH）")
-    parser.add_argument("--output",   default=None, help="输出 JSON 路径（默认 search_results/selected_features.json）")
-    parser.add_argument("--n-trials", type=int,   default=None, help="Optuna 试验次数（默认 200）")
-    parser.add_argument("--timeout",  type=int,   default=None, help="超时秒数（默认 3600）")
-    parser.add_argument("--top-k",    type=float, default=None, help="Precision@K 的 K 值，如 0.3（默认 0.30）")
+    parser.add_argument("--csv",         default=None, help="训练集 CSV 路径（默认 train_config.TRAIN_CSV_PATH）")
+    parser.add_argument("--output",      default=None, help="输出 JSON 路径（默认 search_results/selected_features.json）")
+    parser.add_argument("--n-trials",    type=int,   default=None, help="Optuna 试验次数（默认 200）")
+    parser.add_argument("--timeout",     type=int,   default=None, help="超时秒数（默认 3600）")
+    parser.add_argument("--top-k",       type=float, default=None, help="Precision@K 的 K 值，如 0.3（默认 0.30）")
+    parser.add_argument("--strategy-id", default=None, help="策略 ID 过滤（如 sector_heat）；None = 使用全策略训练池")  # T8
     parser.add_argument(
         "--stage",
         default="all",
@@ -595,9 +689,10 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     selector = FactorSelector(
-        csv_path  = args.csv,
-        n_trials  = args.n_trials,
-        timeout   = args.timeout,
-        top_k_pct = args.top_k,
+        csv_path    = args.csv,
+        n_trials    = args.n_trials,
+        timeout     = args.timeout,
+        top_k_pct   = args.top_k,
+        strategy_id = args.strategy_id,  # T8
     )
     selector.run(stage=args.stage, output_path=args.output)

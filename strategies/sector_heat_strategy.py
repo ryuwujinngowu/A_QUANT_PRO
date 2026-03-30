@@ -28,6 +28,7 @@ import pandas as pd
 from config.config import FILTER_BSE_STOCK, FILTER_STAR_BOARD, FILTER_688_BOARD
 from data.data_cleaner import data_cleaner
 from features import FeatureEngine, FeatureDataBundle
+from features.bundle_factory import build_bundle_from_context
 from features.sector.sector_heat_feature import SectorHeatFeature
 from strategies.base_strategy import BaseStrategy
 from position_tracker import TrackerConfig
@@ -254,16 +255,9 @@ class SectorHeatStrategy(BaseStrategy):
         return candidate_df, context
 
     def build_feature_bundle_from_context(self, context: Dict[str, any]):
-        """基于共享上下文统一构造 FeatureDataBundle。"""
-        target_ts_codes = context.get("target_ts_codes") or []
-        if not target_ts_codes:
-            return None
-        return FeatureDataBundle(
-            trade_date=context["feature_trade_date"],
-            target_ts_codes=target_ts_codes,
-            sector_candidate_map=context["sector_candidate_map"],
-            top3_sectors=context["top3_sectors"],
-            adapt_score=context["adapt_score"],
+        """基于共享上下文统一构造 FeatureDataBundle（T12: 委托给 bundle_factory）。"""
+        return build_bundle_from_context(
+            context,
             load_minute=self.strategy_params["load_minute"],
         )
 

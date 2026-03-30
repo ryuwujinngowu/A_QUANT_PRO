@@ -29,7 +29,7 @@ from sklearn.metrics import (
 
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 
-from learnEngine.model import SectorHeatXGBModel
+from learnEngine.model import StrategyXGBModel
 import learnEngine.train_config as cfg
 from utils.log_utils import logger
 
@@ -43,14 +43,83 @@ TARGET_LABEL      = cfg.TARGET_LABEL
 VAL_RATIO         = cfg.VAL_RATIO
 EXCLUDE_COLS      = cfg.EXCLUDE_COLS
 
-_MODEL_DIR        = cfg.MODEL_DIR
-MODEL_SAVE_PATH   = os.path.join(_MODEL_DIR, f"sector_heat_xgb_{MODEL_VERSION}.pkl")
-MODEL_LATEST_PATH = os.path.join(_MODEL_DIR, "sector_heat_xgb_latest.pkl")
+# T11: 路径由策略 ID 驱动，训练只写 archive，runtime 人工晋升
+# 兼容旧路径：若 STRATEGY_ID 未设置，退回到原 model/ 根目录
+def _resolve_model_paths(strategy_id, version):
+    if strategy_id:
+        archive_path  = cfg.get_archive_model_path(strategy_id, version)
+        runtime_path  = cfg.get_runtime_model_path(strategy_id)
+    else:
+        # 无 strategy_id 时保持旧行为（全策略训练，路径放 model/ 根目录）
+        archive_path  = os.path.join(cfg.MODEL_DIR, f"strategy_xgb_{version}.pkl")
+        runtime_path  = os.path.join(cfg.MODEL_DIR, "strategy_xgb_latest.pkl")
+    return archive_path, runtime_path
 
 
 # ============================================================
 # 数据加载与预处理
 # ============================================================
+def _selector_result_is_usable(json_path: str, csv_path: str, target_label: str) -> bool:
+    """检查因子筛选结果是否存在、可读，且与当前训练任务匹配。"""
+    if not os.path.exists(json_path):
+        return False
+
+    try:
+        with open(json_path, encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        logger.warning(f"selected_features.json 读取失败: {e}")
+        return False
+
+    selected = data.get("selected_features", [])
+    if not selected:
+        logger.warning("selected_features.json 中没有 selected_features，视为无效")
+        return False
+
+    saved_target = data.get("target_label")
+    if saved_target and saved_target != target_label:
+        logger.warning(
+            f"selected_features.json 目标标签不匹配: 当前={target_label} | 文件={saved_target}"
+        )
+        return False
+
+    saved_csv = data.get("csv_path")
+    if saved_csv and os.path.abspath(saved_csv) != os.path.abspath(csv_path):
+        logger.warning(
+            "selected_features.json 对应的训练集与当前配置不一致，"
+            f"当前={os.path.abspath(csv_path)} | 文件={saved_csv}"
+        )
+        return False
+
+    return True
+
+
+def _ensure_selector_result(csv_path: str, target_label: str):
+    """
+    确保 factor_selector 结果存在且与当前训练集匹配。
+
+    若配置允许，则自动运行一遍 FactorSelector，避免静默回退到全因子训练。
+    """
+    selector_json = cfg.SELECTED_FEATURES_PATH
+    need_refresh = cfg.FACTOR_SELECTOR_FORCE_REFRESH or not _selector_result_is_usable(
+        selector_json, csv_path, target_label
+    )
+    if not need_refresh:
+        return
+
+    if not cfg.AUTO_RUN_FACTOR_SELECTOR:
+        return
+
+    logger.info(
+        "未发现可用的因子筛选结果，开始自动运行 FactorSelector..."
+        f" | csv={csv_path} | target={target_label} | stage={cfg.FACTOR_SELECTOR_STAGE}"
+    )
+    from learnEngine.factor_selector import FactorSelector
+
+    selector = FactorSelector(csv_path=csv_path, target=target_label)
+    selector.run(stage=cfg.FACTOR_SELECTOR_STAGE, output_path=selector_json)
+
+
 def _load_selector_result(json_path: str, all_cols) -> tuple:
     """
     从 factor_selector.py 输出的 JSON 加载最优因子列表 + Optuna 最优超参。
@@ -90,15 +159,24 @@ def _load_selector_result(json_path: str, all_cols) -> tuple:
         return [], None
 
 
-def load_and_prepare(csv_path: str, target_label: str):
+def load_and_prepare(
+    csv_path:    str,
+    target_label: str,
+    strategy_id: str = None,
+):
     """
     加载训练集 CSV 并预处理。
+
+    T9 新增:
+      - strategy_id 过滤（按策略 ID 取对应行，支持多策略训练池）
+      - 去重键改为 sample_id（全局训练池中同股同日可属不同策略）
+      - 加载 frozen split spec（若存在）
 
     特征选择优先级：
       1. 若 cfg.SELECTED_FEATURES_PATH 存在（factor_selector.py 输出）→ 使用最优因子子集 + Optuna超参
       2. 否则 → 使用 CSV 中全部数值型因子（排除 EXCLUDE_COLS）
 
-    :return: (X, y, feature_cols, df, override_params)
+    :return: (X, y, feature_cols, df, override_params, split_spec)
     """
     if not os.path.exists(csv_path):
         raise FileNotFoundError(
@@ -116,6 +194,14 @@ def load_and_prepare(csv_path: str, target_label: str):
             logger.info(f"过滤 stk_factor_pro 中性值污染行: {bad_mask.sum()} 行")
             df = df[~bad_mask].reset_index(drop=True)
 
+    # T9: strategy_id 过滤（支持多策略训练池）
+    if strategy_id and "strategy_id" in df.columns:
+        before_sid = len(df)
+        df = df[df["strategy_id"] == strategy_id].reset_index(drop=True)
+        logger.info(f"[T9] strategy_id='{strategy_id}' 过滤: {before_sid} → {len(df)} 行")
+    elif strategy_id:
+        logger.warning(f"[T9] strategy_id='{strategy_id}' 但训练集无 strategy_id 列，跳过过滤")
+
     if target_label not in df.columns:
         raise ValueError(f"目标标签列 '{target_label}' 不存在，可用列: {df.columns.tolist()}")
 
@@ -124,39 +210,69 @@ def load_and_prepare(csv_path: str, target_label: str):
     if len(df) < before:
         logger.info(f"删除 {target_label} 缺失行: {before - len(df)}")
 
-    dup = df.duplicated(subset=["stock_code", "trade_date"]).sum()
+    # T9: 去重键改为 sample_id（存在时），兼容旧数据集的 stock+date 去重
+    _dedup_key = ["sample_id"] if "sample_id" in df.columns else ["stock_code", "trade_date"]
+    dup = df.duplicated(subset=_dedup_key).sum()
     if dup > 0:
-        df = df.drop_duplicates(subset=["stock_code", "trade_date"])
-        logger.info(f"移除重复行: {dup}")
+        df = df.drop_duplicates(subset=_dedup_key)
+        logger.info(f"移除重复行（按 {_dedup_key}）: {dup}")
 
-    # 所有候选数值因子（排除固定非特征列）
+    # T9 + strategy_configs: 按策略 ID 动态计算有效排除列
+    # → 自动排除其他策略的专属列（如 adapt_score 对非板块热度策略无意义）
+    from learnEngine.strategy_configs import get_effective_exclude_cols
+    _effective_exclude = get_effective_exclude_cols(strategy_id, EXCLUDE_COLS)
+
     all_numeric = [
         c for c in df.columns
-        if c not in EXCLUDE_COLS and pd.api.types.is_numeric_dtype(df[c])
+        if c not in _effective_exclude and pd.api.types.is_numeric_dtype(df[c])
     ]
 
     # 优先使用 factor_selector 搜出的最优子集 + Optuna 超参
+    _ensure_selector_result(csv_path, target_label)
     selected, override_params = _load_selector_result(cfg.SELECTED_FEATURES_PATH, all_numeric)
     if selected:
         feature_cols = selected
         logger.info(f"[模式] factor_selector 最优子集，{len(feature_cols)} 个因子")
     else:
+        if cfg.REQUIRE_SELECTED_FEATURES:
+            raise RuntimeError(
+                "未获取到可用的 selected_features.json，已阻止全因子盲搜。\n"
+                f"请先运行 python learnEngine/factor_selector.py --csv {csv_path}"
+            )
         feature_cols = all_numeric
         logger.info(f"[模式] 全量因子（未找到 selected_features.json），{len(feature_cols)} 个因子")
 
     X = df[feature_cols].fillna(0).replace([np.inf, -np.inf], 0)
     y = df[target_label].astype(int).values
 
+    # T9: 加载 frozen split spec
+    split_spec = None
+    if os.path.exists(cfg.SPLIT_SPEC_PATH):
+        from learnEngine.split_spec import load_split_spec
+        try:
+            split_spec = load_split_spec(cfg.SPLIT_SPEC_PATH)
+            logger.info(
+                f"[T9] Frozen split spec 加载: "
+                f"train ≤ {split_spec['train_end_date']} | "
+                f"val ≥ {split_spec['val_start_date']}"
+            )
+        except Exception as e:
+            logger.warning(f"[T9] split spec 加载失败（降级用 val_ratio 切）: {e}")
+    else:
+        logger.info(f"[T9] split spec 不存在，将用 val_ratio={VAL_RATIO} 按行切")
+
     logger.info(f"特征列数: {len(feature_cols)} | 正样本率: {y.mean():.2%}")
-    return X, y, feature_cols, df, override_params
+    return X, y, feature_cols, df, override_params, split_spec
 
 
 # ============================================================
 # 时间序列切分（严格按 trade_date 排序，避免未来数据泄漏）
 # ============================================================
-def time_series_split(X, y, df, val_ratio: float):
+def time_series_split(X, y, df, val_ratio: float, split_spec=None):
     """
-    按 trade_date 排序后尾部切分验证集（不随机打乱）
+    按 trade_date 排序后尾部切分验证集（不随机打乱）。
+
+    T9: 有 frozen split_spec 时按日期边界切分；无 spec 时降级用 val_ratio 按行切。
 
     :return: (X_train, X_val, y_train, y_val)
     """
@@ -165,15 +281,25 @@ def time_series_split(X, y, df, val_ratio: float):
     sort_idx = np.argsort(dates)
     X = X.iloc[sort_idx].reset_index(drop=True)
     y = y[sort_idx]
-
-    split_point = int(len(X) * (1 - val_ratio))
-    X_train, X_val = X.iloc[:split_point], X.iloc[split_point:]
-    y_train, y_val = y[:split_point], y[split_point:]
-
-    # 获取切分日期信息
     sorted_dates = dates[sort_idx]
-    train_end   = sorted_dates[split_point - 1] if split_point > 0 else "N/A"
-    val_start   = sorted_dates[split_point]      if split_point < len(dates) else "N/A"
+    sorted_df = df.iloc[sort_idx].reset_index(drop=True)
+
+    if split_spec:
+        from learnEngine.split_spec import apply_split_spec
+        tr_df, val_df = apply_split_spec(sorted_df, split_spec)
+        tr_idx  = tr_df.index
+        val_idx = val_df.index
+        X_train, X_val = X.loc[tr_idx], X.loc[val_idx]
+        y_train, y_val = y[tr_idx], y[val_idx]
+        train_end = split_spec["train_end_date"]
+        val_start = split_spec["val_start_date"]
+        logger.info(f"[T9] Frozen split 边界: train ≤ {train_end} | val ≥ {val_start}")
+    else:
+        split_point = int(len(X) * (1 - val_ratio))
+        X_train, X_val = X.iloc[:split_point], X.iloc[split_point:]
+        y_train, y_val = y[:split_point], y[split_point:]
+        train_end = sorted_dates[split_point - 1] if split_point > 0 else "N/A"
+        val_start = sorted_dates[split_point]      if split_point < len(sorted_dates) else "N/A"
 
     logger.info(
         f"时间序列切分 | 训练集: {len(X_train)} 行 (截至 {train_end}) | "
@@ -287,22 +413,29 @@ def evaluate_model(model, X_val, y_val, feature_cols):
 if __name__ == "__main__":
     warnings.filterwarnings("ignore")
 
+    # T9: 策略 ID（从 cfg 读取，None = 全策略池）
+    _strategy_id = getattr(cfg, "STRATEGY_ID", None)
+
     logger.info("=" * 60)
-    logger.info("开始模型训练（基线版：标准 XGBoost）")
+    logger.info(f"开始模型训练 | strategy_id={_strategy_id or '全策略'} | label={TARGET_LABEL}")
     logger.info("=" * 60)
 
-    # 1. 加载数据（同时读取 Optuna 最优超参）
-    X, y, feature_cols, df, override_params = load_and_prepare(TRAIN_CSV_PATH, TARGET_LABEL)
+    # 1. 加载数据（同时读取 Optuna 最优超参 + frozen split spec）
+    X, y, feature_cols, df, override_params, split_spec = load_and_prepare(
+        TRAIN_CSV_PATH, TARGET_LABEL, strategy_id=_strategy_id
+    )
 
     if len(X) < 50:
         logger.error(f"训练集样本不足（{len(X)} 行），至少需要 50 行，请扩大日期范围重新生成训练集")
         sys.exit(1)
 
-    # 2. 时间序列切分
-    X_train, X_val, y_train, y_val = time_series_split(X, y, df, VAL_RATIO)
+    # 2. 时间序列切分（T9: 优先使用 frozen split spec）
+    X_train, X_val, y_train, y_val = time_series_split(X, y, df, VAL_RATIO, split_spec=split_spec)
 
-    # 3. 训练模型（若有 Optuna 最优超参则直接使用，否则降级到 base_params）
-    xgb_model = SectorHeatXGBModel(model_save_path=MODEL_SAVE_PATH)
+    # 3. 训练模型（T10/T11: StrategyXGBModel 写入 archive 路径）
+    archive_path, _runtime_path = _resolve_model_paths(_strategy_id, MODEL_VERSION)
+    os.makedirs(os.path.dirname(archive_path), exist_ok=True)
+    xgb_model = StrategyXGBModel(model_save_path=archive_path)
     xgb_model.train(X_train, X_val, y_train, y_val, feature_cols,
                     override_params=override_params)
 
@@ -329,14 +462,10 @@ if __name__ == "__main__":
     # 4. 详细评估
     metrics = evaluate_model(xgb_model.model, X_val, y_val, feature_cols)
 
-    # 5. 同步 latest（策略/回测稳定加载路径）
-    import shutil
-    shutil.copy2(MODEL_SAVE_PATH, MODEL_LATEST_PATH)
-    logger.info(f"已同步至稳定路径: {MODEL_LATEST_PATH}")
-
-    # 6. 完成
+    # 5. 完成（T11: 不自动同步 runtime，需人工验证后手动晋升）
     logger.info("=" * 60)
-    logger.info(f"训练完成！版本化模型: {MODEL_SAVE_PATH}")
+    logger.info(f"训练完成！archive 模型: {archive_path}")
+    logger.info(f"  runtime 路径（人工晋升后推理使用）: {_runtime_path}")
     logger.info(f"  训练集: {len(X_train)} 行 | 验证集: {len(X_val)} 行")
     logger.info(f"  AUC: {metrics['auc']:.4f} | Precision: {metrics['precision']:.4f} | Precision@{metrics['top_k_pct']:.0%}: {metrics['precision_at_k']:.4f}")
     logger.info("=" * 60)

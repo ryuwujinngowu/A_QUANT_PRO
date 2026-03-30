@@ -5,23 +5,23 @@ from sklearn.metrics import accuracy_score, roc_auc_score
 from utils.log_utils import logger
 
 
-class SectorHeatXGBModel:
+class StrategyXGBModel:
     """
-    XGBoost 二分类模型（金融量化调参版）
-    ========================================
+    通用策略 XGBoost 二分类模型（T10：去掉 SectorHeat 专属命名）
+    =============================================================
+    与策略无关的纯 ML wrapper，供所有策略复用。
+    策略身份通过 model_save_path 区分，不硬编码在类名里。
+
     核心参数选择依据：
       - scale_pos_weight : A 股标签高度不平衡（正样本 5-10%），动态按 neg/pos 比例设置
-      - n_estimators=500 + early_stopping_rounds=50 : 足够多的树 + 提前停止防过拟合
-      - learning_rate=0.05 : 低学习率配合大树数，泛化更好
-      - max_depth=4 : 浅树防止对噪声过拟合（金融特征信噪比低）
-      - subsample/colsample_bytree=0.8 : 行/列随机采样，Dropout 效果
-      - min_child_weight=5 : 叶节点最小样本数，避免对小样本过拟合
-      - gamma=0.1 : 分裂所需最小增益，让树只在有显著区分度时才分裂
-      - reg_alpha/reg_lambda : L1+L2 正则化
+      - n_estimators=500 + early_stopping_rounds=20 : 足够多的树 + 提前停止防过拟合
+      - learning_rate=0.2 : 精简特征后较高学习率加速收敛
+      - max_depth=3 : 浅树防止对噪声过拟合（金融特征信噪比低）
+      - subsample/colsample_bytree : 行/列随机采样，Dropout 效果
       - eval_metric="auc" : 不平衡数据下 AUC 远比 accuracy 可靠
     """
 
-    def __init__(self, model_save_path: str = "learnEngine/models/sector_heat_xgb_model.json"):
+    def __init__(self, model_save_path: str = "model/strategy_xgb_model.pkl"):
         self.model_save_path = model_save_path
         self.model = None
         # scale_pos_weight 在 train() 中根据实际数据动态计算
@@ -170,3 +170,7 @@ class SectorHeatXGBModel:
         # 预测赚钱的概率（label=1的概率）
         profit_proba = self.model.predict_proba(feature_df)[:, 1]
         return profit_proba.tolist()
+
+
+# T10: 向后兼容别名（历史代码 / 已保存模型引用此类名时不会 ImportError）
+SectorHeatXGBModel = StrategyXGBModel

@@ -13,6 +13,13 @@
 - **T3** `SectorHeatStrategy` 已抽出共享候选池 / context / bundle 构造逻辑
 - **T4** `agent_stats/agents/_model_signal_helper.py` 已切到共享候选链路
 - **T5** `learnEngine/dataset.py` 已切到共享的 `sector_heat` 候选逻辑
+- **T6** `learnEngine/dataset.py` 全局训练池 schema 完成：新增 `sample_id / strategy_id / strategy_name / sector_name / feature_trade_date`；旧 `(stock_code, trade_date)` 去重已替换为 `sample_id` 去重
+- **T7** `learnEngine/split_spec.py` 新增 frozen split spec 模块；`train_config.py` 新增 `SPLIT_SPEC_PATH`；`dataset.py` 全量生成完后自动写 spec；split 按日期边界冻结
+- **T8** `factor_selector.py` 新增 `strategy_id` 过滤 + frozen split；dedup 改 sample_id；CLI 加 `--strategy-id`
+- **T9** `train.py` 新增 `strategy_id` 过滤 + frozen split；`train_config.py` 补全缺失属性
+- **strategy_configs.py（核心）** `learnEngine/strategy_configs.py` — 多策略动态列隔离：每策略声明 `strategy_specific_cols`，`get_effective_exclude_cols()` 训练时自动排除其他策略专属列；`factor_selector.py` / `train.py` 均已切换
+- **T10** `learnEngine/model.py` 类名从 `SectorHeatXGBModel` 改为 `StrategyXGBModel`；旧名保留为别名；`train.py` 已切换
+- **T11** `train_config.py` 新增 `get_archive_model_path / get_runtime_model_path`；`train.py` 训练只写 archive（`model/<strategy_id>/archive/<version>/model.pkl`），不再自动同步 runtime；runtime 需人工晋升
 
 ### 已确认的关键事实
 - 当前训练集默认唯一键仍是 **`(stock_code, trade_date)`**，这会阻碍全局多策略训练池
@@ -31,9 +38,9 @@
 
 ## 2. 下一步从哪开始
 
-下一步直接从 **T6** 开始，不要重做前面工作。
+下一步直接从 **T12** 开始，不要重做前面工作。
 
-### T6
+### T6（已完成）
 定义全局训练池 schema：
 - 增加 `sample_id`
 - 增加 `strategy_id`
@@ -149,12 +156,12 @@
 
 ## 7. 当前未解决的问题清单
 
-- `learnEngine/dataset.py` 仍不是全局多策略训练池 schema
-- `factor_selector.py` / `train.py` 还没接 frozen split
-- `factor_selector.py` / `train.py` 还没接 `strategy_id` 过滤
-- `learnEngine/model.py` 还没做真正泛化（这是 T10）
-- `FeatureDataBundle` 的 builder/factory 还没做（这是 T12）
+- `dataset.py` 多策略循环：当前只调 `SectorHeatStrategy`，多策略时需遍历所有 `supports_ml_training()==True` 的策略
+- `_model_signal_helper.py` 推理层改用 `get_runtime_model_path()` 路径加载模型（当前仍用旧路径）
+- `strategy_configs.py`：后续策略接入时填入各自的 `strategy_specific_cols`
 - `SectorHeatStrategy.build_training_candidates()` 的运行级 smoke 还没在正确解释器环境下补做
+- `strategy_configs.py` 里后续策略的 `strategy_specific_cols` 待各策略实现后填入
+- `dataset.py` 目前只循环调用 `SectorHeatStrategy`；多策略时需改为遍历所有支持 ML 的策略
 
 ---
 
@@ -162,4 +169,15 @@
 
 如果你是下一次 Claude：
 
-**先做 T6，不要重新设计大架构；按最小侵入方式把 `sample_id + strategy_id` 打通，再逐步推进 T7/T8/T9。**
+**T1-T14 全部完成。接手任务是验收，读 `learnEngine/ACCEPTANCE_TODO.md`，按优先级从 H2 → F1 → D1 → E2 顺序推进未完成验收项。**
+
+---
+
+## 9. 文档索引
+
+| 文档 | 用途 |
+|------|------|
+| `learnEngine/README.md` | TODO 列表 + 进度日志 |
+| `learnEngine/HANDOFF_ML_PLATFORM.md` | 本文件：AI 接手上下文 |
+| `learnEngine/ML_PLATFORM_GUIDE.md` | 使用说明：调用流程 / 新增因子 / 新增策略 / 调参 |
+| `learnEngine/ACCEPTANCE_TODO.md` | 验收 TODO 清单（逐项勾选）|

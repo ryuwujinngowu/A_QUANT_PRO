@@ -29,7 +29,9 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from config.config import FILTER_BSE_STOCK, FILTER_STAR_BOARD, FILTER_688_BOARD
 from data.data_cleaner import data_cleaner
 from features import FeatureEngine, FeatureDataBundle
+import learnEngine.train_config as _cfg
 from learnEngine.label import LabelEngine
+from learnEngine.split_spec import write_split_spec
 from strategies.sector_heat_strategy import SectorHeatStrategy
 from utils.common_tools import (
     get_stocks_in_sector,
@@ -111,13 +113,14 @@ class DataSetAssembler:
         if df.empty:
             return pd.DataFrame()
 
-        required = ["stock_code", "trade_date", "label1", "label2"]
+        required = ["sample_id", "strategy_id", "stock_code", "trade_date", "label1", "label2"]
         missing  = [c for c in required if c not in df.columns]
         if missing:
             logger.error(f"[DataSetAssembler] 缺失核心列: {missing}")
             return pd.DataFrame()
 
-        df = df.drop_duplicates(subset=["stock_code", "trade_date"])
+        # T6: 使用 sample_id 去重（允许同一股票同一日期出现在不同策略/板块）
+        df = df.drop_duplicates(subset=["sample_id"])
         # label1 是唯一必需列（D+1 停牌时 LabelEngine 跳过，dropna 正常）
         # label2 依赖 D+2 数据，最新日期可能 D+2 尚未收盘，保留 NaN 行而非丢弃
         # 训练时按 TARGET_LABEL 各自 dropna，在此只保证 label1 非空
@@ -303,14 +306,15 @@ def validate_train_dataset(csv_path: str) -> pd.DataFrame:
     df = pd.read_csv(csv_path)
     logger.info(f"【最终校验】总行数: {len(df)}")
 
-    required = ["stock_code", "trade_date", "label1", "label2", "adapt_score"]
+    required = ["sample_id", "strategy_id", "stock_code", "trade_date", "label1", "label2", "adapt_score"]
     missing  = [c for c in required if c not in df.columns]
     if missing:
         raise ValueError(f"缺失核心列: {missing}")
 
-    dup = df.duplicated(subset=["stock_code", "trade_date"]).sum()
+    # T6: 使用 sample_id 去重
+    dup = df.duplicated(subset=["sample_id"]).sum()
     if dup:
-        df = df.drop_duplicates(subset=["stock_code", "trade_date"])
+        df = df.drop_duplicates(subset=["sample_id"])
         logger.warning(f"移除重复行: {dup}")
 
     # 只对核心二分类 label 做 dropna；涉及 D+2/D0 的标签允许 NaN（训练时按需处理）
@@ -450,6 +454,25 @@ if __name__ == "__main__":
                 logger.warning(f"{date} 特征计算失败，跳过")
                 continue
 
+            # ---- Step 4.5: T6 — 注入策略元数据并生成 sample_id ----
+            # candidate_df 有 ts_code（即 stock_code）× sector_name × strategy_id/name/feature_trade_date
+            # 一只股票可同时出现在多个 top3 板块 → 不同 sector_name 产生不同 sample_id，不做去重
+            _meta = candidate_df[
+                ["ts_code", "strategy_id", "strategy_name", "sector_name", "feature_trade_date"]
+            ].rename(columns={"ts_code": "stock_code"})
+            feature_df = _meta.merge(feature_df, on="stock_code", how="left")
+            # sample_id = "strategy_id__stock_code__trade_date__sector_name"
+            feature_df["sample_id"] = (
+                feature_df["strategy_id"] + "__"
+                + feature_df["stock_code"] + "__"
+                + feature_df["trade_date"].astype(str) + "__"
+                + feature_df["sector_name"].fillna("")
+            )
+            logger.info(
+                f"{date} 策略元数据注入完成 | 行数: {len(feature_df)} "
+                f"| 唯一股票: {feature_df['stock_code'].nunique()}"
+            )
+
             # ---- Step 5: 标签生成 ----
             label_df = label_engine.generate_single_date(
                 date, feature_df["stock_code"].unique().tolist()
@@ -512,5 +535,22 @@ if __name__ == "__main__":
     logger.info("\n========== 全量处理完成 ==========")
     if os.path.exists(OUTPUT_CSV_PATH):
         validate_train_dataset(OUTPUT_CSV_PATH)
+
+        # T7: 写出 frozen split spec（按日期边界冻结 train/val，供 selector/train 统一读取）
+        try:
+            spec = write_split_spec(
+                csv_path=OUTPUT_CSV_PATH,
+                val_ratio=_cfg.VAL_RATIO,
+                output_path=_cfg.SPLIT_SPEC_PATH,
+            )
+            logger.info(
+                f"✅ Split spec 已写出: {_cfg.SPLIT_SPEC_PATH}\n"
+                f"   train: {spec['train_start_date']} ~ {spec['train_end_date']} "
+                f"({spec['train_rows']} 行)\n"
+                f"   val:   {spec['val_start_date']} ~ {spec['val_end_date']} "
+                f"({spec['val_rows']} 行)"
+            )
+        except Exception as e:
+            logger.error(f"Split spec 写出失败（不影响训练集）: {e}")
     else:
         logger.error("❌ 训练集生成失败！")
