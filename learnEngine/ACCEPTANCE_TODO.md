@@ -42,6 +42,8 @@ python -m py_compile \
 - [x] A8. `features/bundle_factory.py` — py_compile 通过
 - [x] A9. `strategies/sector_heat_strategy.py` — py_compile 通过
 - [ ] A10. `agent_stats/agents/_model_signal_helper.py` — py_compile（待确认）
+- [x] A11. `strategies/high_low_switch_ml_strategy.py` — py_compile 通过（2026-03-31）
+- [x] A12. `learnEngine/dataset.py` — py_compile 通过（多策略修改后，2026-03-31）
 
 ---
 
@@ -165,18 +167,26 @@ from learnEngine.train_config import STRATEGY_ID
 
 ### D1. 单日 smoke test
 
+> ⚠️ 2026-03-31 修复说明：
+> - **label date bug 已修复**：`label_engine.generate_single_date(date, ...)` 改为 `label_engine.generate_single_date(context["feature_trade_date"], ...)`
+>   - 原因：feature_df.trade_date = D-1（FeatureDataBundle.trade_date = feature_trade_date），label_df 必须也用 D-1 才能 merge 成功
+> - **多策略循环已实现**：`_strategies = [SectorHeatStrategy(), HighLowSwitchMLStrategy()]`
+> - **新文件**：`strategies/high_low_switch_ml_strategy.py`（候选池 = D-1涨停池，主板+非ST+首/二/三板）
+
 ```bash
-# 修改 dataset.py 里的起止日期为单个交易日，运行验证输出结构
-python learnEngine/dataset.py --date 2026-02-28  # 如有 CLI 支持
+# 先把 DATE_RANGES 改为只包含1-2个交易日，运行验证
+# 例如：DATE_RANGES = [("2025-01-10", "2025-01-10")]
+python learnEngine/dataset.py
 ```
 
 检查点：
 - CSV 中包含 `sample_id` / `strategy_id` / `strategy_name` / `sector_name` / `feature_trade_date` 列
+- `strategy_id` 列同时包含 "sector_heat" 和 "high_low_switch" 的行（如当日两种策略都有候选股）
 - `sample_id` 无重复
-- 没有用 `(stock_code, trade_date)` 去重
-- 生成 `split_spec.json` 后内容正确（train/val 日期边界合理）
+- label1 / label2 不全为 NaN（label date bug 已修复后应有值）
+- 行数 >= 10
 
-- [ ] D1. 单日 dataset 生成，输出结构正确（需 DB）
+- [ ] D1. 单日 dataset 生成 ≥10 行，两种策略均有 rows，labels 非空（需 DB）
 - [ ] D2. split_spec.json 内容验证（train/val 不重叠，边界日期合理）
 
 ---

@@ -169,7 +169,34 @@
 
 如果你是下一次 Claude：
 
-**T1-T14 全部完成。接手任务是验收，读 `learnEngine/ACCEPTANCE_TODO.md`，按优先级从 H2 → F1 → D1 → E2 顺序推进未完成验收项。**
+**T1-T14 全部完成 + dataset.py 多策略已实现 + label date bug 已修复。接手任务是运行验收测试，读 `learnEngine/ACCEPTANCE_TODO.md`，按优先级从 D1 → H2 → F1 → E2 顺序推进。D1（dataset生成10行）是最高优先级。**
+
+---
+
+## 10. 2026-03-31 新增内容
+
+### 新增文件
+- `strategies/high_low_switch_ml_strategy.py`：高低切 ML 候选策略
+  - strategy_id = "high_low_switch"
+  - 候选池 = D-1 涨停池（主板 + 非ST + 首/二/三板）
+  - 剥离所有择时逻辑（上涨钝化/执行窗口/首板增益过滤），交模型学习
+
+### dataset.py 关键修复
+- **label date bug**（严重，此前生成的 CSV 可能全为空）：
+  - 旧代码：`label_engine.generate_single_date(date, ...)`（D=买入日）
+  - feature_df.trade_date = D-1，merge 全 NaN
+  - 修复：`label_engine.generate_single_date(context["feature_trade_date"], ...)`（D-1）
+
+### dataset.py 多策略循环
+- `_strategies = [SectorHeatStrategy(), HighLowSwitchMLStrategy()]`
+- 各策略分别生成 candidate_df → union ts_codes → 一次 bundle 构建 → 一次特征计算
+- 各策略 candidate_df 分别 merge feature_df_base → concat → 统一 sample_id
+
+### 当前验收状态
+- D1（dataset 运行生成 10+ 行）：**未做**（需要在项目 Python 解释器下运行）
+- H2（_model_signal_helper.py 路径改造）：**未做**
+- F1-F3（train.py 训练验收）：**未做**
+- E2（factor_selector Optuna 10轮）：**未做**
 
 ---
 

@@ -33,6 +33,7 @@ import learnEngine.train_config as _cfg
 from learnEngine.label import LabelEngine
 from learnEngine.split_spec import write_split_spec
 from strategies.sector_heat_strategy import SectorHeatStrategy
+from strategies.high_low_switch_ml_strategy import HighLowSwitchMLStrategy
 from utils.common_tools import (
     get_stocks_in_sector,
     filter_st_stocks,
@@ -361,7 +362,9 @@ if __name__ == "__main__":
     # ---------- 初始化核心组件 ----------
     feature_engine    = FeatureEngine()          # 使用 features/__init__.py 的新引擎
     label_engine      = LabelEngine(_label_start, _label_end)
-    strategy          = SectorHeatStrategy()
+    # 多策略注册：所有 supports_ml_training()==True 的策略均参与训练集生成
+    _strategies       = [SectorHeatStrategy(), HighLowSwitchMLStrategy()]
+    _sector_heat_strat = _strategies[0]          # 用于构建共享 FeatureDataBundle
     dates_manager     = ProcessedDatesManager(PROCESSED_DATES_FILE, FACTOR_VERSION)
 
     # ---------- 确定待处理日期 ----------
@@ -427,40 +430,64 @@ if __name__ == "__main__":
             except Exception as e:
                 logger.error(f"{date} 宏观数据入库失败: {e}", exc_info=True)
 
-            # ---- Step 2: 复用策略共享候选池逻辑 ----
+            # ---- Step 2: 多策略候选池收集 ----
             daily_df = get_daily_kline_data(date)
-            candidate_df, context = strategy.build_training_candidates(date, daily_df=daily_df)
-            top3_sectors = context.get("top3_sectors") or []
+            all_candidate_dfs = []
+            sector_heat_context = None
 
-            if not top3_sectors:
-                logger.warning(f"{date} Top3 板块为空，跳过")
+            for _strat in _strategies:
+                try:
+                    _cdf, _ctx = _strat.build_training_candidates(date, daily_df=daily_df)
+                except Exception as _e:
+                    logger.warning(f"{date} [{_strat.strategy_id}] 候选池生成失败: {_e}")
+                    continue
+                if _strat.strategy_id == "sector_heat":
+                    sector_heat_context = _ctx
+                if not _cdf.empty:
+                    all_candidate_dfs.append(_cdf)
+
+            # sector_heat 候选池作为 FeatureDataBundle 的构建基础（提供板块上下文）
+            if sector_heat_context is None or not sector_heat_context.get("top3_sectors"):
+                logger.warning(f"{date} sector_heat Top3 板块为空，跳过")
                 consecutive_fails = 0
                 continue
-            if candidate_df.empty:
-                logger.warning(f"{date} 候选池为空，跳过")
+
+            if not all_candidate_dfs:
+                logger.warning(f"{date} 所有策略候选池为空，跳过")
                 consecutive_fails = 0
                 continue
 
-            # ---- Step 3: 构建数据容器（一次 IO 覆盖所有因子）----
-            data_bundle = strategy.build_feature_bundle_from_context(context)
+            # ---- Step 3: 构建共享数据容器（union 所有策略的 ts_codes，一次 IO 覆盖所有因子）----
+            # 将其他策略的 ts_codes 合并到 sector_heat context，bundle 一次性预加载
+            _all_ts_codes = set(sector_heat_context.get("target_ts_codes") or [])
+            for _cdf in all_candidate_dfs:
+                _all_ts_codes.update(_cdf["ts_code"].tolist())
+            sector_heat_context["target_ts_codes"] = list(_all_ts_codes)
+
+            data_bundle = _sector_heat_strat.build_feature_bundle_from_context(sector_heat_context)
             if data_bundle is None:
                 logger.warning(f"{date} FeatureDataBundle 构建失败，跳过")
                 consecutive_fails = 0
                 continue
 
-            # ---- Step 4: 特征计算（adapt_score 已在 bundle 中，自动输出到 feature_df）----
-            feature_df = feature_engine.run_single_date(data_bundle)
-            if feature_df.empty:
+            # ---- Step 4: 特征计算（一次计算，覆盖所有策略的候选股）----
+            feature_df_base = feature_engine.run_single_date(data_bundle)
+            if feature_df_base.empty:
                 logger.warning(f"{date} 特征计算失败，跳过")
                 continue
 
-            # ---- Step 4.5: T6 — 注入策略元数据并生成 sample_id ----
-            # candidate_df 有 ts_code（即 stock_code）× sector_name × strategy_id/name/feature_trade_date
-            # 一只股票可同时出现在多个 top3 板块 → 不同 sector_name 产生不同 sample_id，不做去重
-            _meta = candidate_df[
-                ["ts_code", "strategy_id", "strategy_name", "sector_name", "feature_trade_date"]
-            ].rename(columns={"ts_code": "stock_code"})
-            feature_df = _meta.merge(feature_df, on="stock_code", how="left")
+            # ---- Step 4.5: T6 — 多策略元数据注入 & sample_id 生成 ----
+            # 对每个策略的 candidate_df 分别 merge 到 feature_df_base，再 concat
+            # 同一股票可在多个策略/板块中重复出现（sample_id 包含 strategy_id + sector_name 保证唯一）
+            strategy_slices = []
+            for _cdf in all_candidate_dfs:
+                _meta = _cdf[
+                    ["ts_code", "strategy_id", "strategy_name", "sector_name", "feature_trade_date"]
+                ].rename(columns={"ts_code": "stock_code"})
+                _slice = _meta.merge(feature_df_base, on="stock_code", how="left")
+                strategy_slices.append(_slice)
+
+            feature_df = pd.concat(strategy_slices, ignore_index=True)
             # sample_id = "strategy_id__stock_code__trade_date__sector_name"
             feature_df["sample_id"] = (
                 feature_df["strategy_id"] + "__"
@@ -470,12 +497,16 @@ if __name__ == "__main__":
             )
             logger.info(
                 f"{date} 策略元数据注入完成 | 行数: {len(feature_df)} "
-                f"| 唯一股票: {feature_df['stock_code'].nunique()}"
+                f"| 唯一股票: {feature_df['stock_code'].nunique()} "
+                f"| 策略分布: {feature_df['strategy_id'].value_counts().to_dict()}"
             )
 
-            # ---- Step 5: 标签生成 ----
+            # ---- Step 5: 标签生成（用 feature_trade_date = D-1，与 feature_df.trade_date 对齐）----
+            # feature_df["trade_date"] = D-1（由 FeatureDataBundle.trade_date = feature_trade_date 决定）
+            # label_engine 以 D-1 为基准：D（D-1 的下一交易日）开盘买入，收盘卖出 → label1
+            _feature_trade_date = sector_heat_context["feature_trade_date"]
             label_df = label_engine.generate_single_date(
-                date, feature_df["stock_code"].unique().tolist()
+                _feature_trade_date, feature_df["stock_code"].unique().tolist()
             )
             if label_df.empty:
                 logger.warning(f"{date} 标签生成失败，跳过")
