@@ -1,5 +1,6 @@
 # learnEngine/__init__.py
 # from .mock_data_generator import generate_full_mock_dataset
+from .factor_search import SearchResultExporter, FactorGroupEngine, FactorSearchEngine
 from .label import LabelEngine
 from .dataset import ProcessedDatesManager, DataSetAssembler, validate_train_dataset
 from .model import SectorHeatXGBModel
