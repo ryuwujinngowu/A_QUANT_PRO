@@ -17,15 +17,15 @@ TRAIN_CSV_PATH = os.path.join(
     _BASE_DIR, "learnEngine", "datasets", "train_dataset_recent_2411_2602.csv"
 )
 SELECTED_FEATURES_PATH = os.path.join(
-    _BASE_DIR, "learnEngine", "search_results", "selected_features_v6.3.json"
+    _BASE_DIR, "learnEngine", "search_results", "selected_features_v6.4.json"
 )
 MODEL_DIR = os.path.join(_BASE_DIR, "model")
 
 # ═══════════════════════════════════════════════
 # 训练基础配置
 # ═══════════════════════════════════════════════
-MODEL_VERSION = "v6.3_recent_2411_2602_p30"
-TARGET_LABEL  = "label1"   # 切换此处即可更换训练目标（见下方可选值）
+MODEL_VERSION = "v6.4_recent_2411_2602_3pct"
+TARGET_LABEL  = "label1_3pct"   # 切换此处即可更换训练目标（见下方可选值）
 # 可选 TARGET_LABEL 值：
 #   "label1"             — D+1 日内涨幅 >= 5%（主模型）
 #   "label2"             — D+1 日内盈利 AND D+2 高开（隔夜强势）
@@ -49,7 +49,7 @@ EXCLUDE_COLS = [
     # 浮点 label
     "label_raw_return", "label_open_gap", "label_d1_high", "label_d1_low",
     "label_d1_pct_chg", "label_d2_return",
-    # 元数据
+    # 元数据 / 辅助列（非因子，不进入训练）
     "sector_name", "top3_sectors",
 ]
 
