@@ -62,6 +62,10 @@ class SectorHeatStrategy(BaseStrategy):
         2. 已运行 python train.py 训练并保存模型
     """
 
+    @property
+    def strategy_id(self) -> str:
+        return "sector_heat"
+
     def __init__(self):
         super().__init__()
         self.strategy_name = "板块热度XGBoost盘前选股，开盘买入策略"
@@ -72,7 +76,7 @@ class SectorHeatStrategy(BaseStrategy):
             "load_minute": True,     # 是否加载分钟线（保证特征与训练口径一致）
             "model_path": os.path.join(
                 os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                "model", "sector_heat_xgb_model.pkl",
+                "model", "sector_heat_xgb_v5.2_auc_first.pkl",
             ),
         }
 
@@ -163,6 +167,106 @@ class SectorHeatStrategy(BaseStrategy):
         """卖出成功后从内部持仓字典移除"""
         self.hold_stock_dict.pop(ts_code, None)
 
+    def supports_ml_training(self) -> bool:
+        return True
+
+    def get_training_label_target(self) -> str:
+        return "label1"
+
+    def get_model_registry_info(self) -> Dict[str, str]:
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        return {
+            "strategy_id": self.strategy_id,
+            "archive_dir": os.path.join(base_dir, "model", self.strategy_id, "archive"),
+            "runtime_dir": os.path.join(base_dir, "model", self.strategy_id, "runtime"),
+        }
+
+    def _get_prev_trade_date(self, trade_date: str) -> str:
+        """获取 D 日对应的前一交易日 D-1。"""
+        d_date = datetime.strptime(trade_date, "%Y-%m-%d")
+        start_lookback = (d_date - timedelta(days=20)).strftime("%Y-%m-%d")
+        all_dates = get_trade_dates(start_lookback, trade_date)
+        if len(all_dates) < 2:
+            raise ValueError(f"{trade_date} 无法获取前一交易日")
+        return all_dates[-2]
+
+    def _get_selection_context(self, trade_date: str) -> Dict[str, any]:
+        """构建选股上下文：D-1、Top3 板块、adapt_score。"""
+        prev_trade_date = self._get_prev_trade_date(trade_date)
+        top3_result = self._sector_heat.select_top3_hot_sectors(prev_trade_date)
+        top3_sectors = top3_result["top3_sectors"]
+        adapt_score = top3_result["adapt_score"]
+        return {
+            "trade_date": trade_date,
+            "feature_trade_date": prev_trade_date,
+            "top3_sectors": top3_sectors,
+            "adapt_score": adapt_score,
+        }
+
+    def build_training_candidates(
+        self,
+        trade_date: str,
+        daily_df: pd.DataFrame = None,
+    ) -> Tuple[pd.DataFrame, Dict[str, any]]:
+        """
+        构建策略训练候选样本，返回 (candidate_df, context)。
+        candidate_df 保留一行一股票；context 供特征层与后续全局训练池复用。
+        """
+        context = self._get_selection_context(trade_date)
+        top3_sectors = context["top3_sectors"]
+        prev_trade_date = context["feature_trade_date"]
+
+        if not top3_sectors:
+            return pd.DataFrame(), context
+
+        try:
+            data_cleaner.insert_stock_st(trade_date=trade_date.replace("-", ""))
+        except Exception as e:
+            logger.warning(f"{trade_date} ST 数据入库失败（忽略）: {e}")
+
+        prev_daily_df = daily_df if daily_df is not None else get_daily_kline_data(prev_trade_date)
+        if prev_daily_df.empty:
+            return pd.DataFrame(), context
+
+        sector_candidate_map, target_ts_codes = self._build_candidate_pool(
+            trade_date, prev_daily_df, top3_sectors
+        )
+        context["sector_candidate_map"] = sector_candidate_map
+        context["target_ts_codes"] = target_ts_codes
+
+        if not target_ts_codes:
+            return pd.DataFrame(), context
+
+        candidate_rows = []
+        for sector_name, sector_df in sector_candidate_map.items():
+            if sector_df.empty:
+                continue
+            tmp = sector_df.copy()
+            tmp["strategy_id"] = self.strategy_id
+            tmp["strategy_name"] = self.strategy_name
+            tmp["sector_name"] = sector_name
+            tmp["feature_trade_date"] = prev_trade_date
+            candidate_rows.append(tmp)
+
+        if not candidate_rows:
+            return pd.DataFrame(), context
+        candidate_df = pd.concat(candidate_rows, ignore_index=True)
+        return candidate_df, context
+
+    def build_feature_bundle_from_context(self, context: Dict[str, any]):
+        """基于共享上下文统一构造 FeatureDataBundle。"""
+        target_ts_codes = context.get("target_ts_codes") or []
+        if not target_ts_codes:
+            return None
+        return FeatureDataBundle(
+            trade_date=context["feature_trade_date"],
+            target_ts_codes=target_ts_codes,
+            sector_candidate_map=context["sector_candidate_map"],
+            top3_sectors=context["top3_sectors"],
+            adapt_score=context["adapt_score"],
+            load_minute=self.strategy_params["load_minute"],
+        )
+
     # ------------------------------------------------------------------ #
     # 核心：买入信号生成
     # ------------------------------------------------------------------ #
@@ -180,69 +284,28 @@ class SectorHeatStrategy(BaseStrategy):
             logger.error(f"{trade_date} 模型未就绪，跳过买入")
             return {}
 
-        # ── 获取前一交易日（D-1）────────────────────────────────────────────
-        # 所有特征/候选池均基于 D-1，确保 D 日开盘前无未来函数
+        # ── 共享候选池与上下文构建（与训练口径同源）────────────────────────
         try:
-            d_date = datetime.strptime(trade_date, "%Y-%m-%d")
-            start_lookback = (d_date - timedelta(days=20)).strftime("%Y-%m-%d")
-            all_dates = get_trade_dates(start_lookback, trade_date)
-            if len(all_dates) < 2:
-                logger.error(f"{trade_date} 无法获取前一交易日，跳过买入")
-                return {}
-            prev_trade_date = all_dates[-2]  # D-1
+            candidate_df, context = self.build_training_candidates(trade_date, daily_df=None)
         except Exception as e:
-            logger.error(f"{trade_date} 获取前一交易日失败: {e}")
+            logger.error(f"{trade_date} 候选池构建失败: {e}", exc_info=True)
             return {}
 
-        # ── Step 1: Top3 板块 + 轮动分（基于 D-1 数据）────────────────────
-        try:
-            top3_result  = self._sector_heat.select_top3_hot_sectors(prev_trade_date)
-            top3_sectors = top3_result["top3_sectors"]
-            adapt_score  = top3_result["adapt_score"]
-        except Exception as e:
-            logger.error(f"{trade_date} 板块热度计算失败: {e}", exc_info=True)
-            return {}
-
-        if not top3_sectors:
-            logger.warning(f"{trade_date} Top3 板块为空（基于 {prev_trade_date}），跳过买入")
-            return {}
-
-        logger.info(f"{trade_date} Top3={top3_sectors} | adapt_score={adapt_score} (基于 {prev_trade_date})")
-        # if adapt_score >=50:
-        #     logger.warning(f"{adapt_score} 轮动过快")
-        #     return {}
-
-        # ── ST 数据入库（非致命，异常不中断选股）────────────────────────────
-        try:
-            data_cleaner.insert_stock_st(trade_date=trade_date.replace("-", ""))
-        except Exception as e:
-            logger.warning(f"{trade_date} ST 数据入库失败（忽略）: {e}")
-
-        # ── Step 2: 候选池构建（D-1 行情数据；ST/涨停基因截止 D 日）─────────
-        # 注意：trade_date(D) 用于 ST 过滤和涨停基因截止日（含 D-1），
-        #       prev_daily_df(D-1) 用于流动性/涨停封板过滤，确保无未来函数。
-        prev_daily_df = get_daily_kline_data(prev_trade_date)
-        if prev_daily_df.empty:
-            logger.warning(f"{trade_date} 无 {prev_trade_date} 日线数据，跳过买入")
-            return {}
-
-        sector_candidate_map, target_ts_codes = self._build_candidate_pool(
-            trade_date, prev_daily_df, top3_sectors
-        )
-        if not target_ts_codes:
+        if candidate_df.empty:
             logger.warning(f"{trade_date} 候选池为空，跳过买入")
             return {}
 
+        logger.info(
+            f"{trade_date} Top3={context.get('top3_sectors')} | "
+            f"adapt_score={context.get('adapt_score')} (基于 {context.get('feature_trade_date')})"
+        )
+
         # ── Step 3: 特征计算（基于 D-1，与训练口径一致）──────────────────────
         try:
-            bundle = FeatureDataBundle(
-                trade_date=prev_trade_date,
-                target_ts_codes=target_ts_codes,
-                sector_candidate_map=sector_candidate_map,
-                top3_sectors=top3_sectors,
-                adapt_score=adapt_score,
-                load_minute=self.strategy_params["load_minute"],
-            )
+            bundle = self.build_feature_bundle_from_context(context)
+            if bundle is None:
+                logger.warning(f"{trade_date} Feature bundle 为空，跳过买入")
+                return {}
             feature_df = self._feature_engine.run_single_date(bundle)
         except Exception as e:
             logger.error(f"{trade_date} 特征计算失败: {e}", exc_info=True)

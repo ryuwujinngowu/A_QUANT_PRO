@@ -7,7 +7,7 @@
 3. 统一管理策略通用属性（如信号映射、策略名称）
 """
 from abc import ABC, abstractmethod
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Tuple, Optional, Any
 from utils.log_utils import logger
 from config.config import (
     MAIN_BOARD_LIMIT_UP_RATE,
@@ -107,6 +107,46 @@ class BaseStrategy(ABC):
             "strategy_name": self.strategy_name,
             "strategy_params": self.strategy_params
         }
+
+    # ========== ML 中台扩展接口（默认非启用，子类按需重写） ==========
+    @property
+    def strategy_id(self) -> str:
+        """策略机器可读 ID。默认用类名小写，子类可覆盖为稳定 ID。"""
+        return self.__class__.__name__.lower()
+
+    def supports_ml_training(self) -> bool:
+        """是否参与 ML 中台的候选样本构建。默认 False，避免影响旧策略。"""
+        return False
+
+    def get_training_label_target(self) -> Optional[str]:
+        """返回该策略默认训练标签名。默认 None，由训练层决定。"""
+        return None
+
+    def get_model_registry_info(self) -> Dict[str, Any]:
+        """返回策略模型归档/运行时目录等元信息。子类可按需覆盖。"""
+        return {
+            "strategy_id": self.strategy_id,
+            "archive_dir": None,
+            "runtime_dir": None,
+        }
+
+    def build_training_candidates(
+        self,
+        trade_date: str,
+        daily_df: Optional[pd.DataFrame] = None,
+    ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+        """
+        构建训练候选样本及上下文。
+        默认返回空结果，供不参与 ML 的旧策略安全降级。
+        """
+        return pd.DataFrame(), {}
+
+    def build_feature_bundle_from_context(self, context: Dict[str, Any]):
+        """
+        基于训练/推理上下文构造特征 bundle。
+        默认返回 None，交由支持 ML 的子类实现。
+        """
+        return None
 
     def get_params_summary(self) -> str:
         """

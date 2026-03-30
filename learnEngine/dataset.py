@@ -29,8 +29,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from config.config import FILTER_BSE_STOCK, FILTER_STAR_BOARD, FILTER_688_BOARD
 from data.data_cleaner import data_cleaner
 from features import FeatureEngine, FeatureDataBundle
-from features.sector.sector_heat_feature import SectorHeatFeature
 from learnEngine.label import LabelEngine
+from strategies.sector_heat_strategy import SectorHeatStrategy
 from utils.common_tools import (
     get_stocks_in_sector,
     filter_st_stocks,
@@ -357,7 +357,7 @@ if __name__ == "__main__":
     # ---------- 初始化核心组件 ----------
     feature_engine    = FeatureEngine()          # 使用 features/__init__.py 的新引擎
     label_engine      = LabelEngine(_label_start, _label_end)
-    sector_heat       = SectorHeatFeature()
+    strategy          = SectorHeatStrategy()
     dates_manager     = ProcessedDatesManager(PROCESSED_DATES_FILE, FACTOR_VERSION)
 
     # ---------- 确定待处理日期 ----------
@@ -412,22 +412,8 @@ if __name__ == "__main__":
     for date in to_process:
         logger.info(f"\n========== 处理日期: {date} ==========")
         try:
-            # ---- Step 1: Top3 板块 + 轮动分（必须先于候选池构建）----
-            top3_result   = sector_heat.select_top3_hot_sectors(trade_date=date)
-            top3_sectors  = top3_result["top3_sectors"]
-            adapt_score   = top3_result["adapt_score"]
-
-            if not top3_sectors:
-                logger.warning(f"{date} Top3 板块为空，跳过")
-                consecutive_fails = 0  # 数据合理缺失，非系统性错误
-                continue
-
-            # ---- Step 2: ST + 宏观数据入库 ----
+            # ---- Step 1: 预拉取当日宏观数据入库 ----
             date_fmt = date.replace("-", "")
-            try:
-                data_cleaner.insert_stock_st(trade_date=date_fmt)
-            except Exception as e:
-                logger.error(f"{date} ST 数据入库失败: {e}", exc_info=True)
             try:
                 data_cleaner.clean_and_insert_limit_list_ths(trade_date=date_fmt, limit_type="涨停池")
                 data_cleaner.clean_and_insert_limit_list_ths(trade_date=date_fmt, limit_type="跌停池")
@@ -437,86 +423,34 @@ if __name__ == "__main__":
             except Exception as e:
                 logger.error(f"{date} 宏观数据入库失败: {e}", exc_info=True)
 
-            # ---- Step 3: 构建板块候选池 ----
-            daily_df          = get_daily_kline_data(date)   # 当日全市场日线（预取，后续复用）
-            sector_candidate_map: Dict = {}
+            # ---- Step 2: 复用策略共享候选池逻辑 ----
+            daily_df = get_daily_kline_data(date)
+            candidate_df, context = strategy.build_training_candidates(date, daily_df=daily_df)
+            top3_sectors = context.get("top3_sectors") or []
 
-            for sector in top3_sectors:
-                logger.info(f"处理板块: {sector}")
-                try:
-                    raw_stocks = get_stocks_in_sector(sector)
-                    if not raw_stocks:
-                        logger.warning(f"[{sector}] 无股票，跳过")
-                        sector_candidate_map[sector] = pd.DataFrame()
-                        continue
-
-                    ts_codes = [item["ts_code"] for item in raw_stocks]
-
-                    # 板块过滤（北交所 / 科创 / 创业板）
-                    ts_codes = _filter_ts_code_by_board(ts_codes)
-                    if not ts_codes:
-                        sector_candidate_map[sector] = pd.DataFrame()
-                        continue
-
-                    # ST 过滤
-                    ts_codes = filter_st_stocks(ts_codes, date)
-                    if not ts_codes:
-                        sector_candidate_map[sector] = pd.DataFrame()
-                        continue
-
-                    # 过滤当日无日线数据的股票
-                    sector_daily = daily_df[daily_df["ts_code"].isin(ts_codes)].copy()
-                    if sector_daily.empty:
-                        sector_candidate_map[sector] = pd.DataFrame()
-                        continue
-
-                    # 近 10 日涨停基因过滤（仅保留有涨停基因的个股）
-                    candidates   = sector_daily["ts_code"].unique().tolist()
-                    limit_up_map = _check_stock_has_limit_up(candidates, date, day_count=10)
-                    keep         = [ts for ts, has in limit_up_map.items() if has]
-                    sector_daily = sector_daily[sector_daily["ts_code"].isin(keep)]
-
-                    # D 日涨停封板过滤（收盘价==涨停价，买不进去）
-                    sector_daily = _filter_limit_up_on_d0(sector_daily)
-
-                    # 低流动性过滤
-                    sector_daily = _filter_low_liquidity(sector_daily)
-
-                    sector_candidate_map[sector] = sector_daily
-                    logger.info(f"[{sector}] 最终候选股: {len(sector_candidate_map[sector])}")
-
-                except Exception as e:
-                    logger.error(f"[{sector}] 处理失败: {e}", exc_info=True)
-                    sector_candidate_map[sector] = pd.DataFrame()
-
-            # ---- Step 4: 构建数据容器（一次 IO 覆盖所有因子）----
-            target_ts_codes = list({
-                ts
-                for df in sector_candidate_map.values()
-                if not df.empty
-                for ts in df["ts_code"].tolist()
-            })
-            if not target_ts_codes:
+            if not top3_sectors:
+                logger.warning(f"{date} Top3 板块为空，跳过")
+                consecutive_fails = 0
+                continue
+            if candidate_df.empty:
                 logger.warning(f"{date} 候选池为空，跳过")
-                consecutive_fails = 0  # 候选池为空属于正常数据情况
+                consecutive_fails = 0
                 continue
 
-            data_bundle = FeatureDataBundle(
-                trade_date           = date,
-                target_ts_codes      = target_ts_codes,
-                sector_candidate_map = sector_candidate_map,
-                top3_sectors         = top3_sectors,
-                adapt_score          = adapt_score,   # 注入，avoid 重复计算
-                load_minute          = True,
-            )
+            # ---- Step 3: 构建数据容器（一次 IO 覆盖所有因子）----
+            data_bundle = strategy.build_feature_bundle_from_context(context)
+            if data_bundle is None:
+                logger.warning(f"{date} FeatureDataBundle 构建失败，跳过")
+                consecutive_fails = 0
+                continue
 
-            # ---- Step 5: 特征计算（adapt_score 已在 bundle 中，自动输出到 feature_df）----
+            # ---- Step 4: 特征计算（adapt_score 已在 bundle 中，自动输出到 feature_df）----
             feature_df = feature_engine.run_single_date(data_bundle)
             if feature_df.empty:
                 logger.warning(f"{date} 特征计算失败，跳过")
                 continue
 
-            # ---- Step 6: 标签生成 ----
+            # ---- Step 5: 标签生成 ----
             label_df = label_engine.generate_single_date(
                 date, feature_df["stock_code"].unique().tolist()
             )
