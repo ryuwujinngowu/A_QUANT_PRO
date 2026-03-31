@@ -456,13 +456,107 @@ def getStockRank_fortraining(trade_date: str) -> Optional[pd.DataFrame]:
     return result_df
 
 
+def _getTagRank_daily_ths(
+        ts_code_list: List[str],
+        exclude_concepts: List[str],
+        input_stock_count: int,
+        min_concept_members: int = 30,
+        max_concept_members: int = 500,
+) -> Optional[pd.DataFrame]:
+    """
+    THS 路径：通过 ths_member + ths_index 统计题材覆盖情况。
+    type = 'N' 在 DB 层直接过滤宽基指数（BB/S/ST/R 等），比 concept_tags 更准确。
+
+    排序规则（v2，2026-04-01）：
+      按活跃股绝对数量（cover_stock_count）降序，不再除以概念总成员数。
+      原活跃占比排序会天然把小概念提上来（3只/36只=8% > 15只/271只=5.5%），
+      导致每日 Top 板块剧烈跳动，实际主线被压制。
+
+    噪音过滤（双层）：
+      1. 成员数范围：[min_concept_members, max_concept_members]
+      2. LIKE 过滤：指数成份/年报季报/政策地域/宽泛主题等噪音概念
+
+    :param min_concept_members: 成员数下限（默认30，过滤超小概念）
+    :param max_concept_members: 成员数上限（默认500，过滤宽泛概念）
+    :return: DataFrame(concept_name, cover_stock_count, concept_total, active_rate) 或 None
+    """
+    if not ts_code_list:
+        return None
+    ph_c = ", ".join(["%s"] * len(ts_code_list))
+    params: list = list(ts_code_list)
+
+    exclude_cond = ""
+    if exclude_concepts:
+        ph_e = ", ".join(["%s"] * len(exclude_concepts))
+        exclude_cond = f"AND i.name NOT IN ({ph_e})"
+        params.extend(exclude_concepts)
+
+    sql = f"""
+        SELECT i.name AS concept_name,
+               COUNT(DISTINCT m.con_code) AS cover_stock_count,
+               i.count AS concept_total
+        FROM ths_member m
+        JOIN ths_index i ON m.ts_code = i.ts_code
+        WHERE m.con_code IN ({ph_c})
+          AND m.is_new = 'Y'
+          AND i.type = 'N'
+          AND i.exchange = 'A'
+          AND i.count >= {min_concept_members}
+          AND i.count <= {max_concept_members}
+          -- 指数/成份/年报季报类
+          AND i.name NOT LIKE '%%成份股%%'
+          AND i.name NOT LIKE '%%指数%%'
+          AND i.name NOT LIKE '%%概念股%%'
+          AND i.name NOT LIKE '%%年报%%'
+          AND i.name NOT LIKE '%%季报%%'
+          AND i.name NOT LIKE '%%摘帽%%'
+          AND i.name NOT LIKE '%%回购增持%%'
+          -- 事件驱动/并购重组类
+          AND i.name NOT LIKE '%%并购%%'
+          AND i.name NOT LIKE '%%重组%%'
+          AND i.name NOT LIKE '%%创投%%'
+          -- 政策地域主题
+          AND i.name NOT LIKE '%%振兴%%'
+          AND i.name NOT LIKE '%%大湾区%%'
+          AND i.name NOT LIKE '%%两岸%%'
+          AND i.name NOT LIKE '%%一体化%%'
+          AND i.name NOT LIKE '%%自贸区%%'
+          AND i.name NOT LIKE '%%东数西算%%'
+          AND i.name NOT LIKE '%%算力%%'
+          -- 过宽泛主题（精确匹配）
+          AND i.name != '高端装备'
+          AND i.name != '数字经济'
+          AND i.name != '碳中和'
+          AND i.name != '工业互联网'
+          AND i.name != '消费电子概念'
+          AND i.name NOT LIKE '%%次新股%%'
+          {exclude_cond}
+        GROUP BY i.name, i.count
+        HAVING cover_stock_count >= 3
+        ORDER BY cover_stock_count DESC
+        LIMIT 5
+    """
+    try:
+        df = db.query(sql, params=tuple(params), return_df=True)
+        if df is None or df.empty:
+            return None
+        df["active_rate"] = round(
+            df["cover_stock_count"].astype(float) / df["concept_total"].astype(float) * 100, 2
+        )
+        return df
+    except Exception as e:
+        logger.warning(f"[getTagRank_daily] THS路径查询失败：{e}")
+        return None
+
+
 def getTagRank_daily(
         ts_code_list: List[str],
         exclude_concepts: Optional[List[str]] = None
 ) -> Optional[pd.DataFrame]:
     """
-    接受股票ts_code列表，本地拆分逗号分隔的题材字段，统计题材覆盖情况
-    支持传入黑名单数组，过滤掉不具备分析性的题材
+    接受股票ts_code列表，统计题材覆盖情况。
+    优先使用 THS ths_member（type IN ('N','I')，结构化过滤宽基指数）；
+    THS 无数据时降级使用 concept_tags（LLM生成，兼容旧路径）。
 
     :param ts_code_list: 待分析的股票代码列表（带.SZ/.SH后缀）
     :param exclude_concepts: 需要忽略的题材黑名单数组（可选，不传则使用默认黑名单）
@@ -487,6 +581,15 @@ def getTagRank_daily(
     ts_code_list = list(set(ts_code_list))
     input_stock_count = len(ts_code_list)
     logger.debug(f"开始统计{input_stock_count}只股票的题材覆盖情况，黑名单题材数：{len(exclude_concepts)}")
+
+    # ==================== THS优先路径（暂时禁用，待修复后重新启用）====================
+    # TODO: THS路径与concept_tags方法相似度不足80%，粒度过细导致adapt_score严重偏差
+    # 修复计划见记忆文档：project_ths_sector_fix_plan.md
+    # ths_result = _getTagRank_daily_ths(ts_code_list, exclude_concepts, input_stock_count)
+    # if ths_result is not None:
+    #     logger.debug(f"[getTagRank_daily] THS路径成功，返回{len(ths_result)}个板块")
+    #     return ths_result
+    # logger.debug("[getTagRank_daily] THS路径无数据，降级使用concept_tags")
 
     # ==================== 2. 极简SQL查询原始数据 ====================
     ts_code_str = "','".join(ts_code_list)
@@ -851,22 +954,59 @@ def get_market_total_volume(dates: List[str]) -> pd.DataFrame:
 
 def get_stocks_in_sector(sector_name: str) -> List[str]:
     """
-    【通用工具】从stock_basic表查询指定板块/概念对应的所有股票代码
-    精准匹配逗号分隔的concept_text字段，避免模糊匹配错误
-    :param sector_name: 板块/概念完整名称（如"人工智能"、"算力"）
-    :return: 该板块下的所有股票ts_code列表，查询失败/无结果返回空列表
+    【通用工具】查询指定板块/概念对应的所有股票代码。
+    优先使用 THS ths_member（结构化成员表，覆盖更全）；
+    THS 无结果时降级使用 concept_tags（LLM生成，兜底）。
+
+    设计原则：宁可多覆盖，不漏网。后续候选池过滤（ST/涨停基因/流动性）
+    会做精确筛选，反查阶段尽量保全所有同概念股票。
+
+    :param sector_name: 板块/概念完整名称（如"绿色电力"、"商业航天"）
+    :return: list of dict with 'ts_code'，查询失败返回空列表
     """
     sector_name_clean = str(sector_name).strip()
-    # 核心SQL：用MySQL原生FIND_IN_SET精准匹配逗号分隔的概念
-    # 加入LOWER兼容大小写不一致的场景，DISTINCT去重避免重复数据
+
+    # ─── THS 优先路径 ────────────────────────────────────────────────────
+    try:
+        idx_rows = db.query(
+            "SELECT ts_code, `count` FROM ths_index "
+            "WHERE name = %s AND exchange = 'A' AND type IN ('N', 'I') LIMIT 1",
+            params=(sector_name_clean,),
+        ) or []
+        if idx_rows:
+            board_code   = idx_rows[0]["ts_code"]
+            expected_cnt = int(idx_rows[0].get("count") or 0)
+            cnt_rows = db.query(
+                "SELECT COUNT(*) AS n FROM ths_member WHERE ts_code = %s AND is_new = 'Y'",
+                params=(board_code,),
+            ) or []
+            actual_cnt = int(cnt_rows[0].get("n", 0) if cnt_rows else 0)
+            # 本地成员数严重不足时（空或不足预期的50%），触发补拉
+            need_reload = (actual_cnt == 0) or (
+                expected_cnt > 0 and actual_cnt < expected_cnt * 0.5
+            )
+            if need_reload:
+                logger.info(f"[get_stocks_in_sector] {sector_name_clean} 成员不足({actual_cnt}/{expected_cnt})，补拉 ths_member")
+                from data.data_cleaner import data_cleaner
+                data_cleaner.clean_and_insert_ths_member_batch(ts_code_list=[board_code])
+            member_rows = db.query(
+                "SELECT con_code AS ts_code FROM ths_member WHERE ts_code = %s AND is_new = 'Y'",
+                params=(board_code,),
+            ) or []
+            if member_rows:
+                logger.info(f"[get_stocks_in_sector] THS路径 | {sector_name_clean} → {len(member_rows)} 只")
+                return member_rows
+    except Exception as e:
+        logger.warning(f"[get_stocks_in_sector] THS查询失败，降级concept_tags：{e}")
+
+    # ─── 降级：concept_tags ─────────────────────────────────────────────
+    logger.info(f"[get_stocks_in_sector] concept_tags降级路径 | {sector_name_clean}")
     sql = """
-        SELECT DISTINCT ts_code 
-        FROM stock_basic 
+        SELECT DISTINCT ts_code
+        FROM stock_basic
         WHERE FIND_IN_SET(%s, concept_tags) > 0
-          """
-    # 执行参数化查询（防SQL注入，完全适配项目db工具的调用方式）
-    result_df = db.query(sql, params=(sector_name_clean,))
-    return result_df
+    """
+    return db.query(sql, params=(sector_name_clean,)) or []
 
 
 
@@ -951,12 +1091,34 @@ def analyze_stock_follower_strength(
         tags = re.split(r"[,，；;]+", str(raw_tags))
         return [t.strip() for t in tags if t.strip() and t.strip() not in _exclude_set]
 
-    # ── Step 1: 加载目标股概念（排除 default_exclude）──────────────────────
-    rows = db.query("SELECT concept_tags FROM stock_basic WHERE ts_code = %s LIMIT 1", params=(ts_code,)) or []
-    if not rows:
-        result["judgement_summary"].append("no_stock_basic")
-        return result
-    valid_concepts = _normalize_tags(rows[0].get("concept_tags", ""))
+    # ── Step 1: 加载目标股概念（THS优先，降级 concept_tags）──────────────────────
+    valid_concepts: List[str] = []
+    try:
+        _ths_rows = db.query(
+            """SELECT i.name
+               FROM ths_member m
+               JOIN ths_index i ON m.ts_code = i.ts_code
+               WHERE m.con_code = %s
+                 AND m.is_new = 'Y'
+                 AND i.type = 'N'
+                 AND i.exchange = 'A'""",
+            params=(ts_code,),
+        ) or []
+        valid_concepts = [
+            r["name"] for r in _ths_rows
+            if r.get("name") and r["name"].strip() not in _exclude_set
+        ]
+    except Exception as _e:
+        logger.warning(f"[follower:{ts_code}] THS概念查询失败，降级concept_tags：{_e}")
+
+    if not valid_concepts:
+        # 降级：concept_tags
+        rows = db.query("SELECT concept_tags FROM stock_basic WHERE ts_code = %s LIMIT 1", params=(ts_code,)) or []
+        if not rows:
+            result["judgement_summary"].append("no_stock_basic")
+            return result
+        valid_concepts = _normalize_tags(rows[0].get("concept_tags", ""))
+
     result["concept_tags"] = valid_concepts
     if not valid_concepts:
         result["judgement_summary"].append("no_valid_concepts")
@@ -2196,6 +2358,73 @@ def ensure_ths_member_data(ts_code_list: List[str]) -> None:
 
     logger.info(f"[ensure_ths_member_data] {len(missing)} 个板块需补拉成分数据")
     data_cleaner.clean_and_insert_ths_member_batch(ts_code_list=missing)
+
+
+def ensure_ths_member_ni_boards(type_filter: str = "N") -> None:
+    """
+    一次性补拉所有 N 类（概念）或 N+I 类（概念+行业）板块的成分数据到 ths_member。
+
+    用途：初次部署或数据不完整时调用，确保 getTagRank_daily / get_stocks_in_sector
+    的 THS 路径能有充足数据。运行时间约 5~15 分钟（~1000 个板块，API 限流 200次/分钟）。
+
+    :param type_filter: 'N'=只拉概念板块（默认）；'NI'=同时拉概念+行业板块
+    """
+    from data.data_cleaner import data_cleaner
+
+    if type_filter == "NI":
+        type_cond = "type IN ('N', 'I')"
+    else:
+        type_cond = "type = 'N'"
+
+    try:
+        rows = db.query(
+            f"SELECT ts_code FROM ths_index WHERE exchange = 'A' AND {type_cond} ORDER BY ts_code"
+        ) or []
+        all_boards = [r["ts_code"] for r in rows if r.get("ts_code")]
+    except Exception as e:
+        logger.error(f"[ensure_ths_member_ni_boards] 查 ths_index 失败：{e}")
+        return
+
+    if not all_boards:
+        logger.warning("[ensure_ths_member_ni_boards] ths_index 无 N/I 类板块，请先确保 ths_index 已入库")
+        return
+
+    # 补拉策略：
+    #   1. 完全没有数据的板块 → 补拉
+    #   2. 有数据但不足期望数×50%（且期望数>0）的板块 → 视为不完整，重新拉取
+    try:
+        cnt_rows = db.query(
+            "SELECT m.ts_code, COUNT(*) AS actual, i.count AS expected "
+            "FROM ths_member m "
+            "JOIN ths_index i ON m.ts_code = i.ts_code "
+            f"WHERE m.ts_code IN %s AND m.is_new = 'Y' "
+            "GROUP BY m.ts_code, i.count",
+            params=(tuple(all_boards),),
+        ) or []
+        existing_map = {r["ts_code"]: (int(r["actual"] or 0), int(r["expected"] or 0)) for r in cnt_rows}
+    except Exception as e:
+        logger.warning(f"[ensure_ths_member_ni_boards] 查已有板块失败：{e}，从头补拉")
+        existing_map = {}
+
+    missing = []
+    for ts in all_boards:
+        if ts not in existing_map:
+            missing.append(ts)  # 完全没有数据
+        else:
+            actual, expected = existing_map[ts]
+            if expected > 0 and actual < expected * 0.5:
+                missing.append(ts)  # 数据不完整
+
+    if not missing:
+        logger.info(f"[ensure_ths_member_ni_boards] 所有 {len(all_boards)} 个板块数据已完整，无需补拉")
+        return
+
+    logger.info(
+        f"[ensure_ths_member_ni_boards] 共 {len(all_boards)} 个板块，"
+        f"已完整 {len(all_boards) - len(missing)} 个，需补拉 {len(missing)} 个"
+    )
+    data_cleaner.clean_and_insert_ths_member_batch(ts_code_list=missing)
+    logger.info(f"[ensure_ths_member_ni_boards] 补拉完成")
 
 
 def get_ths_index_list(
