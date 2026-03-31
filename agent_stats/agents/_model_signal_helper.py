@@ -14,7 +14,9 @@ from typing import Dict, List
 import numpy as np
 import pandas as pd
 
-from strategies.sector_heat_strategy import SectorHeatStrategy
+from config.config import FILTER_BSE_STOCK
+import learnEngine.train_config as cfg
+from strategies.sector_heat.sector_heat_strategy import SectorHeatStrategy
 from utils.log_utils import logger
 from utils.xgb_compat import safe_predict_proba
 
@@ -24,11 +26,8 @@ _MIN_PROB  = 0.60      # 最低买入概率阈值
 _MIN_AMOUNT = 10_000   # 低流动性阈值（千元，= 1000 万元）
 _LOAD_MINUTE = True    # 特征计算是否加载分钟线（与训练口径一致）
 
-# 模型路径（老版模型，供 model_open_buy 使用）
-_MODEL_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-    "model", "sector_heat_xgb_model.pkl",
-)
+# 模型路径（推理层读取策略目录下的 runtime_model；要求目录中恰好只有一个版本模型）
+_MODEL_PATH = cfg.get_strategy_runtime_model_path("sector_heat")
 
 # 模块级单例（避免每个 agent 各自加载一份模型和策略对象）
 _strategy = SectorHeatStrategy()

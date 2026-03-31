@@ -5,8 +5,8 @@ from config.config import DEFAULT_INIT_CAPITAL
 # from strategies.model_dip_strategy import ModelDipStrategy
 # from strategies.model_surge_strategy import ModelSurgeStrategy
 # from strategies.multi_limit_up_strategy import MultiLimitUpStrategy
-from strategies.sector_heat_strategy import SectorHeatStrategy                  #热点情绪板块筛选买入策略
-from strategies.long_high_low_switch_strategy import HighLowSwitchStrategy      #高低切轮动策略
+from strategies.sector_heat.sector_heat_strategy import SectorHeatStrategy                  #热点情绪板块筛选买入策略
+# from strategies.long_high_low_switch_strategy import HighLowSwitchStrategy      #高低切轮动策略
 
 
 def main():
@@ -16,8 +16,8 @@ def main():
 
     #=================有没有新概念，记得维护概念表================
     #========================================================
-    START_DATE = "2026-01-01"  # 回测开始日期（验证集范围内）
-    END_DATE = "2026-03-01"    # 回测结束日期（约2个月）
+    START_DATE = "2026-03-01"  # 回测开始日期（验证集范围内）
+    END_DATE = "2026-03-30"    # 回测结束日期（约2个月）
     INIT_CAPITAL = DEFAULT_INIT_CAPITAL  # 初始本金10W元
 
     # # ===================== 初始化策略与回测引擎 =====================

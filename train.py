@@ -43,17 +43,31 @@ TARGET_LABEL      = cfg.TARGET_LABEL
 VAL_RATIO         = cfg.VAL_RATIO
 EXCLUDE_COLS      = cfg.EXCLUDE_COLS
 
-# T11: 路径由策略 ID 驱动，训练只写 archive，runtime 人工晋升
+
+def resolve_training_artifacts(strategy_id: str = None, version: str = None) -> dict:
+    strategy_id = strategy_id or getattr(cfg, "STRATEGY_ID", None)
+    version = version or MODEL_VERSION
+    dataset_dir = cfg.get_latest_valid_dataset_dir()
+    return {
+        "dataset_dir": dataset_dir,
+        "csv_path": cfg.get_dataset_csv_path(dataset_dir),
+        "split_spec_path": cfg.get_split_spec_path(dataset_dir),
+        "selected_features_path": cfg.get_selected_features_path(strategy_id, dataset_dir),
+        "model_dir": cfg.get_model_version_dir(strategy_id, version) if strategy_id else cfg.MODEL_DIR,
+        "model_pkl_path": cfg.get_model_pkl_path(strategy_id, version) if strategy_id else os.path.join(cfg.MODEL_DIR, f"strategy_xgb_{version}.pkl"),
+        "model_json_path": cfg.get_model_json_path(strategy_id, version) if strategy_id else os.path.join(cfg.MODEL_DIR, f"strategy_xgb_{version}.json"),
+        "model_meta_path": cfg.get_model_meta_path(strategy_id, version) if strategy_id else os.path.join(cfg.MODEL_DIR, f"strategy_xgb_{version}.meta.json"),
+        "model_config_snapshot_path": cfg.get_model_config_snapshot_path(strategy_id, version) if strategy_id else os.path.join(cfg.MODEL_DIR, f"strategy_xgb_{version}.config.json"),
+        "runtime_model_path": cfg.get_strategy_runtime_model_path(strategy_id) if strategy_id else None,
+        "runtime_model_meta_path": cfg.get_strategy_runtime_model_meta_path(strategy_id) if strategy_id else None,
+    }
+
+
+# T11: 路径由策略 ID 驱动，训练只写版本归档，runtime 人工晋升
 # 兼容旧路径：若 STRATEGY_ID 未设置，退回到原 model/ 根目录
 def _resolve_model_paths(strategy_id, version):
-    if strategy_id:
-        archive_path  = cfg.get_archive_model_path(strategy_id, version)
-        runtime_path  = cfg.get_runtime_model_path(strategy_id)
-    else:
-        # 无 strategy_id 时保持旧行为（全策略训练，路径放 model/ 根目录）
-        archive_path  = os.path.join(cfg.MODEL_DIR, f"strategy_xgb_{version}.pkl")
-        runtime_path  = os.path.join(cfg.MODEL_DIR, "strategy_xgb_latest.pkl")
-    return archive_path, runtime_path
+    artifacts = resolve_training_artifacts(strategy_id=strategy_id, version=version)
+    return artifacts["model_pkl_path"], artifacts["runtime_model_path"]
 
 
 # ============================================================
@@ -94,13 +108,13 @@ def _selector_result_is_usable(json_path: str, csv_path: str, target_label: str)
     return True
 
 
-def _ensure_selector_result(csv_path: str, target_label: str):
+def _ensure_selector_result(csv_path: str, target_label: str, selector_json: str = None):
     """
     确保 factor_selector 结果存在且与当前训练集匹配。
 
     若配置允许，则自动运行一遍 FactorSelector，避免静默回退到全因子训练。
     """
-    selector_json = cfg.SELECTED_FEATURES_PATH
+    selector_json = selector_json or cfg.SELECTED_FEATURES_PATH
     need_refresh = cfg.FACTOR_SELECTOR_FORCE_REFRESH or not _selector_result_is_usable(
         selector_json, csv_path, target_label
     )
@@ -227,9 +241,9 @@ def load_and_prepare(
         if c not in _effective_exclude and pd.api.types.is_numeric_dtype(df[c])
     ]
 
-    # 优先使用 factor_selector 搜出的最优子集 + Optuna 超参
-    _ensure_selector_result(csv_path, target_label)
-    selected, override_params = _load_selector_result(cfg.SELECTED_FEATURES_PATH, all_numeric)
+    artifacts = resolve_training_artifacts(strategy_id=strategy_id)
+    _ensure_selector_result(csv_path, target_label, selector_json=artifacts["selected_features_path"])
+    selected, override_params = _load_selector_result(artifacts["selected_features_path"], all_numeric)
     if selected:
         feature_cols = selected
         logger.info(f"[模式] factor_selector 最优子集，{len(feature_cols)} 个因子")
@@ -247,10 +261,11 @@ def load_and_prepare(
 
     # T9: 加载 frozen split spec
     split_spec = None
-    if os.path.exists(cfg.SPLIT_SPEC_PATH):
+    split_spec_path = artifacts["split_spec_path"]
+    if os.path.exists(split_spec_path):
         from learnEngine.split_spec import load_split_spec
         try:
-            split_spec = load_split_spec(cfg.SPLIT_SPEC_PATH)
+            split_spec = load_split_spec(split_spec_path)
             logger.info(
                 f"[T9] Frozen split spec 加载: "
                 f"train ≤ {split_spec['train_end_date']} | "
@@ -420,9 +435,13 @@ if __name__ == "__main__":
     logger.info(f"开始模型训练 | strategy_id={_strategy_id or '全策略'} | label={TARGET_LABEL}")
     logger.info("=" * 60)
 
+    artifacts = resolve_training_artifacts(strategy_id=_strategy_id, version=MODEL_VERSION)
+    logger.info(f"dataset_dir={artifacts['dataset_dir']}")
+    logger.info(f"selected_features={artifacts['selected_features_path']}")
+
     # 1. 加载数据（同时读取 Optuna 最优超参 + frozen split spec）
     X, y, feature_cols, df, override_params, split_spec = load_and_prepare(
-        TRAIN_CSV_PATH, TARGET_LABEL, strategy_id=_strategy_id
+        artifacts["csv_path"], TARGET_LABEL, strategy_id=_strategy_id
     )
 
     if len(X) < 50:
@@ -432,7 +451,7 @@ if __name__ == "__main__":
     # 2. 时间序列切分（T9: 优先使用 frozen split spec）
     X_train, X_val, y_train, y_val = time_series_split(X, y, df, VAL_RATIO, split_spec=split_spec)
 
-    # 3. 训练模型（T10/T11: StrategyXGBModel 写入 archive 路径）
+    # 3. 训练模型（T10/T11: StrategyXGBModel 写入版本目录）
     archive_path, _runtime_path = _resolve_model_paths(_strategy_id, MODEL_VERSION)
     os.makedirs(os.path.dirname(archive_path), exist_ok=True)
     xgb_model = StrategyXGBModel(model_save_path=archive_path)
@@ -462,10 +481,52 @@ if __name__ == "__main__":
     # 4. 详细评估
     metrics = evaluate_model(xgb_model.model, X_val, y_val, feature_cols)
 
-    # 5. 完成（T11: 不自动同步 runtime，需人工验证后手动晋升）
+    # 5. 完成（训练只写 model/<strategy>/<version>，runtime 需人工晋升到策略目录）
+    try:
+        model_meta = {
+            "strategy_id": _strategy_id,
+            "model_version": MODEL_VERSION,
+            "trained_at": pd.Timestamp.now().isoformat(),
+            "dataset_dir": artifacts["dataset_dir"],
+            "dataset_csv": artifacts["csv_path"],
+            "split_spec_path": artifacts["split_spec_path"],
+            "selected_features_path": artifacts["selected_features_path"],
+            "selected_features": feature_cols,
+            "target_label": TARGET_LABEL,
+            "xgb_params": override_params or getattr(xgb_model, "base_params", {}),
+            "train_rows": int(len(X_train)),
+            "val_rows": int(len(X_val)),
+            "train_date_range": {
+                "start": str(df["trade_date"].min()) if not df.empty else None,
+                "end": split_spec.get("train_end_date") if split_spec else None,
+            },
+            "val_date_range": {
+                "start": split_spec.get("val_start_date") if split_spec else None,
+                "end": split_spec.get("val_end_date") if split_spec else None,
+            },
+            "metrics": metrics,
+            "feature_count": len(feature_cols),
+            "candidate_pool_rule_summary": f"strategy={_strategy_id}; build_training_candidates() shared strategy logic",
+            "runtime_promotion_target": artifacts["runtime_model_path"],
+        }
+        with open(artifacts["model_meta_path"], "w", encoding="utf-8") as f:
+            json.dump(model_meta, f, ensure_ascii=False, indent=2)
+        with open(artifacts["model_config_snapshot_path"], "w", encoding="utf-8") as f:
+            json.dump({
+                "strategy_id": _strategy_id,
+                "model_version": MODEL_VERSION,
+                "target_label": TARGET_LABEL,
+                "val_ratio": VAL_RATIO,
+                "exclude_cols": EXCLUDE_COLS,
+                "dataset_dir": artifacts["dataset_dir"],
+                "selected_features_path": artifacts["selected_features_path"],
+            }, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.error(f"模型元数据写出失败: {e}")
+
     logger.info("=" * 60)
-    logger.info(f"训练完成！archive 模型: {archive_path}")
-    logger.info(f"  runtime 路径（人工晋升后推理使用）: {_runtime_path}")
+    logger.info(f"训练完成！model 版本目录: {os.path.dirname(archive_path)}")
+    logger.info(f"  runtime 手工晋升目标: {_runtime_path}")
     logger.info(f"  训练集: {len(X_train)} 行 | 验证集: {len(X_val)} 行")
     logger.info(f"  AUC: {metrics['auc']:.4f} | Precision: {metrics['precision']:.4f} | Precision@{metrics['top_k_pct']:.0%}: {metrics['precision_at_k']:.4f}")
     logger.info("=" * 60)

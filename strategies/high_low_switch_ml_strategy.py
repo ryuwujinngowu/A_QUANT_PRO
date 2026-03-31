@@ -64,7 +64,7 @@ class HighLowSwitchMLStrategy(BaseStrategy):
         构建高低切训练候选样本，返回 (candidate_df, context)。
 
         候选池 = D-1 涨停池（主板 + 非ST + 首/二/三板）。
-        feature_trade_date = D-1（特征基于 D-1 收盘数据计算）。
+        特征与标签统一以 trade_date=D 日定义，候选池筛选会使用 D-1 已知信息。
         """
         # ── 获取 D-1 交易日 ────────────────────────────────────────────────
         try:
@@ -75,19 +75,16 @@ class HighLowSwitchMLStrategy(BaseStrategy):
             # lookback_dates 包含 trade_date 本身，D-1 是倒数第二个
             if len(lookback_dates) < 2:
                 logger.warning(f"[高低切ML][{trade_date}] 无法获取 D-1 交易日，跳过")
-                empty_ctx = {"trade_date": trade_date, "feature_trade_date": trade_date,
-                             "target_ts_codes": []}
+                empty_ctx = {"trade_date": trade_date, "target_ts_codes": []}
                 return pd.DataFrame(), empty_ctx
             prev_date = lookback_dates[-2]
         except Exception as e:
             logger.warning(f"[高低切ML][{trade_date}] 获取交易日历失败: {e}")
-            empty_ctx = {"trade_date": trade_date, "feature_trade_date": trade_date,
-                         "target_ts_codes": []}
+            empty_ctx = {"trade_date": trade_date, "target_ts_codes": []}
             return pd.DataFrame(), empty_ctx
 
         context: Dict[str, any] = {
             "trade_date": trade_date,
-            "feature_trade_date": prev_date,
             "target_ts_codes": [],
         }
 
@@ -152,7 +149,6 @@ class HighLowSwitchMLStrategy(BaseStrategy):
             "strategy_id": self.strategy_id,
             "strategy_name": self.strategy_name,
             "sector_name": "",
-            "feature_trade_date": prev_date,
         })
 
         target_ts_codes: List[str] = candidate_df["ts_code"].tolist()
