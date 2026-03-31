@@ -2,18 +2,19 @@
 板块热度选股开盘买入策略（V3 — XGBoost 驱动版，无未来函数）
 ==================================================
 核心逻辑：
-  D-1 日收盘后（回测中以 D 日开盘前模拟）：
-       → SectorHeatFeature 以 D-1 日为基准选出 Top3 板块
-       → 候选池筛选：以 D-1 日行情（ST / 板块 / 涨停基因 / 低流动性 / 昨日涨停封板）
-       → FeatureDataBundle(trade_date=D-1) 计算全量因子（零未来函数）
+  工程执行时点通常为 D+1 凌晨：
+       → 等待 Tushare / 入库链路把 D 日完整盘面写齐
+       → 触发策略时，代码里的“上一完整交易日盘面”在业务语义上对应 D 日收盘后数据
+       → SectorHeatFeature 以该完整盘面为基准选出 Top3 板块
+       → 候选池筛选：基于该完整盘面做 ST / 板块 / 涨停基因 / 低流动性 / 封板过滤
+       → FeatureDataBundle 计算全量因子（零未来函数）
        → XGBoost predict_proba 排序选出 Top-K
-       → 信号返回 buy_type='open'
-
-  D 日：开盘价买入（buy_type='open'）
-  D+1 日：收盘价卖出（sell_type='close'），持股 1 个交易日
+       → 输出下一个交易日开盘买入信号
 
 关键原则：
-  - 所有特征/因子均基于 D-1 日及更早数据，无未来函数
+  - 业务语义上，每一行样本代表 D 日收盘后可获得的全部信息
+  - 工程实现上，因数据入库时效性限制，常在 D+1 凌晨执行，并显式消费最近一个已完整落库的收盘日盘面
+  - 不要仅凭 `prev_trade_date` 等命名做字面推断；修改时必须同时考虑“业务基准日 / 数据可得日 / 实际执行时点”
   - 过滤逻辑与 dataset.py 完全对齐，保证训练/推断口径一致
 """
 import os
@@ -31,6 +32,7 @@ from features import FeatureEngine, FeatureDataBundle
 from features.bundle_factory import build_bundle_from_context
 from features.sector.sector_heat_feature import SectorHeatFeature
 from strategies.base_strategy import BaseStrategy
+import learnEngine.train_config as cfg
 from position_tracker import TrackerConfig
 from utils.common_tools import (
     filter_st_stocks,
@@ -72,13 +74,10 @@ class SectorHeatStrategy(BaseStrategy):
         self.strategy_name = "板块热度XGBoost盘前选股，开盘买入策略"
         self.strategy_params = {
             "buy_top_k":   6,        # 每日最多买入 N 只
-            "sell_type":   "close",   # D+1 卖出类型：open=次日开盘，close=次日收盘
+            "sell_type":   "open",   # D+1 卖出类型：open=次日开盘，close=次日收盘
             "min_prob":    0.6,      # 最低买入概率阈值（0 = 不过滤）
             "load_minute": True,     # 是否加载分钟线（保证特征与训练口径一致）
-            "model_path": os.path.join(
-                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                "model", "sector_heat_xgb_v5.2_auc_first.pkl",
-            ),
+            "model_path": self._get_runtime_model_path(),
         }
 
         # 新架构组件（与 dataset.py 使用同一套 FeatureEngine）
@@ -107,6 +106,9 @@ class SectorHeatStrategy(BaseStrategy):
     # ------------------------------------------------------------------ #
     # BaseStrategy 强制接口
     # ------------------------------------------------------------------ #
+
+    def _get_runtime_model_path(self) -> str:
+        return cfg.get_strategy_runtime_model_path(self.strategy_id)
 
     def initialize(self) -> None:
         """回测启动 / 重置时由引擎自动调用"""
@@ -175,11 +177,11 @@ class SectorHeatStrategy(BaseStrategy):
         return "label1"
 
     def get_model_registry_info(self) -> Dict[str, str]:
-        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         return {
             "strategy_id": self.strategy_id,
-            "archive_dir": os.path.join(base_dir, "model", self.strategy_id, "archive"),
-            "runtime_dir": os.path.join(base_dir, "model", self.strategy_id, "runtime"),
+            "archive_dir": os.path.join(base_dir, "model", self.strategy_id),
+            "runtime_dir": cfg.get_strategy_runtime_model_dir(self.strategy_id),
         }
 
     def _get_prev_trade_date(self, trade_date: str) -> str:
@@ -199,7 +201,6 @@ class SectorHeatStrategy(BaseStrategy):
         adapt_score = top3_result["adapt_score"]
         return {
             "trade_date": trade_date,
-            "feature_trade_date": prev_trade_date,
             "top3_sectors": top3_sectors,
             "adapt_score": adapt_score,
         }
@@ -215,15 +216,10 @@ class SectorHeatStrategy(BaseStrategy):
         """
         context = self._get_selection_context(trade_date)
         top3_sectors = context["top3_sectors"]
-        prev_trade_date = context["feature_trade_date"]
+        prev_trade_date = self._get_prev_trade_date(trade_date)
 
         if not top3_sectors:
             return pd.DataFrame(), context
-
-        try:
-            data_cleaner.insert_stock_st(trade_date=trade_date.replace("-", ""))
-        except Exception as e:
-            logger.warning(f"{trade_date} ST 数据入库失败（忽略）: {e}")
 
         prev_daily_df = daily_df if daily_df is not None else get_daily_kline_data(prev_trade_date)
         if prev_daily_df.empty:
@@ -246,7 +242,7 @@ class SectorHeatStrategy(BaseStrategy):
             tmp["strategy_id"] = self.strategy_id
             tmp["strategy_name"] = self.strategy_name
             tmp["sector_name"] = sector_name
-            tmp["feature_trade_date"] = prev_trade_date
+            tmp["trade_date"] = trade_date
             candidate_rows.append(tmp)
 
         if not candidate_rows:
@@ -270,7 +266,7 @@ class SectorHeatStrategy(BaseStrategy):
     ) -> Dict[str, str]:
         """
         返回 {ts_code: 'open'}（次日开盘买入）
-        所有特征/筛选均基于 D-1（前一交易日）数据，无未来函数。
+        所有特征/筛选均基于 D 日收盘后已知数据，无未来函数。
         返回空 dict = 当日不买入
         """
         # ── 模型加载 ──────────────────────────────────────────────────────
@@ -291,10 +287,10 @@ class SectorHeatStrategy(BaseStrategy):
 
         logger.info(
             f"{trade_date} Top3={context.get('top3_sectors')} | "
-            f"adapt_score={context.get('adapt_score')} (基于 {context.get('feature_trade_date')})"
+            f"adapt_score={context.get('adapt_score')} (基于 {trade_date} 收盘后口径)"
         )
 
-        # ── Step 3: 特征计算（基于 D-1，与训练口径一致）──────────────────────
+        # ── Step 3: 特征计算（基于 D 日收盘后数据，与训练口径一致）──────────────────────
         try:
             bundle = self.build_feature_bundle_from_context(context)
             if bundle is None:
@@ -370,7 +366,7 @@ class SectorHeatStrategy(BaseStrategy):
         #     logger.info(f"{trade_date} 风险过滤后候选为空，跳过买入")
         #     return {}
 
-        # 返回格式 {ts_code: 'open'}，引擎以次日开盘价买入（信号基于 D-1 数据，无未来函数）
+        # 返回格式 {ts_code: 'open'}，引擎以次日开盘价买入（信号基于 D 日收盘后数据，无未来函数）
         buy_signal_map = {row["stock_code"]: "open" for _, row in selected.iterrows()}
         logger.info(
             f"{trade_date} 最终买入 {len(buy_signal_map)} 只: "

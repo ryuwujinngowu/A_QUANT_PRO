@@ -352,18 +352,17 @@ if __name__ == "__main__":
     # 支持多时间段：每个元素为 (start_date, end_date)，格式 yyyy-mm-dd
     # 各段内的交易日会合并去重后统一处理（跨段间隙不纳入）
     DATE_RANGES: List[Tuple[str, str]] = [
-        ("2023-01-01", "2023-09-30"),
-        ("2024-11-01", "2026-03-10"),
+        ("2026-02-20", "2026-02-28"),
     ]
-    DATASET_RUN_ID       = _cfg.create_dataset_run_id("dataset")
-    DATASET_DIR          = _cfg.get_dataset_dir(DATASET_RUN_ID)
+    DATASET_RUN_ID        = _cfg.create_dataset_run_id("acceptance")
+    DATASET_DIR           = _cfg.get_dataset_dir(DATASET_RUN_ID)
     os.makedirs(DATASET_DIR, exist_ok=True)
-    OUTPUT_CSV_PATH      = _cfg.get_dataset_csv_path(DATASET_DIR)
-    PROCESSED_DATES_FILE = _cfg.get_processed_dates_path(DATASET_DIR)
+    OUTPUT_CSV_PATH       = _cfg.get_dataset_csv_path(DATASET_DIR)
+    PROCESSED_DATES_FILE  = _cfg.get_processed_dates_path(DATASET_DIR)
     DATASET_MANIFEST_PATH = _cfg.get_dataset_manifest_path(DATASET_DIR)
     CONFIG_SNAPSHOT_PATH  = _cfg.get_dataset_config_snapshot_path(DATASET_DIR)
     # 因子逻辑有变更（新增列、修改计算公式）时必须更新版本号，否则旧数据不会重跑
-    FACTOR_VERSION        = "v5.1_individual_factors_fixed"
+    FACTOR_VERSION        = "v5.1_individual_factors_fixed_acceptance"
     # =====================================================
 
     # ---------- 从多段日期范围收集全部交易日 ----------

@@ -55,7 +55,7 @@ Python    : python3.8
 
 ─── 依赖前置 ─────────────────────────────────────────────────────────────
   1. 已运行 python3.8 learnEngine/dataset.py 生成训练集
-  2. 已运行 python3.8 train.py 训练并保存模型到 sector_heat_xgb_model.pkl
+  2. 已运行 python3.8 train.py 训练并保存归档模型；人工晋升后放到 strategies/sector_heat/runtime_model/sector_heat_V*.pkl
 """
 
 import argparse
@@ -168,7 +168,7 @@ def run_daily_signal(trade_date: str, dry_run: bool = False) -> bool:
 
     # ── Step 3: 调用策略买入信号生成（不依赖引擎，直接调用核心方法）────────
     # 延迟导入：避免在 import 阶段就触发模型加载
-    from strategies.sector_heat_strategy import SectorHeatStrategy
+    from strategies.sector_heat.sector_heat_strategy import SectorHeatStrategy
 
     try:
         strategy    = SectorHeatStrategy()

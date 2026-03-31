@@ -6,132 +6,223 @@ train.py 和 factor_selector.py 均从此处读取，避免参数分散在多个
 
 修改参数只需改此文件，无需碰 train.py / factor_selector.py 的逻辑代码。
 """
+import json
 import os
+import re
+from datetime import datetime
+from typing import Optional
 
 _BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # 项目根目录
-
-# ═══════════════════════════════════════════════
-# 路径
-# ═══════════════════════════════════════════════
-TRAIN_CSV_PATH = os.path.join(
-    _BASE_DIR, "learnEngine", "datasets", "train_dataset_recent_2411_2602.csv"
-)
-SELECTED_FEATURES_PATH = os.path.join(
-    _BASE_DIR, "learnEngine", "search_results", "selected_features_v6.4.json"
-)
-# T7: frozen split spec 路径（与 TRAIN_CSV_PATH 同目录，由 dataset.py 自动生成）
-SPLIT_SPEC_PATH = os.path.join(
-    _BASE_DIR, "learnEngine", "datasets", "split_spec.json"
-)
+BASE_DIR = os.path.join(_BASE_DIR, "learnEngine")
+DATASET_ROOT_DIR = os.path.join(BASE_DIR, "datasets")
 MODEL_DIR = os.path.join(_BASE_DIR, "model")
+STRATEGY_ROOT_DIR = os.path.join(_BASE_DIR, "strategies")
+
 
 # ═══════════════════════════════════════════════
-# T11: 模型产物目录结构约定
+# dataset artifact 目录
 # ═══════════════════════════════════════════════
-#
+DATASET_CSV_NAME = "train_dataset.csv"
+SPLIT_SPEC_NAME = "split_spec.json"
+PROCESSED_DATES_NAME = "processed_dates.json"
+DATASET_MANIFEST_NAME = "dataset_manifest.json"
+TRAIN_CONFIG_SNAPSHOT_NAME = "train_config.snapshot.json"
+
+
+def create_dataset_run_id(prefix: Optional[str] = None) -> str:
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return f"{prefix}_{ts}" if prefix else ts
+
+
+def get_dataset_dir(run_id: str) -> str:
+    return os.path.join(DATASET_ROOT_DIR, run_id)
+
+
+def get_dataset_csv_path(dataset_dir: str) -> str:
+    return os.path.join(dataset_dir, DATASET_CSV_NAME)
+
+
+def get_split_spec_path(dataset_dir: str) -> str:
+    return os.path.join(dataset_dir, SPLIT_SPEC_NAME)
+
+
+def get_processed_dates_path(dataset_dir: str) -> str:
+    return os.path.join(dataset_dir, PROCESSED_DATES_NAME)
+
+
+def get_dataset_manifest_path(dataset_dir: str) -> str:
+    return os.path.join(dataset_dir, DATASET_MANIFEST_NAME)
+
+
+def get_dataset_config_snapshot_path(dataset_dir: str) -> str:
+    return os.path.join(dataset_dir, TRAIN_CONFIG_SNAPSHOT_NAME)
+
+
+def get_selected_features_path(strategy_id: Optional[str], dataset_dir: Optional[str] = None) -> str:
+    base_dir = dataset_dir or get_latest_valid_dataset_dir()
+    name = f"selected_features_{strategy_id}.json" if strategy_id else "selected_features_all.json"
+    return os.path.join(base_dir, name)
+
+
+def _dataset_dir_is_valid(dataset_dir: str) -> bool:
+    csv_path = get_dataset_csv_path(dataset_dir)
+    split_path = get_split_spec_path(dataset_dir)
+    if not (os.path.isdir(dataset_dir) and os.path.exists(csv_path) and os.path.exists(split_path)):
+        return False
+    try:
+        with open(split_path, encoding="utf-8") as f:
+            spec = json.load(f)
+        saved_csv = spec.get("dataset_csv")
+        return bool(saved_csv) and os.path.abspath(saved_csv) == os.path.abspath(csv_path)
+    except Exception:
+        return False
+
+
+def get_latest_valid_dataset_dir() -> str:
+    if not os.path.isdir(DATASET_ROOT_DIR):
+        raise FileNotFoundError(f"dataset 根目录不存在: {DATASET_ROOT_DIR}")
+    candidates = []
+    for name in sorted(os.listdir(DATASET_ROOT_DIR), reverse=True):
+        path = os.path.join(DATASET_ROOT_DIR, name)
+        if _dataset_dir_is_valid(path):
+            candidates.append(path)
+    if not candidates:
+        raise FileNotFoundError(f"未找到有效 dataset 目录: {DATASET_ROOT_DIR}")
+    return candidates[0]
+
+
+def _safe_default_dataset_dir() -> str:
+    try:
+        return get_latest_valid_dataset_dir()
+    except Exception:
+        return DATASET_ROOT_DIR
+
+
+_DEFAULT_DATASET_DIR = _safe_default_dataset_dir()
+
+# 默认消费最新有效 dataset 目录
+TRAIN_CSV_PATH = get_dataset_csv_path(_DEFAULT_DATASET_DIR)
+SPLIT_SPEC_PATH = get_split_spec_path(_DEFAULT_DATASET_DIR)
+SELECTED_FEATURES_PATH = get_selected_features_path("sector_heat", _DEFAULT_DATASET_DIR)
+
+
+# ═══════════════════════════════════════════════
+# 模型产物目录结构约定（按策略 / 版本固化）
+# ═══════════════════════════════════════════════
 # 目录规范：
-#   model/<strategy_id>/archive/<version>/  ← 训练写入（只追加，不覆盖）
-#   model/<strategy_id>/runtime/            ← 推理读取（人工验证后手动晋升）
-#
-# 原则：
-#   - 训练脚本只写 archive，不碰 runtime
-#   - runtime 只接受人工手动 cp 过来的已验证模型
-#   - 同一 strategy_id 下不同 version 互不干扰
+#   model/<strategy_id>/<version>/               ← 训练归档（完整版本固化）
+#   strategies/<strategy_id>/runtime_model/      ← 手工晋升后的运行模型
 
-def get_archive_dir(strategy_id: str, version: str) -> str:
-    """返回指定策略+版本的 archive 目录（不自动创建）。"""
-    return os.path.join(MODEL_DIR, strategy_id, "archive", version)
 
-def get_archive_model_path(strategy_id: str, version: str) -> str:
-    """返回 archive 模型文件路径（.pkl）。"""
-    return os.path.join(get_archive_dir(strategy_id, version), "model.pkl")
+def get_model_version_dir(strategy_id: str, version: str) -> str:
+    return os.path.join(MODEL_DIR, strategy_id, version)
 
-def get_runtime_dir(strategy_id: str) -> str:
-    """返回指定策略的 runtime 目录。"""
-    return os.path.join(MODEL_DIR, strategy_id, "runtime")
 
-def get_runtime_model_path(strategy_id: str) -> str:
-    """返回 runtime 模型文件路径（推理层读取此路径）。"""
-    return os.path.join(get_runtime_dir(strategy_id), "model.pkl")
+def get_model_pkl_path(strategy_id: str, version: str) -> str:
+    return os.path.join(get_model_version_dir(strategy_id, version), "model.pkl")
+
+
+def get_model_json_path(strategy_id: str, version: str) -> str:
+    return os.path.join(get_model_version_dir(strategy_id, version), "model.json")
+
+
+def get_model_meta_path(strategy_id: str, version: str) -> str:
+    return os.path.join(get_model_version_dir(strategy_id, version), "model_meta.json")
+
+
+def get_model_config_snapshot_path(strategy_id: str, version: str) -> str:
+    return os.path.join(get_model_version_dir(strategy_id, version), "train_config.snapshot.json")
+
+
+def get_strategy_runtime_model_dir(strategy_id: str) -> str:
+    return os.path.join(STRATEGY_ROOT_DIR, strategy_id, "runtime_model")
+
+
+def get_strategy_runtime_model_pattern(strategy_id: str) -> str:
+    return rf"^{re.escape(strategy_id)}_V[^/\\]+\\.pkl$"
+
+
+def get_strategy_runtime_model_path(strategy_id: str) -> str:
+    runtime_dir = get_strategy_runtime_model_dir(strategy_id)
+    if not os.path.isdir(runtime_dir):
+        return os.path.join(runtime_dir, f"{strategy_id}_V1.pkl")
+
+    pattern = re.compile(get_strategy_runtime_model_pattern(strategy_id))
+    candidates = [
+        os.path.join(runtime_dir, name)
+        for name in sorted(os.listdir(runtime_dir))
+        if pattern.match(name)
+    ]
+    if not candidates:
+        return os.path.join(runtime_dir, f"{strategy_id}_V1.pkl")
+    if len(candidates) > 1:
+        raise RuntimeError(
+            f"runtime_model 目录存在多个候选模型，请手工清理后再运行: {runtime_dir} | candidates={candidates}"
+        )
+    return candidates[0]
+
+
+def get_strategy_runtime_model_meta_path(strategy_id: str) -> str:
+    model_path = get_strategy_runtime_model_path(strategy_id)
+    return model_path.replace(".pkl", ".meta.json")
+
 
 # ═══════════════════════════════════════════════
 # 训练基础配置
 # ═══════════════════════════════════════════════
-# T9: 训练时所用的策略 ID（None = 全策略训练池，不过滤）
-STRATEGY_ID   = "sector_heat"   # 当前单策略训练时设置；全策略多模型时改为 None 并逐策略遍历
+STRATEGY_ID = "sector_heat"
+MODEL_VERSION = "acceptance_v1"
+TARGET_LABEL  = "label1_3pct"
+VAL_RATIO     = 0.2
 
-MODEL_VERSION = "v6.4_recent_2411_2602_3pct"
-TARGET_LABEL  = "label1_3pct"   # 切换此处即可更换训练目标（见下方可选值）
-# 可选 TARGET_LABEL 值：
-#   "label1"             — D+1 日内涨幅 >= 5%（主模型）
-#   "label2"             — D+1 日内盈利 AND D+2 高开（隔夜强势）
-#   "label1_3pct"        — D+1 日内涨幅 >= 3%（低门槛，正样本更多）
-#   "label1_8pct"        — D+1 日内涨幅 >= 8%（高门槛，强势票过滤）
-#   "label_d2_limit_down"— D+2 跌停（用于黑名单反向模型，目标=1 → 避开）
-#   "label_raw_return"   — 日内实际收益率（XGBRegressor 回归目标）
-#   "label_open_gap"     — 开盘溢价率（回归目标）
-#   "label_d1_high"      — 日内最大浮盈（回归目标）
-#   "label_d1_low"       — 日内最大回撤（回归目标）
-#   "label_d1_pct_chg"   — D+1 收盘涨跌幅%（与实盘口径对齐，回归目标）
-#   "label_d2_return"    — 持有2日总收益（回归目标）
-VAL_RATIO     = 0.2        # 验证集比例（时序尾部切分，不随机打乱）
-
-# 非特征列（固定排除，与 dataset.py 列结构绑定）
-# 所有 label 列必须在此列出，防止被当作训练特征
-EXCLUDE_COLS = [
-    "stock_code", "trade_date",
-    # 二分类 label
-    "label1", "label2", "label1_3pct", "label1_8pct", "label_d2_limit_down",
-    # 浮点 label
-    "label_raw_return", "label_open_gap", "label_d1_high", "label_d1_low",
-    "label_d1_pct_chg", "label_d2_return",
-    # 元数据 / 辅助列（非因子，不进入训练）
-    "sector_name", "top3_sectors",
-    # T6 全局训练池 schema 新增（不进入特征矩阵）
-    "sample_id", "strategy_id", "strategy_name", "feature_trade_date",
+# 未来两阶段开盘架构预留列（当前仅占位/排除，不参与训练与筛因）
+RESERVED_FUTURE_LABEL_COLS = [
+    "label_open_regime_stage1",
+    "label_open_regime_stage1_bin",
+    "label_open_regime_stage2",
+    "label_open_regime_stage2_bin",
 ]
 
-# ═══════════════════════════════════════════════
-# Stage 1: IC 过滤阈值
-# 三条件「同时」满足才剔除（宽松策略）
-# 低 ICIR 因子可能在 XGBoost 组合中提供互补信息，只剔除三项都差的
-# ═══════════════════════════════════════════════
-IC_MIN_ICIR     = 0.15   # |ICIR| 低于此值（放宽：给 Optuna 更多候选因子）
-IC_MIN_WIN_RATE = 0.48   # 胜率（IC>0 的日期占比）低于此值
-IC_MAX_PVALUE   = 0.20   # t 检验 p 值高于此值（不显著）
+RESERVED_FUTURE_FEATURE_COLS = [
+    "feat_pred_open_regime_stage1",
+    "feat_pred_open_regime_stage1_prob_low",
+    "feat_pred_open_regime_stage1_prob_mid",
+    "feat_pred_open_regime_stage1_prob_high",
+    "feat_pred_open_regime_stage2",
+    "feat_pred_open_regime_stage2_conf",
+]
 
-# ═══════════════════════════════════════════════
-# Stage 2: 相关性去重
-# ═══════════════════════════════════════════════
-CORR_MAX = 0.75   # |Pearson 相关| > 此值时视为冗余，保留 |ICIR| 更高的那个
+EXCLUDE_COLS = [
+    "stock_code", "trade_date",
+    "label1", "label2", "label1_3pct", "label1_8pct", "label_d2_limit_down",
+    "label_raw_return", "label_open_gap", "label_d1_high", "label_d1_low",
+    "label_d1_pct_chg", "label_d2_return", "label_5d_30pct", "label_d1_open_up",
+    "sector_name", "top3_sectors",
+    "sample_id", "strategy_id", "strategy_name",
+    *RESERVED_FUTURE_LABEL_COLS,
+    *RESERVED_FUTURE_FEATURE_COLS,
+]
 
-# ═══════════════════════════════════════════════
-# Stage 3: Optuna 搜索
-# ═══════════════════════════════════════════════
-N_TRIALS            = 400    # 搜索轮数（快速验证用 50，正式用 400）
-TIMEOUT             = 7200   # 最长运行秒数
-TOP_K_PCT           = 0.30   # Precision@K 的 K：取概率最高的前 30% 预测
-MIN_TOP_K_POSITIVES = 10     # top-K 中正样本至少此数量，否则惩罚（防空信号过拟合）
-MIN_FEATURES        = 5      # 试验中最少选入因子数，低于此值返回 0 分
-N_CV_FOLDS          = 1      # 单折（CV在金融时序上因市场行情差异大效果不稳定，暂用单折）
-
-# XGBoost 超参搜索范围（整数对用 int range，连续对用 float range）
+IC_MIN_ICIR     = 0.15
+IC_MIN_WIN_RATE = 0.48
+IC_MAX_PVALUE   = 0.20
+CORR_MAX = 0.75
+N_TRIALS            = 400
+TIMEOUT             = 7200
+TOP_K_PCT           = 0.30
+MIN_TOP_K_POSITIVES = 10
+MIN_FEATURES        = 5
+N_CV_FOLDS          = 1
 XGB_MAX_DEPTH_RANGE        = (3, 7)
 XGB_LR_RANGE               = (0.02, 0.20)
-XGB_N_EST_RANGE            = (100, 1000)
-XGB_SUBSAMPLE_RANGE        = (0.5, 1.0)
-XGB_COLSAMPLE_RANGE        = (0.4, 1.0)
-XGB_MIN_CHILD_WEIGHT_RANGE = (1, 20)
-XGB_GAMMA_RANGE            = (0.0, 0.5)
-XGB_REG_ALPHA_RANGE        = (0.0, 2.0)
-XGB_REG_LAMBDA_RANGE       = (0.5, 3.0)
-# scale_pos_weight 不再由 Optuna 搜索，改为训练时按数据自然正负比自动计算（neg/pos）
-# 这样模型有足够的"开仓勇气"，同时不人为偏置
-
-# ═══════════════════════════════════════════════
-# Factor selector 自动运行控制
-# ═══════════════════════════════════════════════
-FACTOR_SELECTOR_FORCE_REFRESH = False   # True = 每次训练强制重跑 selector（耗时）
-AUTO_RUN_FACTOR_SELECTOR      = False   # True = 无 selected_features.json 时自动补跑
-FACTOR_SELECTOR_STAGE         = "all"   # "all" / "12" / "3"
-REQUIRE_SELECTED_FEATURES     = False   # True = 无 selected_features.json 时报错拒绝训练
+XGB_N_EST_RANGE            = (80, 260)
+XGB_SUBSAMPLE_RANGE        = (0.65, 1.00)
+XGB_COLSAMPLE_RANGE        = (0.60, 1.00)
+XGB_MIN_CHILD_WEIGHT_RANGE = (1, 10)
+XGB_GAMMA_RANGE            = (0.0, 4.0)
+XGB_REG_ALPHA_RANGE        = (0.0, 3.0)
+XGB_REG_LAMBDA_RANGE       = (0.5, 8.0)
+FACTOR_SELECTOR_FORCE_REFRESH = False
+AUTO_RUN_FACTOR_SELECTOR      = False
+FACTOR_SELECTOR_STAGE         = "12"
+REQUIRE_SELECTED_FEATURES     = False

@@ -147,12 +147,6 @@ def get_model_signal_stocks(
 
     logger.info(f"{tag}[{trade_date}] Top3={top3_sectors} | adapt_score={adapt_score}")
 
-    # ── ST 数据入库 ───────────────────────────────────────────────────────
-    try:
-        data_cleaner.insert_stock_st(trade_date=trade_date_dash.replace("-", ""))
-    except Exception:
-        pass
-
     # ── Step 2: 候选池构建 ────────────────────────────────────────────────
     sector_candidate_map: Dict[str, pd.DataFrame] = {}
     from datetime import datetime, timedelta

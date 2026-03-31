@@ -28,6 +28,12 @@ label 定义（完整版）：
                           对齐策略口径：D 开盘买入，D+1 高开代表次日持有有利起点
                           D 无开盘价数据 → None
 
+未来预留标签（当前仅文档/占位，不生成真实值，也不是训练目标）：
+    label_open_regime_stage1     : 未来阶段 A 使用；用 D 日因子预测 D+1 开盘状态（低开/平开/高开）
+    label_open_regime_stage1_bin : 未来阶段 A 的二分类化版本（如是否进入可交易开盘区间）
+    label_open_regime_stage2     : 未来阶段 B 使用；在阶段 A 输出前提下预测开盘买入后的收益质量
+    label_open_regime_stage2_bin : 未来阶段 B 的二分类化版本
+
 过滤逻辑：
     - D+1 停牌（无数据）→ 跳过，不作为负样本
     - D+2 无数据 → 涉及 D+2 的标签填 None（dataset.py 不 dropna 这些列）

@@ -69,7 +69,7 @@ def build_bundle_from_context(
     与 SectorHeatStrategy.build_feature_bundle_from_context() 等价，
     但策略无关，可被所有支持 ML 训练的策略复用。
 
-    :param context:     包含 feature_trade_date / target_ts_codes 以及可选策略专属 key 的上下文字典
+    :param context:     包含 trade_date / target_ts_codes 以及可选策略专属 key 的上下文字典
     :param load_minute: 是否加载分钟线
     :return: FeatureDataBundle，或 None（target_ts_codes 为空时）
     """
@@ -77,7 +77,7 @@ def build_bundle_from_context(
     if not target_ts_codes:
         return None
     return build_bundle(
-        trade_date=context["feature_trade_date"],
+        trade_date=context["trade_date"],
         target_ts_codes=target_ts_codes,
         strategy_context=context,
         load_minute=load_minute,

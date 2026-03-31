@@ -258,7 +258,7 @@ class FactorSelector:
         self.target          = _v(target,           cfg.TARGET_LABEL)
         self.val_ratio       = _v(val_ratio,        cfg.VAL_RATIO)
         # T8
-        self.strategy_id     = strategy_id  # None = 不过滤（全策略训练池）
+        self.strategy_id     = strategy_id if strategy_id is not None else getattr(cfg, "STRATEGY_ID", None)
         self.split_spec_path = _v(split_spec_path, cfg.SPLIT_SPEC_PATH)
         self.ic_min_icir     = _v(ic_min_icir,      cfg.IC_MIN_ICIR)
         self.ic_min_win_rate = _v(ic_min_win_rate,  cfg.IC_MIN_WIN_RATE)
@@ -559,7 +559,7 @@ class FactorSelector:
             "3"    — 只跑 Stage 3（复用已有 Stage 1+2 结果，适合重调超参）
         :param output_path: 结果 JSON 路径，默认 cfg.SELECTED_FEATURES_PATH
         """
-        output_path = output_path or cfg.SELECTED_FEATURES_PATH
+        output_path = output_path or cfg.get_selected_features_path(self.strategy_id)
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
         self._load()  # 触发懒加载，确认文件存在
@@ -597,6 +597,7 @@ class FactorSelector:
 
         # T8: 公共元数据（写入 JSON，供 train.py 读取时识别对应策略和 split）
         _common = {
+            "dataset_dir":       os.path.dirname(os.path.abspath(self.csv_path)),
             "csv_path":          os.path.abspath(self.csv_path),
             "strategy_id":       self.strategy_id,   # T8: 策略标识（None = 全策略池）
             "split_spec_path":   self.split_spec_path,
