@@ -435,7 +435,7 @@ class SectorHeatStrategy(BaseStrategy):
         sector_candidate_map: Dict[str, pd.DataFrame] = {}
 
         for sector in top3_sectors:
-            logger.info(f"候选池 | 处理板块: {sector}")
+            logger.debug(f"候选池 | 处理板块: {sector}")
             try:
                 raw = get_stocks_in_sector(sector)
                 if not raw:
@@ -480,7 +480,7 @@ class SectorHeatStrategy(BaseStrategy):
                     sector_daily = sector_daily[sector_daily["amount"] >= _MIN_AMOUNT]
 
                 sector_candidate_map[sector] = sector_daily
-                logger.info(f"[{sector}] 最终候选股: {len(sector_daily)}")
+                logger.debug(f"[{sector}] 最终候选股: {len(sector_daily)}")
 
             except Exception as e:
                 logger.error(f"[{sector}] 候选池构建失败: {e}", exc_info=True)
@@ -534,7 +534,7 @@ class SectorHeatStrategy(BaseStrategy):
         filtered = df[keep].copy()
         removed  = len(df) - len(filtered)
         if removed:
-            logger.info(f"[D日涨停过滤] 涨停封板股已过滤: {removed} 只")
+            logger.debug(f"[D日涨停过滤] 涨停封板股已过滤: {removed} 只")
         return filtered
 
     def _check_limit_up_gene(
@@ -580,7 +580,7 @@ class SectorHeatStrategy(BaseStrategy):
             logger.error(f"涨停基因判断失败: {e}，返回全 False（中性值）")
             return {ts: False for ts in ts_code_list}
 
-        logger.info(
+        logger.debug(
             f"涨停基因判断 | 候选: {len(ts_code_list)} "
             f"| 有涨停基因: {sum(result.values())}"
         )
