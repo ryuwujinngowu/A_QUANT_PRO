@@ -128,12 +128,26 @@ class MAPositionFeature(BaseFeature):
         :param data_bundle: FeatureDataBundle，需含 daily_grouped / lookback_dates_20d / target_ts_codes
         :return: (feature_df, {})
 
-        均线用不复权（bfq）收盘价，与 kline_day / 分钟线 / stk_factor_pro(_bfq) 统一口径。
+        均线原始值/排列/位置类因子继续本地计算；
+        bias5/bias10 优先复用 stk_factor_pro API 已入库的 ma_bias_5/10，
+        保证与技术面因子统一口径；若 API 字段缺失，再回退到本地计算结果。
         """
         trade_date      = data_bundle.trade_date
         dates_20d       = sorted(data_bundle.lookback_dates_20d)   # 升序，最后一个 = trade_date
         daily_grouped   = data_bundle.daily_grouped                 # 不复权
         target_ts_codes = data_bundle.target_ts_codes
+
+        stk_factor_map = {}
+        try:
+            from utils.common_tools import ensure_stk_factor_pro_data
+            from utils.db_utils import db
+            ensure_stk_factor_pro_data(trade_date)
+            sql = "SELECT ts_code, ma_bfq_5, ma_bfq_10 FROM stk_factor_pro WHERE trade_date = %s"
+            raw = db.query(sql, (trade_date.replace("-", ""),), return_df=True)
+            if raw is not None and not raw.empty:
+                stk_factor_map = raw.set_index("ts_code").to_dict(orient="index")
+        except Exception as e:
+            logger.warning(f"[MAPosition] 读取 stk_factor_pro MA 参考值失败，回退本地 bias：{e}")
 
         if not dates_20d:
             logger.error("[MAPosition] lookback_dates_20d 为空，跳过计算")
@@ -164,8 +178,11 @@ class MAPositionFeature(BaseFeature):
             ma13 = self._calc_ma_series(close_series, 13)
 
             # ── BIAS（乖离率）──
-            bias5  = self._calc_bias(d_close, ma5)
-            bias10 = self._calc_bias(d_close, ma10)
+            api_ma = stk_factor_map.get(ts_code, {})
+            api_ma5 = pd.to_numeric(api_ma.get("ma_bfq_5"), errors="coerce") if api_ma else np.nan
+            api_ma10 = pd.to_numeric(api_ma.get("ma_bfq_10"), errors="coerce") if api_ma else np.nan
+            bias5  = self._calc_bias(d_close, float(api_ma5)) if not np.isnan(api_ma5) else self._calc_bias(d_close, ma5)
+            bias10 = self._calc_bias(d_close, float(api_ma10)) if not np.isnan(api_ma10) else self._calc_bias(d_close, ma10)
             bias13 = self._calc_bias(d_close, ma13)
 
             # ── MA5 斜率（今日 MA5 vs 昨日 MA5）──

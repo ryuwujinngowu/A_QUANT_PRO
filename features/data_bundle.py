@@ -17,7 +17,7 @@ from utils.common_tools import (
     get_market_total_volume,
     get_st_set, get_stock_list_date_map,
     get_hp_cycle_slice_avg_gain, get_active_stock_stats,
-    get_kline_day_range,
+    get_kline_day_range, get_market_breadth_liquidity_stats,
 )
 from data.data_cleaner import data_cleaner
 from utils.log_utils import logger
@@ -103,8 +103,9 @@ class FeatureDataBundle:
 
             def _fetch_one(date):
                 df = get_daily_kline_data(trade_date=date, ts_code_list=self.target_ts_codes)
-                if not df.empty:
-                    df["trade_date"] = df["trade_date"].astype(str)
+                if not df.empty and "trade_date" in df.columns:
+                    td = df["trade_date"].astype(str).str.replace("-", "", regex=False)
+                    df["trade_date"] = td.str.slice(0, 4) + "-" + td.str.slice(4, 6) + "-" + td.str.slice(6, 8)
                 return df
 
             frames = []
@@ -281,6 +282,13 @@ class FeatureDataBundle:
                 logger.warning(f"[DataBundle] 20日指数历史加载失败（非致命）：{e}")
                 self.macro_cache["hist_sh_pct_chg"] = {}
 
+            # ── 5日全市场广度/流动性统计（宏观扩展因子用）──────────
+            try:
+                self.macro_cache["breadth_liquidity_5d"] = get_market_breadth_liquidity_stats(self.lookback_dates_5d)
+            except Exception as e:
+                logger.warning(f"[DataBundle] 5日广度/流动性统计加载失败（非致命）：{e}")
+                self.macro_cache["breadth_liquidity_5d"] = {}
+
             logger.debug(
                 f"[DataBundle] 宏观数据加载完成 | "
                 f"涨停:{len(self.macro_cache['limit_up_df'])} "
@@ -311,6 +319,7 @@ class FeatureDataBundle:
           hp_base_pool_recent5d  : 基础池近5日日线（用于 MA5 + 量比计算）
           hp_cycle_slices        : 12个切片的高位股平均涨幅 List[float]（索引0=D0切片）
           active_stats           : 活跃股广度统计 Dict
+          hp_high_pos_minute_5d  : 高位股近5日分钟线缓存 Dict[(ts_code, trade_date)] -> DataFrame
           key_dates              : 各关键日期 Dict（d0/d1/d4/d10/d21/d60）
         """
         try:
@@ -426,6 +435,21 @@ class FeatureDataBundle:
                     self.hp_ext_cache["hp_base_pool_recent5d"] = pd.DataFrame()
             else:
                 self.hp_ext_cache["hp_base_pool_recent5d"] = pd.DataFrame()
+
+            # ── Round 3：拉取高位股近5日分钟线（用于高位股触顶时间阶段因子）──
+            hp_minute_cache = {}
+            if not high_pos.empty:
+                hp_codes = high_pos["ts_code"].tolist()
+                for code in hp_codes:
+                    for minute_date in self.lookback_dates_5d:
+                        try:
+                            hp_minute_cache[(code, minute_date)] = data_cleaner.get_kline_min_by_stock_date(
+                                code, minute_date
+                            )
+                        except Exception as e:
+                            logger.warning(f"[DataBundle] hp_ext_cache 高位股分钟线失败 | {code} {minute_date} | {e}")
+                            hp_minute_cache[(code, minute_date)] = pd.DataFrame()
+            self.hp_ext_cache["hp_high_pos_minute_5d"] = hp_minute_cache
 
             logger.info(
                 f"[DataBundle] hp_ext_cache加载完成 | "

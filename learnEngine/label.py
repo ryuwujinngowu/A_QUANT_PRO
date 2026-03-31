@@ -14,6 +14,10 @@ label 定义（完整版）：
     label1_3pct         : D+1 日内收益率 >= 3%（低门槛，更多正样本）
     label1_8pct         : D+1 日内收益率 >= 8%（高门槛，强势票过滤）
     label_d2_limit_down : D+2 日跌停（pct_chg <= -9.5%）→ 1，用于黑名单模型
+    label_10d_60pct     : D+1~D+10 任意交易日盘中 high >= D0 close × 1.60 → 1，否则 0
+    label_d1_gap_up     : D+1 open > D0 close → 1，否则 0
+    label_5d_min_dd_30pct : D+1~D+5 任意交易日盘中 low <= D0 close × 0.70 → 1，否则 0
+    label_d2_drop_5_9p5 : D+2 pct_chg < -5 且 > -9.5 → 1，否则 0
 
 浮点标签（用于回归模型或分级惩罚）：
     label_raw_return    : D+1 日内实际收益率（分级惩罚权重基础）
@@ -56,8 +60,8 @@ class LabelEngine:
     def __init__(self, start_date: str, end_date: str):
         self.start_date = start_date
         self.end_date   = end_date
-        # 多预留 15 个自然日，确保 end_date 对应的 D+5 交易日在范围内
-        label_end = (pd.to_datetime(end_date) + pd.Timedelta(days=15)).strftime("%Y-%m-%d")
+        # 多预留 20 个自然日，确保 end_date 对应的 D+10 交易日在范围内
+        label_end = (pd.to_datetime(end_date) + pd.Timedelta(days=20)).strftime("%Y-%m-%d")
         self.all_trade_dates = get_trade_dates(start_date, label_end)
         self.date_idx_map    = {d: i for i, d in enumerate(self.all_trade_dates)}
 
@@ -79,19 +83,28 @@ class LabelEngine:
 
         d1_date = self.all_trade_dates[idx + 1]
         d2_date = self.all_trade_dates[idx + 2]
-        # D+3 ~ D+5：用于 label_5d_30pct，不足时不报错
+        # D+3 ~ D+10：扩展标签窗口，不足时不报错
         d3_date = self.all_trade_dates[idx + 3] if idx + 3 < len(self.all_trade_dates) else None
         d4_date = self.all_trade_dates[idx + 4] if idx + 4 < len(self.all_trade_dates) else None
         d5_date = self.all_trade_dates[idx + 5] if idx + 5 < len(self.all_trade_dates) else None
+        d6_date = self.all_trade_dates[idx + 6] if idx + 6 < len(self.all_trade_dates) else None
+        d7_date = self.all_trade_dates[idx + 7] if idx + 7 < len(self.all_trade_dates) else None
+        d8_date = self.all_trade_dates[idx + 8] if idx + 8 < len(self.all_trade_dates) else None
+        d9_date = self.all_trade_dates[idx + 9] if idx + 9 < len(self.all_trade_dates) else None
+        d10_date = self.all_trade_dates[idx + 10] if idx + 10 < len(self.all_trade_dates) else None
 
-        # 批量拉取 D / D+1 / D+2 日线
+        # 批量拉取 D / D+1 / ... / D+10 日线
         d0_df = get_daily_kline_data(trade_date=trade_date, ts_code_list=stock_list)
         d1_df = get_daily_kline_data(trade_date=d1_date,   ts_code_list=stock_list)
         d2_df = get_daily_kline_data(trade_date=d2_date,   ts_code_list=stock_list)
-        # D+3~D+5（label_5d_30pct 所需，None 日期跳过）
         d3_df = get_daily_kline_data(trade_date=d3_date, ts_code_list=stock_list) if d3_date else pd.DataFrame()
         d4_df = get_daily_kline_data(trade_date=d4_date, ts_code_list=stock_list) if d4_date else pd.DataFrame()
         d5_df = get_daily_kline_data(trade_date=d5_date, ts_code_list=stock_list) if d5_date else pd.DataFrame()
+        d6_df = get_daily_kline_data(trade_date=d6_date, ts_code_list=stock_list) if d6_date else pd.DataFrame()
+        d7_df = get_daily_kline_data(trade_date=d7_date, ts_code_list=stock_list) if d7_date else pd.DataFrame()
+        d8_df = get_daily_kline_data(trade_date=d8_date, ts_code_list=stock_list) if d8_date else pd.DataFrame()
+        d9_df = get_daily_kline_data(trade_date=d9_date, ts_code_list=stock_list) if d9_date else pd.DataFrame()
+        d10_df = get_daily_kline_data(trade_date=d10_date, ts_code_list=stock_list) if d10_date else pd.DataFrame()
 
         if d1_df.empty:
             logger.warning(f"[LabelEngine] {d1_date} 日线数据为空，跳过")
@@ -110,6 +123,11 @@ class LabelEngine:
         d3_map = {row["ts_code"]: row for _, row in d3_df.iterrows()} if not d3_df.empty else {}
         d4_map = {row["ts_code"]: row for _, row in d4_df.iterrows()} if not d4_df.empty else {}
         d5_map = {row["ts_code"]: row for _, row in d5_df.iterrows()} if not d5_df.empty else {}
+        d6_map = {row["ts_code"]: row for _, row in d6_df.iterrows()} if not d6_df.empty else {}
+        d7_map = {row["ts_code"]: row for _, row in d7_df.iterrows()} if not d7_df.empty else {}
+        d8_map = {row["ts_code"]: row for _, row in d8_df.iterrows()} if not d8_df.empty else {}
+        d9_map = {row["ts_code"]: row for _, row in d9_df.iterrows()} if not d9_df.empty else {}
+        d10_map = {row["ts_code"]: row for _, row in d10_df.iterrows()} if not d10_df.empty else {}
 
         rows = []
         for ts_code in stock_list:
@@ -169,20 +187,52 @@ class LabelEngine:
             label_open_gap   = round((d1_open - d0_close) / d0_close, 6) if d0_close > 0 else None
             label_d1_open_up = (1 if d1_open > d0_open else 0) if d0_open > 0 else None
 
-            # ── label_5d_30pct：D+1~D+5 任意盘中 high >= D0_close × 1.30 ──
-            # 基准：D0 收盘价；触及目标价即为正样本，盘中高价触及也算
-            # D+1 无数据时已被前面的 continue 跳过；D+3~D+5 无数据时保守标 0
+            # ── 原有扩展标签：D+1~D+5 任意盘中 high >= D0_close × 1.30 ──
             label_5d_30pct = 0
             if d0_close > 0:
-                target_price = d0_close * 1.30
+                target_price_30 = d0_close * 1.30
                 for dx_map in (d1_map, d2_map, d3_map, d4_map, d5_map):
                     row_dx = dx_map.get(ts_code)
                     if row_dx is None:
                         continue
                     high_dx = float(row_dx.get("high", 0) or 0)
-                    if high_dx >= target_price:
+                    if high_dx >= target_price_30:
                         label_5d_30pct = 1
                         break
+
+            # ── 新增 label：D+1~D+10 任意盘中 high >= D0_close × 1.60 ──
+            label_10d_60pct = 0
+            if d0_close > 0:
+                target_price_60 = d0_close * 1.60
+                for dx_map in (d1_map, d2_map, d3_map, d4_map, d5_map, d6_map, d7_map, d8_map, d9_map, d10_map):
+                    row_dx = dx_map.get(ts_code)
+                    if row_dx is None:
+                        continue
+                    high_dx = float(row_dx.get("high", 0) or 0)
+                    if high_dx >= target_price_60:
+                        label_10d_60pct = 1
+                        break
+
+            # ── 新增 label2：D+1 高开（基准 = D0 close）──
+            label_d1_gap_up = (1 if (d0_close > 0 and d1_open > d0_close) else 0) if d0_close > 0 else None
+
+            # ── 新增 label3：D+1~D+5 任意盘中 low <= D0_close × 0.70 ──
+            label_5d_min_dd_30pct = 0
+            if d0_close > 0:
+                dd_target = d0_close * 0.70
+                for dx_map in (d1_map, d2_map, d3_map, d4_map, d5_map):
+                    row_dx = dx_map.get(ts_code)
+                    if row_dx is None:
+                        continue
+                    low_dx = float(row_dx.get("low", 0) or 0)
+                    if 0 < low_dx <= dd_target:
+                        label_5d_min_dd_30pct = 1
+                        break
+
+            # ── 新增 label4：D+2 跌幅大于 5 且小于 9.5 ──
+            label_d2_drop_5_9p5 = None
+            if d2_row is not None:
+                label_d2_drop_5_9p5 = 1 if (-9.5 < d2_pct_chg < -5.0) else 0
 
             rows.append({
                 "stock_code":           ts_code,
@@ -193,6 +243,10 @@ class LabelEngine:
                 "label1_3pct":          label1_3pct,
                 "label1_8pct":          label1_8pct,
                 "label_d2_limit_down":  label_d2_limit_down,
+                "label_10d_60pct":      label_10d_60pct,
+                "label_d1_gap_up":      label_d1_gap_up,
+                "label_5d_min_dd_30pct": label_5d_min_dd_30pct,
+                "label_d2_drop_5_9p5":  label_d2_drop_5_9p5,
                 # 浮点
                 "label_raw_return":     label_raw_return,
                 "label_open_gap":       label_open_gap,
@@ -212,6 +266,10 @@ class LabelEngine:
                 f"label1正样本:{result['label1'].sum()} | "
                 f"label1_3pct:{result['label1_3pct'].sum()} | "
                 f"label1_8pct:{result['label1_8pct'].sum()} | "
-                f"label_5d_30pct:{result['label_5d_30pct'].sum()}"
+                f"label_5d_30pct:{result['label_5d_30pct'].sum()} | "
+                f"label_10d_60pct:{result['label_10d_60pct'].sum()} | "
+                f"label_d1_gap_up:{result['label_d1_gap_up'].fillna(0).sum()} | "
+                f"label_5d_min_dd_30pct:{result['label_5d_min_dd_30pct'].sum()} | "
+                f"label_d2_drop_5_9p5:{result['label_d2_drop_5_9p5'].fillna(0).sum()}"
             )
         return result

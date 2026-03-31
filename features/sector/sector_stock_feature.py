@@ -51,7 +51,9 @@
                                       无红盘时填 0.5（中性），早盘: 9:30-11:30，午盘: 13:00-15:00
   stock_float_session_pm_ratio_{d}  : 浮盈时段午盘占比（同 red_session_pm_ratio 逻辑）
 
-【板块平均因子】
+【超预期强度因子 ★ 新增维度】
+  stock_expect_surprise_{d}          : 超预期强度 = 开盘预期 + 日内兑现 + 午后承接 的合成
+                                      用于区分“高开高走真强 / 低开修复超预期 / 高开低走不及预期”
   sector_avg_profit_{d}, sector_avg_loss_{d}
 
 【个股排名】
@@ -149,6 +151,7 @@ class SectorStockFeature(BaseFeature):
         *[f"stock_float_profit_time_ratio_{t}" for t in _day_tags],
         *[f"stock_red_session_pm_ratio_{t}"   for t in _day_tags],
         *[f"stock_float_session_pm_ratio_{t}" for t in _day_tags],
+        *[f"stock_expect_surprise_{t}"       for t in _day_tags],
         *[f"sector_avg_profit_{t}"            for t in _day_tags],
         *[f"sector_avg_loss_{t}"              for t in _day_tags],
     ]
@@ -197,6 +200,37 @@ class SectorStockFeature(BaseFeature):
         ]
         avg_amt = np.mean(amts) if amts else 0.0
         return round(today_amt / (avg_amt + 1e-6), 3)
+
+    @staticmethod
+    def _calc_expect_surprise(f: dict, pct_chg: float) -> float:
+        """
+        超预期强度：衡量开盘预期是否被日内走势兑现/超额兑现。
+        核心思想：
+          - 高开后还能全天红盘、午后更强、收盘靠近高点 → 高分
+          - 低开但持续修复、浮盈时间长、假阴转强 → 也给高分
+          - 高开低走、冲高回落、午后走弱 → 低分
+        返回 0-100，50 为中性。
+        """
+        gap = float(f.get("gap_return", 0.0) or 0.0)
+        cpr = float(f.get("cpr", 0.5) or 0.5)
+        red_time = float(f.get("red_time_ratio", 0.5) or 0.5)
+        float_time = float(f.get("float_profit_time_ratio", 0.5) or 0.5)
+        red_pm = float(f.get("red_session_pm_ratio", 0.5) or 0.5)
+        if red_pm < 0:
+            red_pm = 0.0
+        max_dd = float(f.get("max_dd_intra", 0.10) or 0.10)
+        candle = int(f.get("candle_type", 0) or 0)
+
+        score = 50.0
+        score += max(min(gap * 120.0, 15.0), -15.0)
+        score += (cpr - 0.5) * 24.0
+        score += (red_time - 0.5) * 26.0
+        score += (float_time - 0.5) * 20.0
+        score += (red_pm - 0.5) * 14.0
+        score -= min(max_dd * 120.0, 18.0)
+        score += {2: 8.0, -1: 6.0, 1: -6.0, -2: -10.0}.get(candle, 0.0)
+        score += max(min(pct_chg * 0.8, 8.0), -8.0)
+        return round(float(np.clip(score, 0.0, 100.0)), 2)
 
     # ------------------------------------------------------------------ #
     # 主计算入口
@@ -418,6 +452,7 @@ class SectorStockFeature(BaseFeature):
                         row[f"stock_float_profit_time_ratio_{day_tag}"]  = f.get("float_profit_time_ratio", ATOMIC_NEUTRAL["float_profit_time_ratio"])
                         row[f"stock_red_session_pm_ratio_{day_tag}"]     = f.get("red_session_pm_ratio",    ATOMIC_NEUTRAL["red_session_pm_ratio"])
                         row[f"stock_float_session_pm_ratio_{day_tag}"]   = f.get("float_session_pm_ratio",  ATOMIC_NEUTRAL["float_session_pm_ratio"])
+                        row[f"stock_expect_surprise_{day_tag}"]          = self._calc_expect_surprise(f, pct_chg)
 
                     else:
                         # 停牌或完全无数据
@@ -440,6 +475,7 @@ class SectorStockFeature(BaseFeature):
                         row[f"stock_float_profit_time_ratio_{day_tag}"]  = SUSPENDED_FILL["float_profit_time_ratio"]
                         row[f"stock_red_session_pm_ratio_{day_tag}"]     = SUSPENDED_FILL["red_session_pm_ratio"]
                         row[f"stock_float_session_pm_ratio_{day_tag}"]   = SUSPENDED_FILL["float_session_pm_ratio"]
+                        row[f"stock_expect_surprise_{day_tag}"]          = 50.0
 
                     # ---- 板块平均（无条件填充）----
                     row[f"sector_avg_profit_{day_tag}"] = sector_day_factors[day_tag]["profit"]

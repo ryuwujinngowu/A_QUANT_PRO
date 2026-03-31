@@ -4,7 +4,12 @@
 - 板块ID：1/2/3（每日前3活跃板块）
 - 时间跨度：d4=4天前、d3=3天前、d2=2天前、d1=1天前、d0=D日
 - 指标名：profit=涨幅>7%个股数（赚钱效应）、loss=跌幅>7%个股数（亏钱效应）
-全局因子：adapt_score 板块轮动速度分，0-100，越高轮动越快
+全局因子：
+- adapt_score：板块轮动速度分，0-100，越高轮动越快
+- adapt_score_norm：adapt_score / 100，归一化到 0-1
+- adapt_score_slow：低轮动环境强度 = 1 - adapt_score_norm
+- adapt_score_fast：高轮动环境强度 = adapt_score_norm
+- adapt_score_mid：中等轮动强度（钟形），用于帮助 XGBoost 切出中间 regime
 """
 import re
 from datetime import datetime, timedelta
@@ -41,7 +46,7 @@ class SectorHeatFeature(BaseFeature):
         for sector_id in range(1, 4)
         for day_offset in range(5)
         for indicator in ["profit", "loss"]
-    ] + ["adapt_score"]
+    ] + ["adapt_score", "adapt_score_norm", "adapt_score_slow", "adapt_score_fast", "adapt_score_mid"]
 
     def __init__(self):
         super().__init__()
@@ -275,16 +280,29 @@ class SectorHeatFeature(BaseFeature):
         """
         trade_date   = data_bundle.trade_date
         top3_sectors = data_bundle.top3_sectors
-        adapt_score  = data_bundle.adapt_score
+        adapt_score  = float(data_bundle.adapt_score or 0.0)
+        adapt_score  = max(0.0, min(100.0, adapt_score))
+        adapt_norm   = round(adapt_score / 100.0, 4)
+        adapt_slow   = round(1.0 - adapt_norm, 4)
+        adapt_fast   = adapt_norm
+        adapt_mid    = round(max(0.0, 1.0 - abs(adapt_norm - 0.5) / 0.5), 4)
 
         feature_df = pd.DataFrame([{
             "trade_date":   trade_date,
             "adapt_score":  adapt_score,
+            "adapt_score_norm": adapt_norm,
+            "adapt_score_slow": adapt_slow,
+            "adapt_score_fast": adapt_fast,
+            "adapt_score_mid": adapt_mid,
             "top3_sectors": ",".join(top3_sectors),
         }])
         factor_dict = {
             "top3_sectors": top3_sectors,
             "adapt_score":  adapt_score,
+            "adapt_score_norm": adapt_norm,
+            "adapt_score_slow": adapt_slow,
+            "adapt_score_fast": adapt_fast,
+            "adapt_score_mid": adapt_mid,
         }
         logger.info(
             f"[板块热度] {trade_date} adapt_score={adapt_score} Top3={top3_sectors}"

@@ -22,6 +22,12 @@
                           < 1 = 缩量（资金撤退）
                           天量连板时该值极大（如 3~10）
 
+  hp_stage_peak_time_rate: 高位股到达各自日内最高点的平均时间变化率
+                          = D0 平均触顶耗时 / 近5日均值
+                          触顶耗时 = 首根5分钟K线起到首次触及当日最高价的分钟数
+                          < 1 = 触顶更快（高位股抢筹更积极）
+                          > 1 = 触顶更慢（高位股发力后置/资金犹豫）
+
 高位股定义：
   全市场不复权20日涨幅前1%（基础池）→ 基础池前10%（高位股），最少3只
   过滤：ST / BJ / 近21交易日新股
@@ -40,6 +46,7 @@ _NEUTRAL = {
     "hp_stage_vwap_bias":    0.0,
     "hp_stage_pct_chg":      0.0,
     "hp_stage_amount_ratio": 1.0,
+    "hp_stage_peak_time_rate": 1.0,
 }
 
 
@@ -62,6 +69,7 @@ class HPStageFeature(BaseFeature):
 
         high_pos_df = hp_ext.get("hp_high_pos", pd.DataFrame())
         recent5d_df = hp_ext.get("hp_base_pool_recent5d", pd.DataFrame())
+        hp_minute_5d = hp_ext.get("hp_high_pos_minute_5d", {})
         kd          = hp_ext.get("key_dates", {})
 
         if high_pos_df.empty or recent5d_df.empty:
@@ -81,6 +89,8 @@ class HPStageFeature(BaseFeature):
         pct_chgs:     List[float] = []
         amount_ratios:List[float] = []
         weights:      List[float] = []
+        peak_minutes_d0: List[float] = []
+        peak_minutes_hist: List[float] = []
 
         for code in hp_codes:
             stock_rows = recent5d_df[recent5d_df["ts_code"] == code].sort_values("trade_date")
@@ -117,6 +127,30 @@ class HPStageFeature(BaseFeature):
             # 权重 = D0 成交额（成交额越大，权重越大）
             w = amt_d0 if amt_d0 > 0 else 1.0
 
+            # 近5日触顶耗时：首根5分钟K线到首次触及当日最高价的分钟数
+            stock_peak_minutes = []
+            d0_peak_minute = None
+            for minute_date in stock_rows["trade_date"].astype(str).tolist():
+                minute_date_std = f"{minute_date[:4]}-{minute_date[4:6]}-{minute_date[6:8]}" if "-" not in minute_date else minute_date
+                min_df = hp_minute_5d.get((code, minute_date_std), pd.DataFrame())
+                if min_df is None or min_df.empty or "high" not in min_df.columns:
+                    continue
+                _df = min_df.sort_values("trade_time").reset_index(drop=True)
+                high_arr = _df["high"].astype(float).values
+                if len(high_arr) == 0:
+                    continue
+                peak_price = float(np.max(high_arr))
+                peak_hit_idx = int(np.argmax(high_arr >= peak_price - 1e-8))
+                peak_minutes = float(peak_hit_idx * 5)
+                stock_peak_minutes.append(peak_minutes)
+                if minute_date_std == kd.get("d0"):
+                    d0_peak_minute = peak_minutes
+
+            if d0_peak_minute is not None:
+                peak_minutes_d0.append(d0_peak_minute)
+            if stock_peak_minutes:
+                peak_minutes_hist.append(float(np.mean(stock_peak_minutes)))
+
             biases.append(bias)
             pct_chgs.append(pct_chg)
             amount_ratios.append(float(np.clip(amt_r, 0.01, 20.0)))
@@ -128,10 +162,16 @@ class HPStageFeature(BaseFeature):
             row["hp_stage_pct_chg"]      = round(float(np.dot(pct_chgs,      weights) / total_w), 3)
             row["hp_stage_amount_ratio"] = round(float(np.dot(amount_ratios, weights) / total_w), 3)
 
+        if peak_minutes_d0 and peak_minutes_hist:
+            avg_d0_peak   = float(np.mean(peak_minutes_d0))
+            avg_hist_peak = float(np.mean(peak_minutes_hist))
+            row["hp_stage_peak_time_rate"] = round(avg_d0_peak / max(avg_hist_peak, 1e-6), 3)
+
         logger.debug(
             f"[hp_stage] {trade_date} 高位股:{len(hp_codes)}只 "
             f"vwap_bias:{row['hp_stage_vwap_bias']:.2f}% "
             f"pct_chg:{row['hp_stage_pct_chg']:.2f}% "
-            f"amount_ratio:{row['hp_stage_amount_ratio']:.2f}"
+            f"amount_ratio:{row['hp_stage_amount_ratio']:.2f} "
+            f"peak_time_rate:{row['hp_stage_peak_time_rate']:.2f}"
         )
         return pd.DataFrame([row]), {}

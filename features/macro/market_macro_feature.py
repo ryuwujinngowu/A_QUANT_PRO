@@ -25,15 +25,14 @@
                               d1~d4 = vol_di / mean(vol_d0..d4)（全窗口均值）
                               放量>1，缩量<1，无数据=1.0
 
-【全市场成交额绝对量维度】
-  market_amount_d0          : D 日全市场总成交额（万亿元）
-                              连续值，直接反映市场绝对活跃程度（如 1.5万亿分水岭效应）
-                              由模型自主学习阈值效应，不做人工分段
-  market_amount_5d_avg      : 近4日（d1~d4）全市场总成交额均值（万亿元）
-                              作为成交基准，衡量"现在是否偏活跃/冷淡"
-  market_amount_d0_vs_5d    : market_amount_d0 / market_amount_5d_avg
-                              相对活跃度，>1=当日比近期活跃，<1=当日比近期冷淡
-                              与 market_vol_ratio_d0 语义类似，但单位为成交额而非成交量
+【市场广度 / 流动性维度】
+  market_amt30_count              : D 日成交额 >= 30亿 的股票数
+  market_amt30_above5d_count      : D 日成交额 >= 30亿 且高于自身近5日均成交额的股票数
+  market_amt30_above5d_newlow5_count : 上述股票中收盘创近5日新低的股票数
+  market_amt30_above5d_holf_count : 上述股票中高开低走（open>pre_close 且 close<open）的股票数
+  market_amt30_above5d_lohc_count : 上述股票中低开高走（open<pre_close 且 close>pre_close）的股票数
+  market_up_60pct_board_count     : D 日涨幅达到各自涨跌停板幅度 60% 的股票数（强势广度）
+  market_down_60pct_board_count   : D 日跌幅达到各自涨跌停板幅度 60% 的股票数（弱势广度）
 
 【派生趋势因子】
   market_limit_up_rate      : D 日涨停数 / 全市场总股数（约5200）≈ 涨停参与率
@@ -87,6 +86,11 @@ class MarketMacroFeature(BaseFeature):
         "market_vol_ratio_d3", "market_vol_ratio_d4",
         # 全市场成交额绝对量（连续值，万亿元，供模型学习分水岭效应）
         "market_amount_d0", "market_amount_5d_avg", "market_amount_d0_vs_5d",
+        # 市场广度 / 流动性
+        "market_amt30_count", "market_amt30_above5d_count",
+        "market_amt30_above5d_newlow5_count", "market_amt30_above5d_holf_count",
+        "market_amt30_above5d_lohc_count", "market_up_60pct_board_count",
+        "market_down_60pct_board_count",
         # 派生趋势因子
         "market_limit_up_rate", "market_limit_up_5d_trend", "market_consec_5d_trend",
     ]
@@ -187,6 +191,17 @@ class MarketMacroFeature(BaseFeature):
             row["market_amount_d0"]       = 0.0
             row["market_amount_5d_avg"]   = 0.0
             row["market_amount_d0_vs_5d"] = 1.0
+
+        # ========== 市场广度 / 流动性维度 ==========
+        breadth_5d = macro_cache.get("breadth_liquidity_5d", {})
+        breadth_d0 = breadth_5d.get(trade_date, {}) if isinstance(breadth_5d, dict) else {}
+        row["market_amt30_count"] = int(breadth_d0.get("amt30_count", 0) or 0)
+        row["market_amt30_above5d_count"] = int(breadth_d0.get("amt30_above5d_count", 0) or 0)
+        row["market_amt30_above5d_newlow5_count"] = int(breadth_d0.get("amt30_above5d_newlow5_count", 0) or 0)
+        row["market_amt30_above5d_holf_count"] = int(breadth_d0.get("amt30_above5d_holf_count", 0) or 0)
+        row["market_amt30_above5d_lohc_count"] = int(breadth_d0.get("amt30_above5d_lohc_count", 0) or 0)
+        row["market_up_60pct_board_count"] = int(breadth_d0.get("up_60pct_board_count", 0) or 0)
+        row["market_down_60pct_board_count"] = int(breadth_d0.get("down_60pct_board_count", 0) or 0)
 
         # ========== 派生趋势因子 ==========
         limit_up_counts_5d = macro_cache.get("limit_up_counts_5d", {})

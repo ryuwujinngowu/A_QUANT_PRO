@@ -662,18 +662,26 @@ class IndividualFeature(BaseFeature):
 
                 # 日线缺失 → 全部填中性值
                 if not daily:
-                    for col in [
-                        f"stock_intra_amp_{tag}",     f"stock_body_amp_{tag}",
-                        f"stock_body_ratio_{tag}",    f"stock_open_pos_{tag}",
-                        f"stock_vwap_pos_{tag}",      f"stock_up_vol_ratio_{tag}",
-                        f"stock_dn_vol_ratio_{tag}",  f"stock_vol_conc_{tag}",
-                        f"stock_high_hold_ratio_{tag}", f"stock_buy_vol_ratio_{tag}",
-                        f"stock_pv_corr_{tag}",       f"stock_tail_surge_ratio_{tag}",
-                        f"stock_max_rebound_{tag}",   f"stock_max_bounce_{tag}",
-                        f"stock_bull_extreme_{tag}",  f"stock_bear_extreme_{tag}",
-                        f"stock_bull_bear_ratio_{tag}",
-                    ]:
-                        row[col] = 0.0 if "ratio" not in col and "pos" not in col else 0.5
+                    neutral_map = {
+                        f"stock_intra_amp_{tag}": 0.0,
+                        f"stock_body_amp_{tag}": 0.0,
+                        f"stock_body_ratio_{tag}": 0.5,
+                        f"stock_open_pos_{tag}": 0.5,
+                        f"stock_vwap_pos_{tag}": 0.5,
+                        f"stock_up_vol_ratio_{tag}": 0.0,
+                        f"stock_dn_vol_ratio_{tag}": 0.0,
+                        f"stock_vol_conc_{tag}": 0.0,
+                        f"stock_high_hold_ratio_{tag}": 0.5,
+                        f"stock_buy_vol_ratio_{tag}": 1.0,
+                        f"stock_pv_corr_{tag}": 0.0,
+                        f"stock_tail_surge_ratio_{tag}": 1.0,
+                        f"stock_max_rebound_{tag}": 0.0,
+                        f"stock_max_bounce_{tag}": 0.0,
+                        f"stock_bull_extreme_{tag}": 0.0,
+                        f"stock_bear_extreme_{tag}": 0.0,
+                        f"stock_bull_bear_ratio_{tag}": 1.0,
+                    }
+                    row.update(neutral_map)
                     continue
 
                 # 日线因子

@@ -268,6 +268,59 @@ def get_st_stock_codes(trade_date: str) -> List[str]:
         return []
 
 
+def ensure_kline_day_data(trade_date: str, ts_code_list: List[str] = None) -> None:
+    """
+    确保 kline_day 表有指定交易日的日线数据。
+    自动更新表理论上应已落库；若缺失，则走 DB→API→DB 补拉。
+
+    :param trade_date: 交易日，支持 YYYY-MM-DD / YYYYMMDD
+    :param ts_code_list: 可选；指定股票列表时，仅当这些股票存在缺口时补拉
+    """
+    from data.data_cleaner import data_cleaner
+
+    trade_date_fmt = trade_date.replace("-", "")
+    try:
+        if ts_code_list:
+            sql = "SELECT DISTINCT ts_code FROM kline_day WHERE trade_date = %s AND ts_code IN %s"
+            rows = db.query(sql, (trade_date_fmt, tuple(ts_code_list))) or []
+            existing_codes = {
+                (r.get("ts_code") if isinstance(r, dict) else None)
+                for r in rows
+            }
+            missing_codes = [code for code in ts_code_list if code not in existing_codes]
+            if not missing_codes:
+                return
+            logger.info(
+                f"[ensure_kline_day_data] {trade_date} 日线缺失 {len(missing_codes)} 只，触发 API 补拉"
+            )
+            raw_df = data_cleaner.data_fetcher.fetch_kline_day(
+                ts_code=",".join(missing_codes),
+                trade_date=trade_date_fmt,
+            )
+            if raw_df is None or raw_df.empty:
+                return
+            clean_df = data_cleaner._clean_kline_day_data(raw_df)
+            final_df = data_cleaner._align_df_with_db(clean_df, "kline_day")
+            if final_df is not None and not final_df.empty:
+                db.batch_insert_df(final_df, "kline_day", ignore_duplicate=True)
+            return
+
+        check_sql = "SELECT 1 FROM kline_day WHERE trade_date = %s LIMIT 1"
+        existing = db.query(check_sql, (trade_date_fmt,))
+        if existing:
+            return
+        logger.info(f"[ensure_kline_day_data] {trade_date} 无日线数据，触发 API 补拉")
+        raw_df = data_cleaner.data_fetcher.fetch_kline_day(trade_date=trade_date_fmt)
+        if raw_df is None or raw_df.empty:
+            return
+        clean_df = data_cleaner._clean_kline_day_data(raw_df)
+        final_df = data_cleaner._align_df_with_db(clean_df, "kline_day")
+        if final_df is not None and not final_df.empty:
+            db.batch_insert_df(final_df, "kline_day", ignore_duplicate=True)
+    except Exception as e:
+        logger.warning(f"[ensure_kline_day_data] {trade_date} 补拉失败：{e}")
+
+
 def get_daily_kline_data(trade_date: str, ts_code_list: List[str] = None) -> pd.DataFrame:
     """
     获取指定日期的日线数据（向后兼容优化版）
@@ -278,46 +331,50 @@ def get_daily_kline_data(trade_date: str, ts_code_list: List[str] = None) -> pd.
     :param ts_code_list: 【可选】指定股票代码列表，仅查询这些股票的日线数据
     :return: 日线数据DataFrame
     """
-    # 1. 日期格式化（兼容两种格式）
     logger.debug(
         f"开始获取日线数据: {trade_date}" + (f"，指定股票数：{len(ts_code_list)}" if ts_code_list else "，全市场"))
     trade_date_format = trade_date.replace("-", "")
 
-    # 2. 构建SQL和参数（根据是否指定股票动态调整）
     if ts_code_list:
-        # 【新增】仅查询指定股票
         if not isinstance(ts_code_list, (list, tuple, set)):
             logger.error(f"ts_code_list格式错误，必须是列表/元组/集合，当前类型：{type(ts_code_list)}")
             return pd.DataFrame()
         if not ts_code_list:
             logger.warning("ts_code_list为空，返回空DataFrame")
             return pd.DataFrame()
-
-        # 构建带IN条件的SQL
         sql = """
               SELECT *
               FROM kline_day
-              WHERE trade_date = %s 
+              WHERE trade_date = %s
                 AND ts_code IN %s
               """
         params = (trade_date_format, tuple(ts_code_list))
     else:
-        # 【原有逻辑】查询全市场（保持向后兼容）
         sql = """
               SELECT *
               FROM kline_day
-              WHERE trade_date = %s 
+              WHERE trade_date = %s
               """
         params = (trade_date_format,)
 
-    # 3. 执行查询（保持原有逻辑不变）
     try:
         df = db.query(sql, params=params, return_df=True)
     except Exception as e:
         logger.error(f"{trade_date} 日线数据查询失败：{str(e)}")
         return pd.DataFrame()
-    # 4. 返回结果（保持原有逻辑不变）
+
+    if df is None or df.empty:
+        ensure_kline_day_data(trade_date, ts_code_list=ts_code_list)
+        try:
+            df = db.query(sql, params=params, return_df=True)
+        except Exception as e:
+            logger.error(f"{trade_date} 日线补拉后查询失败：{str(e)}")
+            return pd.DataFrame()
+
     if df is not None and not df.empty:
+        if "trade_date" in df.columns:
+            td = df["trade_date"].astype(str).str.replace("-", "", regex=False)
+            df["trade_date"] = td.str.slice(0, 4) + "-" + td.str.slice(4, 6) + "-" + td.str.slice(6, 8)
         logger.debug(f"{trade_date} 日线数据从数据库读取完成，行数：{len(df)}")
         return df
     else:
@@ -1995,6 +2052,99 @@ def get_active_stock_stats(
     except Exception as e:
         logger.warning(f"[get_active_stock_stats] breakout 查询失败 | {trade_date} | {e}")
 
+    return result
+
+
+def get_market_breadth_liquidity_stats(
+    trade_dates: List[str],
+    amount_threshold: float = 3_000_000.0,
+) -> Dict[str, Dict[str, float]]:
+    """
+    查询多个交易日的全市场广度/流动性统计（DB 端 SQL 聚合）。
+
+    输出字段（每个 trade_date 一组）：
+      - amt30_count: 成交额 >= 30亿 的股票数
+      - amt30_above5d_count: 成交额 >= 30亿 且高于近5日均成交额 的股票数
+      - amt30_above5d_newlow5_count: 上述股票中，收盘创近5日新低的股票数
+      - amt30_above5d_holf_count: 上述股票中，高开低走/冲高回落股票数
+      - amt30_above5d_lohc_count: 上述股票中，低开高走/探底回升股票数
+      - up_60pct_board_count: 涨幅达到各板块最大涨幅 60% 的股票数
+      - down_60pct_board_count: 跌幅达到各板块最大跌幅 60% 的股票数
+    """
+    if not trade_dates:
+        return {}
+
+    dates_fmt = [d.replace("-", "") for d in trade_dates]
+    placeholders = ", ".join(["%s"] * len(dates_fmt))
+    min_date = min(dates_fmt)
+    sql = f"""
+        WITH base AS (
+            SELECT
+                k.ts_code,
+                REPLACE(k.trade_date, '-', '') AS trade_date,
+                k.open, k.high, k.low, k.close, k.pre_close, k.pct_chg, k.amount,
+                AVG(k.amount) OVER (
+                    PARTITION BY k.ts_code
+                    ORDER BY REPLACE(k.trade_date, '-', '')
+                    ROWS BETWEEN 4 PRECEDING AND CURRENT ROW
+                ) AS amt_ma5_incl,
+                MIN(k.close) OVER (
+                    PARTITION BY k.ts_code
+                    ORDER BY REPLACE(k.trade_date, '-', '')
+                    ROWS BETWEEN 5 PRECEDING AND 1 PRECEDING
+                ) AS prev5_min_close
+            FROM kline_day k
+            WHERE REPLACE(k.trade_date, '-', '') IN ({placeholders})
+               OR REPLACE(k.trade_date, '-', '') >= %s
+        )
+        SELECT
+            trade_date,
+            SUM(CASE WHEN amount >= %s THEN 1 ELSE 0 END) AS amt30_count,
+            SUM(CASE WHEN amount >= %s AND amount > amt_ma5_incl THEN 1 ELSE 0 END) AS amt30_above5d_count,
+            SUM(CASE WHEN amount >= %s AND amount > amt_ma5_incl AND prev5_min_close IS NOT NULL AND close <= prev5_min_close THEN 1 ELSE 0 END) AS amt30_above5d_newlow5_count,
+            SUM(CASE WHEN amount >= %s AND amount > amt_ma5_incl AND open > pre_close AND close < open THEN 1 ELSE 0 END) AS amt30_above5d_holf_count,
+            SUM(CASE WHEN amount >= %s AND amount > amt_ma5_incl AND open < pre_close AND close > pre_close THEN 1 ELSE 0 END) AS amt30_above5d_lohc_count,
+            SUM(CASE
+                WHEN pct_chg >= 0.6 * (
+                    CASE
+                        WHEN ts_code LIKE '%%.BJ' THEN 29.8
+                        WHEN ts_code LIKE '688%%.SH' OR ts_code LIKE '300%%.SZ' OR ts_code LIKE '301%%.SZ' THEN 19.8
+                        ELSE 9.8
+                    END
+                ) THEN 1 ELSE 0 END) AS up_60pct_board_count,
+            SUM(CASE
+                WHEN pct_chg <= -0.6 * (
+                    CASE
+                        WHEN ts_code LIKE '%%.BJ' THEN 29.8
+                        WHEN ts_code LIKE '688%%.SH' OR ts_code LIKE '300%%.SZ' OR ts_code LIKE '301%%.SZ' THEN 19.8
+                        ELSE 9.8
+                    END
+                ) THEN 1 ELSE 0 END) AS down_60pct_board_count
+        FROM base
+        WHERE trade_date IN ({placeholders})
+          AND ts_code NOT LIKE '%%.BJ'
+        GROUP BY trade_date
+    """
+    params = tuple(dates_fmt) + (min_date, amount_threshold, amount_threshold, amount_threshold,
+                                 amount_threshold, amount_threshold) + tuple(dates_fmt)
+    result = {}
+    try:
+        df = db.query(sql, params=params, return_df=True)
+        if df is not None and not df.empty:
+            for _, row in df.iterrows():
+                td = str(row.get("trade_date", ""))
+                td = f"{td[:4]}-{td[4:6]}-{td[6:8]}" if len(td) == 8 else td
+                result[td] = {
+                    "amt30_count": int(row.get("amt30_count", 0) or 0),
+                    "amt30_above5d_count": int(row.get("amt30_above5d_count", 0) or 0),
+                    "amt30_above5d_newlow5_count": int(row.get("amt30_above5d_newlow5_count", 0) or 0),
+                    "amt30_above5d_holf_count": int(row.get("amt30_above5d_holf_count", 0) or 0),
+                    "amt30_above5d_lohc_count": int(row.get("amt30_above5d_lohc_count", 0) or 0),
+                    "up_60pct_board_count": int(row.get("up_60pct_board_count", 0) or 0),
+                    "down_60pct_board_count": int(row.get("down_60pct_board_count", 0) or 0),
+                }
+    except Exception as e:
+        logger.warning(f"[get_market_breadth_liquidity_stats] 查询失败：{e}")
     return result
 
 
