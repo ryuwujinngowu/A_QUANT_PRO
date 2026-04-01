@@ -47,6 +47,27 @@ from utils.common_tools import (
 from utils.log_utils import logger
 
 
+LABEL_COLUMNS = {
+    "label1", "label2", "label1_3pct", "label1_8pct", "label_d2_limit_down",
+    "label_10d_60pct", "label_d1_gap_up", "label_5d_min_dd_30pct", "label_d2_drop_5_9p5",
+    "label_raw_return", "label_open_gap", "label_d1_high", "label_d1_low",
+    "label_d1_pct_chg", "label_d2_return", "label_5d_30pct", "label_d1_open_up",
+    *_cfg.RESERVED_FUTURE_LABEL_COLS,
+}
+
+BINARY_LABEL_COLUMNS = {
+    "label1", "label2", "label1_3pct", "label1_8pct", "label_d2_limit_down",
+    "label_10d_60pct", "label_d1_gap_up", "label_5d_min_dd_30pct", "label_d2_drop_5_9p5",
+    "label_5d_30pct", "label_d1_open_up",
+}
+
+FEATURE_FILL_EXCLUDE_COLUMNS = {
+    "sample_id", "strategy_id", "strategy_name", "stock_code", "trade_date", "sector_name",
+    *LABEL_COLUMNS,
+    *_cfg.RESERVED_FUTURE_FEATURE_COLS,
+}
+
+
 # ============================================================
 # 已处理日期管理（原子性读写，保证断点续跑幂等）
 # ============================================================
@@ -121,7 +142,10 @@ class DataSetAssembler:
             return pd.DataFrame()
 
         # T6: 使用 sample_id 去重（允许同一股票同一日期出现在不同策略/板块）
-        df = df.drop_duplicates(subset=["sample_id"])
+        dup = int(df.duplicated(subset=["sample_id"]).sum())
+        if dup:
+            logger.warning(f"[DataSetAssembler] 检测到重复 sample_id，保留首条并移除: {dup} 行")
+            df = df.drop_duplicates(subset=["sample_id"])
         # label1 是唯一必需列（D+1 停牌时 LabelEngine 跳过，dropna 正常）
         # label2 依赖 D+2 数据，最新日期可能 D+2 尚未收盘，保留 NaN 行而非丢弃
         # 训练时按 TARGET_LABEL 各自 dropna，在此只保证 label1 非空
@@ -172,7 +196,18 @@ class DataSetAssembler:
                         break
         if fill_map:
             df = df.fillna(fill_map)
-        df = df.fillna(0)   # 其余列（pct_chg/bias/sei/hdi/计数类等）0 即为正确中性值
+
+        numeric_feature_cols = [
+            col for col in df.columns
+            if col not in FEATURE_FILL_EXCLUDE_COLUMNS and pd.api.types.is_numeric_dtype(df[col])
+        ]
+        if numeric_feature_cols:
+            df.loc[:, numeric_feature_cols] = df.loc[:, numeric_feature_cols].fillna(0)
+
+        for col in sorted(BINARY_LABEL_COLUMNS & set(df.columns)):
+            if df[col].isna().any():
+                continue
+            df[col] = df[col].astype("int8")
         return df.reset_index(drop=True)
 
 
@@ -311,7 +346,7 @@ def _filter_low_liquidity(daily_df: pd.DataFrame) -> pd.DataFrame:
 
 
 def validate_train_dataset(csv_path: str) -> pd.DataFrame:
-    """最终训练集全量校验"""
+    """最终训练集全量校验（仅验证，不改写语义）"""
     if not os.path.exists(csv_path):
         logger.warning(f"训练集文件不存在，跳过校验: {csv_path}")
         return pd.DataFrame()
@@ -320,23 +355,47 @@ def validate_train_dataset(csv_path: str) -> pd.DataFrame:
     logger.info(f"【最终校验】总行数: {len(df)}")
 
     required = ["sample_id", "strategy_id", "stock_code", "trade_date", "label1", "label2", "adapt_score"]
-    missing  = [c for c in required if c not in df.columns]
+    missing = [c for c in required if c not in df.columns]
     if missing:
         raise ValueError(f"缺失核心列: {missing}")
 
-    # T6: 使用 sample_id 去重
-    dup = df.duplicated(subset=["sample_id"]).sum()
+    dup = int(df.duplicated(subset=["sample_id"]).sum())
     if dup:
-        df = df.drop_duplicates(subset=["sample_id"])
-        logger.warning(f"移除重复行: {dup}")
+        raise ValueError(f"最终训练集存在重复 sample_id: {dup}")
 
-    # 只对核心二分类 label 做 dropna；涉及 D+2/D0 的标签允许 NaN（训练时按需处理）
-    null = df[["label1", "label2"]].isnull().sum().sum()
-    if null:
-        df = df.dropna(subset=["label1", "label2"])
-        logger.warning(f"移除标签空值行: {null}")
+    if df["label1"].isna().any():
+        raise ValueError(f"最终训练集存在 label1 空值: {int(df['label1'].isna().sum())}")
 
-    df.to_csv(csv_path, index=False, encoding="utf-8-sig")
+    binary_label_cols = [
+        c for c in [
+            "label1", "label2", "label1_3pct", "label1_8pct", "label_d2_limit_down",
+            "label_10d_60pct", "label_d1_gap_up", "label_5d_min_dd_30pct", "label_d2_drop_5_9p5",
+            "label_5d_30pct", "label_d1_open_up",
+        ] if c in df.columns
+    ]
+    for col in binary_label_cols:
+        vals = set(df[col].dropna().unique().tolist())
+        if not vals.issubset({0, 1, 0.0, 1.0}):
+            raise ValueError(f"二分类标签列存在非法取值: {col} -> {sorted(vals)}")
+
+    if "stock_close_d0" in df.columns:
+        bad_price = int((df["stock_close_d0"].isna() | (df["stock_close_d0"] <= 0)).sum())
+        if bad_price:
+            raise ValueError(f"最终训练集存在 stock_close_d0 异常行: {bad_price}")
+
+    null_label2 = int(df["label2"].isna().sum())
+    if null_label2:
+        logger.warning(f"【最终校验】label2 空值保留: {null_label2} 行（尾部日期允许）")
+
+    for col in [
+        "label_5d_30pct", "label_10d_60pct", "label_5d_min_dd_30pct",
+        "hp_stage_peak_time_rate", "agent_high_position_intraday_5d_ratio_d0"
+    ]:
+        if col in df.columns:
+            nunique = int(df[col].nunique(dropna=True))
+            if nunique <= 1:
+                logger.warning(f"【最终校验】列分布单一: {col} | nunique={nunique}")
+
     logger.info(f"【最终校验】有效行数: {len(df)}")
     return df
 
@@ -363,7 +422,7 @@ if __name__ == "__main__":
     DATASET_MANIFEST_PATH = _cfg.get_dataset_manifest_path(DATASET_DIR)
     CONFIG_SNAPSHOT_PATH  = _cfg.get_dataset_config_snapshot_path(DATASET_DIR)
     # 因子逻辑有变更（新增列、修改计算公式）时必须更新版本号，否则旧数据不会重跑
-    FACTOR_VERSION        = "v5.1_individual_factors_fixed"
+    FACTOR_VERSION        = "v5.2_vwap_fix"
     # =====================================================
 
     # ---------- 从多段日期范围收集全部交易日 ----------
@@ -532,7 +591,17 @@ if __name__ == "__main__":
                 continue
 
             # ---- Step 7: 合并 & 清洗 ----
-            merged   = pd.merge(feature_df, label_df, on=["stock_code", "trade_date"], how="left")
+            merged = pd.merge(feature_df, label_df, on=["stock_code", "trade_date"], how="left")
+            if len(merged) != len(feature_df):
+                raise ValueError(
+                    f"特征/标签合并后行数异常: before={len(feature_df)} after={len(merged)}"
+                )
+            if label_df.duplicated(subset=["stock_code", "trade_date"]).any():
+                dup_cnt = int(label_df.duplicated(subset=["stock_code", "trade_date"]).sum())
+                raise ValueError(f"label_df 存在重复键 stock_code+trade_date: {dup_cnt}")
+            missing_label1 = int(merged["label1"].isna().sum()) if "label1" in merged.columns else len(merged)
+            if missing_label1:
+                logger.warning(f"{date} 合并后 label1 缺失: {missing_label1} 行")
             merged = _apply_reserved_future_schema(merged)
             clean_df = DataSetAssembler.validate_and_clean(merged)
             if clean_df.empty:
@@ -543,7 +612,22 @@ if __name__ == "__main__":
             if first_write:
                 fixed_columns = clean_df.columns.tolist()
             else:
-                clean_df = clean_df.reindex(columns=fixed_columns, fill_value=0)
+                current_cols = clean_df.columns.tolist()
+                if set(current_cols) != set(fixed_columns):
+                    missing_cols = sorted(set(fixed_columns) - set(current_cols))
+                    new_cols = sorted(set(current_cols) - set(fixed_columns))
+                    raise ValueError(
+                        f"断点续跑 schema 不一致 | missing={missing_cols} | new={new_cols}"
+                    )
+                clean_df = clean_df.reindex(columns=fixed_columns)
+
+            dtype_map = {
+                col: "int8"
+                for col in sorted(BINARY_LABEL_COLUMNS & set(clean_df.columns))
+                if not clean_df[col].isna().any()
+            }
+            if dtype_map:
+                clean_df = clean_df.astype(dtype_map)
 
             # ---- Step 9: 原子性写入 ----
             clean_df.to_csv(

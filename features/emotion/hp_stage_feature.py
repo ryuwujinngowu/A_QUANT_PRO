@@ -142,9 +142,11 @@ class HPStageFeature(BaseFeature):
                 peak_price = float(np.max(high_arr))
                 peak_hit_idx = int(np.argmax(high_arr >= peak_price - 1e-8))
                 peak_minutes = float(peak_hit_idx * 5)
-                stock_peak_minutes.append(peak_minutes)
                 if minute_date_std == kd.get("d0"):
                     d0_peak_minute = peak_minutes
+                else:
+                    # 历史仅收集 D-4~D-1，不含 D0，避免 D0 自引用
+                    stock_peak_minutes.append(peak_minutes)
 
             if d0_peak_minute is not None:
                 peak_minutes_d0.append(d0_peak_minute)

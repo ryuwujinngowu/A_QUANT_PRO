@@ -31,6 +31,7 @@
     agent_return_stats → AgentReturnStatsFeature（短线agent日内收益5日相对强弱，全局因子）
     ths_hot          → THSHotFeature（同花顺热股榜 d0~d4 排名归一化得分，个股因子）
     moneyflow        → MoneyflowFeature（个股资金面双源因子：大单/超大单/主力/小单净占比 d0~d4，个股因子）
+    limit_emotion    → LimitEmotionFeature（涨停板情绪：炸板数/炸板比/触板分钟成交额/触板量比，全局因子）
 """
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -76,6 +77,7 @@ from features.macro.hp_cycle_feature import HPCycleFeature                 # noq
 from features.macro.active_stats_feature import ActiveStatsFeature         # noqa: F401  # 活跃股60日突破 + 高开低走（全局因子）
 from features.macro.agent_return_stats_feature import AgentReturnStatsFeature  # noqa: F401  # 短线agent日内收益5日相对强弱（全局因子）
 from features.emotion.ths_hot_feature import THSHotFeature                 # noqa: F401  # 同花顺热股榜 d0~d4 排名归一化得分（个股因子）
+from features.macro.limit_emotion_feature import LimitEmotionFeature       # noqa: F401  # 涨停板情绪：炸板数/炸板比/触板成交额/触板量比（全局因子）
 # from features.individual.moneyflow_feature import MoneyflowFeature         # noqa: F401  # 个股资金面因子：大单/超大单/主力/小单净占比 d0~d4（个股因子，双源融合）
 
 __all__ = [
@@ -84,7 +86,7 @@ __all__ = [
     # "StkFactorProFeature",  # 模块预留，暂未实现
     "MarketMacroFeature", "IndividualFeature",
     "HPStageFeature", "HPStyleFeature", "HPCycleFeature", "ActiveStatsFeature",
-    "AgentReturnStatsFeature", "THSHotFeature",
+    "AgentReturnStatsFeature", "THSHotFeature", "LimitEmotionFeature",
     # "MoneyflowFeature",
     "feature_registry",
 ]

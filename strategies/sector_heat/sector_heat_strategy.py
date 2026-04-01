@@ -71,6 +71,7 @@ class SectorHeatStrategy(BaseStrategy):
 
     def __init__(self):
         super().__init__()
+        self._tracker_config = None
         self.strategy_name = "板块热度XGBoost盘前选股，开盘买入策略"
         self.strategy_params = {
             "buy_top_k":   6,        # 每日最多买入 N 只
@@ -93,13 +94,8 @@ class SectorHeatStrategy(BaseStrategy):
         # 持仓管理：{ts_code: buy_date}，用于严格执行 D+1 卖出规则
         self.hold_stock_dict: Dict[str, str] = {}
 
-        # 持仓跟踪配置：D+1 短线策略 -5% 固定止损 + 8% 止盈
-        self._tracker_config = TrackerConfig(
-            stop_loss_pct=None,         # -5% 止损（短线策略止损线较紧）
-            take_profit_pct=None,        # +8% 止盈
-            trailing_stop_pct=None,      # 短线不启用移动止损
-            max_hold_days=None,          # 由策略自身的 D+1 逻辑控制
-        )
+        # 推送/诊断复用：保留最近一次买入信号的富元数据（不影响主信号返回结构）
+        self._last_buy_signal_details: List[Dict[str, any]] = []
 
         self.initialize()
 
@@ -115,6 +111,11 @@ class SectorHeatStrategy(BaseStrategy):
         self.clear_signal()
         self.hold_stock_dict.clear()
         self._model = None  # 重置模型，下次使用时重新加载
+        self._last_buy_signal_details = []
+
+    def get_last_buy_signal_details(self) -> List[Dict[str, any]]:
+        """返回最近一次买入信号的富元数据，供 runner 推送复用。"""
+        return list(self._last_buy_signal_details)
 
     def generate_signal(
         self,
@@ -272,6 +273,7 @@ class SectorHeatStrategy(BaseStrategy):
         # ── 模型加载 ──────────────────────────────────────────────────────
         if not self._ensure_model():
             logger.error(f"{trade_date} 模型未就绪，跳过买入")
+            self._last_buy_signal_details = []
             return {}
 
         # ── 共享候选池与上下文构建（与训练口径同源）────────────────────────
@@ -279,10 +281,12 @@ class SectorHeatStrategy(BaseStrategy):
             candidate_df, context = self.build_training_candidates(trade_date, daily_df=None)
         except Exception as e:
             logger.error(f"{trade_date} 候选池构建失败: {e}", exc_info=True)
+            self._last_buy_signal_details = []
             return {}
 
         if candidate_df.empty:
             logger.warning(f"{trade_date} 候选池为空，跳过买入")
+            self._last_buy_signal_details = []
             return {}
 
         logger.info(
@@ -295,14 +299,17 @@ class SectorHeatStrategy(BaseStrategy):
             bundle = self.build_feature_bundle_from_context(context)
             if bundle is None:
                 logger.warning(f"{trade_date} Feature bundle 为空，跳过买入")
+                self._last_buy_signal_details = []
                 return {}
             feature_df = self._feature_engine.run_single_date(bundle)
         except Exception as e:
             logger.error(f"{trade_date} 特征计算失败: {e}", exc_info=True)
+            self._last_buy_signal_details = []
             return {}
 
         if feature_df.empty:
             logger.warning(f"{trade_date} 特征计算结果为空，跳过买入")
+            self._last_buy_signal_details = []
             return {}
 
         # ── Step 4: XGBoost 预测 ──────────────────────────────────────────
@@ -321,6 +328,7 @@ class SectorHeatStrategy(BaseStrategy):
             feature_df["_prob"] = probs
         except Exception as e:
             logger.error(f"{trade_date} 模型预测失败: {e}", exc_info=True)
+            self._last_buy_signal_details = []
             return {}
 
         # ── Step 5: 排序选股 ──────────────────────────────────────────────
@@ -335,6 +343,7 @@ class SectorHeatStrategy(BaseStrategy):
 
         if selected.empty:
             logger.info(f"{trade_date} 无股票超过概率阈值 {min_prob}，跳过买入")
+            self._last_buy_signal_details = []
             return {}
 
         # # ── Step 5b: 风险惩罚过滤（高风险市场环境下过滤低流动性个股）────────
@@ -366,13 +375,22 @@ class SectorHeatStrategy(BaseStrategy):
         #     logger.info(f"{trade_date} 风险过滤后候选为空，跳过买入")
         #     return {}
 
+        self._last_buy_signal_details = [
+            {
+                "stock_code": row["stock_code"],
+                "buy_type": "open",
+                "prob": round(float(row["_prob"]), 4),
+            }
+            for _, row in selected.iterrows()
+        ]
+
         # 返回格式 {ts_code: 'open'}，引擎以次日开盘价买入（信号基于 D 日收盘后数据，无未来函数）
-        buy_signal_map = {row["stock_code"]: "open" for _, row in selected.iterrows()}
+        buy_signal_map = {item["stock_code"]: item["buy_type"] for item in self._last_buy_signal_details}
         logger.info(
             f"{trade_date} 最终买入 {len(buy_signal_map)} 只: "
             + " | ".join(
-                f"{row['stock_code']}(p={row['_prob']:.3f})"
-                for _, row in selected.iterrows()
+                f"{item['stock_code']}(p={item['prob']:.3f})"
+                for item in self._last_buy_signal_details
             )
         )
         return buy_signal_map

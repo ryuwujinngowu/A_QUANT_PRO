@@ -63,7 +63,7 @@ import os
 import sys
 from datetime import datetime
 
-from typing import Tuple
+from typing import List, Dict, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -87,33 +87,46 @@ def _is_trade_date(date_str: str) -> bool:
         return False
 
 
-def _format_signal_message(trade_date: str, buy_signals: dict) -> Tuple[str, str]:
+def _get_model_display_name(model_path: str) -> str:
+    if not model_path:
+        return "sector_heat"
+    return os.path.splitext(os.path.basename(model_path))[0]
+
+
+def _format_signal_message(trade_date: str, buy_signals: dict, signal_details: List[Dict[str, any]], model_name: str) -> Tuple[str, str]:
     """
     将买入信号 dict 格式化为 PushPlus 推送标题 + 正文
 
     :param trade_date:   信号日期
     :param buy_signals:  {ts_code: buy_type} 或 {}
+    :param signal_details: [{stock_code,buy_type,prob}, ...]
+    :param model_name:   实际运行模型名
     :return: (title, content) 两个字符串
     """
     if not buy_signals:
-        title   = f"[板块热度筛选策略V5.2] {trade_date} | 今日无买入信号"
+        title = f"[{model_name}] {trade_date} | 今日无买入信号"
         content = (
+            f"模型：{model_name}\n"
             f"板块热度策略 | {trade_date}\n"
             f"今日无满足条件的买入标的。\n"
             f"可能原因：这他妈的还买尼玛呢。"
         )
         return title, content
 
-    title = f"[板块热度筛选策略V5.2] {trade_date} | 发现 {len(buy_signals)} 个买入信号"
+    title = f"[{model_name}] {trade_date} | 发现 {len(buy_signals)} 个买入信号"
     lines = [
-        f"📈 板块热度 XGBoost 策略-贝叶斯优化",
+        f"📈 板块热度 XGBoost 策略",
+        f"模型：{model_name}",
         f"信号日期：{trade_date}",
         f"买入时机：次日开盘（可参考策略监控台查看近期不同买点收益情况）",
         f"卖出时机：D+1日收盘",
         "=" * 32,
     ]
+    detail_map = {item["stock_code"]: item for item in signal_details}
     for i, (ts_code, buy_type) in enumerate(buy_signals.items(), 1):
-        lines.append(f"  {i:>2}. {ts_code}   [{buy_type}]")
+        prob = detail_map.get(ts_code, {}).get("prob")
+        prob_txt = f" | p={prob:.4f}" if prob is not None else ""
+        lines.append(f"  {i:>2}. {ts_code}   [{buy_type}]{prob_txt}")
     lines += [
         "=" * 32,
         "⚠️  信号仅供参考,注意风险控制,亏了自己受着,赚了发一个",
@@ -144,9 +157,9 @@ def run_daily_signal(trade_date: str, dry_run: bool = False) -> bool:
         if not dry_run:
             # 修改1：使用正确的函数名 send_wechat_message_to_multiple_users
             # 补充说明：如果你的函数需要指定用户列表，可添加 users 参数，例如：
-            send_wechat_message_to_multiple_users(title=f"[板块热度筛选策略V5.2] {trade_date} 今日非交易日", content=msg)
+            send_wechat_message_to_multiple_users(title=f"[{_get_model_display_name('sector_heat')}] {trade_date} 今日非交易日", content=msg)
             send_wechat_message_to_multiple_users(
-                title=f"[板块热度筛选策略V5.2] {trade_date} 今日非交易日",
+                title=f"[{_get_model_display_name('sector_heat')}] {trade_date} 今日非交易日",
                 content=msg,
             )
         return True
@@ -171,14 +184,16 @@ def run_daily_signal(trade_date: str, dry_run: bool = False) -> bool:
     from strategies.sector_heat.sector_heat_strategy import SectorHeatStrategy
 
     try:
-        strategy    = SectorHeatStrategy()
+        strategy = SectorHeatStrategy()
+        model_name = _get_model_display_name(strategy.strategy_params.get("model_path", ""))
         buy_signals = strategy._generate_buy_signal(trade_date, daily_df)
+        signal_details = strategy.get_last_buy_signal_details()
     except Exception as e:
         msg = f"[Runner] 策略执行异常: {e}"
         logger.error(msg, exc_info=True)
         if not dry_run:
             send_wechat_message_to_multiple_users(
-                title=f"[量化] {trade_date} 策略执行异常",
+                title=f"[{model_name if 'model_name' in locals() else 'sector_heat'}] {trade_date} 策略执行异常",
                 content=msg
             )
         return False
@@ -206,7 +221,7 @@ def run_daily_signal(trade_date: str, dry_run: bool = False) -> bool:
             )
 
     # ── Step 4: 格式化 + 推送 ────────────────────────────────────────────
-    title, content = _format_signal_message(trade_date, buy_signals)
+    title, content = _format_signal_message(trade_date, buy_signals, signal_details, model_name)
 
     if dry_run:
         logger.info(f"[Runner][DRY-RUN] 标题: {title}")

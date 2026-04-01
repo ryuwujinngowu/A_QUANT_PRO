@@ -78,6 +78,7 @@ class FeatureDataBundle:
         self._load_daily_data()
         self._load_macro_data()
         self._load_hp_ext_cache()
+        self._load_limit_touch_data()   # D0 触板分钟成交额（依赖 hp_ext_cache 的 st_set）
         if load_minute:
             self._load_minute_data()
 
@@ -155,6 +156,10 @@ class FeatureDataBundle:
             self.macro_cache["limit_up_df"]   = limit_up_df
             self.macro_cache["limit_down_df"] = limit_down_df
 
+            # ── 炸板池（limit_list_ths API 一次覆盖全类型，补拉已在上方完成）──
+            zhaban_df = get_limit_list_ths(td, limit_type="炸板池")
+            self.macro_cache["zhaban_df"] = zhaban_df
+
             # ── 连板天梯 ──────────────────────────────────────────────────────
             limit_step_df = get_limit_step(td)
             if limit_step_df.empty:
@@ -206,14 +211,21 @@ class FeatureDataBundle:
                 _nums = pd.to_numeric(limit_step_df["nums"], errors="coerce").dropna()
                 _d0_max_consec = int(_nums.max()) if len(_nums) > 0 else 0
 
-            limit_up_counts_5d: dict = {td: _d0_up_count}
-            consec_max_5d:      dict = {td: _d0_max_consec}
+            limit_up_counts_5d:  dict = {td: _d0_up_count}
+            consec_max_5d:       dict = {td: _d0_max_consec}
+            zhaban_counts_5d:    dict = {td: len(zhaban_df)}
+            # D0 涨停+炸板 codes（供 _load_limit_touch_data 计算分钟线触板成交额）
+            _d0_touch_codes: list = []
+            for _df in [limit_up_df, zhaban_df]:
+                if not _df.empty and "ts_code" in _df.columns:
+                    _d0_touch_codes.extend(_df["ts_code"].tolist())
+            limit_touch_codes_5d: dict = {td: list(set(_d0_touch_codes))}
 
             hist_dates = self.lookback_dates_5d[:-1]   # d1~d4（不含d0）
 
             def _fetch_hist_macro(date):
-                up_df_h   = get_limit_list_ths(date, limit_type="涨停池")
-                step_df_h = get_limit_step(date)
+                up_df_h     = get_limit_list_ths(date, limit_type="涨停池")
+                step_df_h   = get_limit_step(date)
                 # 同 d0 一样：DB 无数据时尝试接口补拉，保证历史趋势因子有效
                 if up_df_h.empty:
                     try:
@@ -231,21 +243,38 @@ class FeatureDataBundle:
                         step_df_h = get_limit_step(date)
                     except Exception:
                         pass
-                up_cnt = len(up_df_h)
-                max_c  = 0
+                # 炸板池（补拉已覆盖，直接查）
+                zhaban_df_h = get_limit_list_ths(date, limit_type="炸板池")
+
+                up_cnt     = len(up_df_h)
+                zhaban_cnt = len(zhaban_df_h)
+                max_c      = 0
                 if not step_df_h.empty and "nums" in step_df_h.columns:
                     _n = pd.to_numeric(step_df_h["nums"], errors="coerce").dropna()
                     max_c = int(_n.max()) if len(_n) > 0 else 0
-                return date, up_cnt, max_c
+
+                # 历史日涨停+炸板 codes（供 _load_limit_touch_data 算分钟线触板成交额）
+                _h_codes: list = []
+                for _hdf in [up_df_h, zhaban_df_h]:
+                    if not _hdf.empty and "ts_code" in _hdf.columns:
+                        _h_codes.extend(_hdf["ts_code"].tolist())
+
+                return date, up_cnt, max_c, zhaban_cnt, list(set(_h_codes))
 
             if hist_dates:
                 with ThreadPoolExecutor(max_workers=min(4, len(hist_dates))) as pool:
-                    for _date, _up_cnt, _max_c in pool.map(_fetch_hist_macro, hist_dates):
-                        limit_up_counts_5d[_date] = _up_cnt
-                        consec_max_5d[_date]      = _max_c
+                    for _date, _up_cnt, _max_c, _zhaban_cnt, _codes in pool.map(
+                        _fetch_hist_macro, hist_dates
+                    ):
+                        limit_up_counts_5d[_date]  = _up_cnt
+                        consec_max_5d[_date]        = _max_c
+                        zhaban_counts_5d[_date]     = _zhaban_cnt
+                        limit_touch_codes_5d[_date] = _codes
 
-            self.macro_cache["limit_up_counts_5d"] = limit_up_counts_5d
-            self.macro_cache["consec_max_5d"]      = consec_max_5d
+            self.macro_cache["limit_up_counts_5d"]  = limit_up_counts_5d
+            self.macro_cache["consec_max_5d"]        = consec_max_5d
+            self.macro_cache["zhaban_counts_5d"]     = zhaban_counts_5d
+            self.macro_cache["limit_touch_codes_5d"] = limit_touch_codes_5d
 
             # ── 20日上证指数涨跌幅（个股强势因子 factor 11 用）─────────────
             # 批量查询全部 20d 日期，单次 SQL，存为 {date: pct_chg} dict
@@ -462,6 +491,102 @@ class FeatureDataBundle:
         except Exception as e:
             logger.warning(f"[DataBundle] hp_ext_cache加载异常（非致命，高位股因子将返回中性值）：{str(e)[:200]}")
             self.hp_ext_cache = {}
+
+    def _load_limit_touch_data(self):
+        """
+        计算 D0~D4 每日触板分钟K线成交额（涨停池 + 炸板池，剔除ST，首次触板那根K线 amount 之和）。
+
+        算法：
+          1. 从 macro_cache["limit_touch_codes_5d"] 取每日涨停+炸板 codes
+          2. 剔除 ST（hp_ext_cache["st_set"]）
+          3. 批量查对应日期的日线 high（作为涨停价参照：触板股 daily_high = 涨停价）
+          4. 并发加载所有 (ts_code, date) 对的分钟线
+          5. 每只股票找首次触板（high >= daily_high - 0.01）那根K线，累加 amount
+
+        结果：macro_cache["limit_touch_amount_5d"] = {trade_date: amount_千元}
+        依赖：hp_ext_cache["st_set"]，需在 _load_hp_ext_cache 之后调用。
+        所有异常均为非致命，失败时对应日期写入 0.0（中性值）。
+        """
+        try:
+            st_set           = self.hp_ext_cache.get("st_set", set())
+            touch_codes_5d   = self.macro_cache.get("limit_touch_codes_5d", {})
+            lookback_5d      = self.lookback_dates_5d
+
+            if not touch_codes_5d or not lookback_5d:
+                self.macro_cache["limit_touch_amount_5d"] = {d: 0.0 for d in lookback_5d}
+                return
+
+            # ── Step1：收集所有 (date, ts_code) 对，剔除ST ─────────────────
+            tasks: list = []   # [(date, ts_code), ...]
+            for date in lookback_5d:
+                codes = touch_codes_5d.get(date, [])
+                for c in codes:
+                    if c not in st_set:
+                        tasks.append((date, c))
+
+            if not tasks:
+                self.macro_cache["limit_touch_amount_5d"] = {d: 0.0 for d in lookback_5d}
+                return
+
+            # ── Step2：批量查日线 high（所有日期，一次 SQL per date）──────────
+            # daily_high_map[(ts_code, date_no_dash)] = high
+            daily_high_map: dict = {}
+            all_dates_needed = list(set(d for d, _ in tasks))
+            all_codes_needed = list(set(c for _, c in tasks))
+            # lookback_5d 跨度很短（5天），一次 get_kline_day_range 覆盖全部
+            try:
+                _daily_range_df = get_kline_day_range(
+                    all_codes_needed,
+                    min(all_dates_needed),
+                    max(all_dates_needed),
+                )
+                if not _daily_range_df.empty and "ts_code" in _daily_range_df.columns:
+                    for _, _r in _daily_range_df.iterrows():
+                        _td = str(_r.get("trade_date", "")).replace("-", "")
+                        daily_high_map[(_r["ts_code"], _td)] = float(_r.get("high", 0) or 0)
+            except Exception as _e:
+                logger.warning(f"[DataBundle] 触板股日线 high 批量查询失败：{_e}")
+
+            # ── Step3：并发加载分钟线 ─────────────────────────────────────────
+            def _fetch_min_pair(pair):
+                date, ts_code = pair
+                return pair, data_cleaner.get_kline_min_by_stock_date(ts_code, date)
+
+            minute_cache_local: dict = {}
+            with ThreadPoolExecutor(max_workers=_IO_WORKERS) as pool:
+                for pair, min_df in pool.map(_fetch_min_pair, tasks):
+                    minute_cache_local[pair] = min_df
+
+            # ── Step4：按日期累加触板成交额 ───────────────────────────────────
+            touch_amount_5d: dict = {d: 0.0 for d in lookback_5d}
+            for date, ts_code in tasks:
+                td_no_dash  = date.replace("-", "")
+                limit_price = daily_high_map.get((ts_code, td_no_dash), 0.0)
+                if limit_price <= 0:
+                    continue
+                min_df = minute_cache_local.get((date, ts_code))
+                if min_df is None or min_df.empty or "high" not in min_df.columns:
+                    continue
+                min_df = min_df.sort_values("trade_time").reset_index(drop=True)
+                highs = min_df["high"].astype(float)
+                touch_mask = highs >= limit_price - 0.01   # 容差 0.01 元防浮点误差
+                if not touch_mask.any():
+                    continue
+                first_idx = int(touch_mask.idxmax())
+                if "amount" in min_df.columns:
+                    touch_amount_5d[date] = touch_amount_5d.get(date, 0.0) + float(
+                        min_df.loc[first_idx, "amount"] or 0
+                    )
+
+            self.macro_cache["limit_touch_amount_5d"] = touch_amount_5d
+            d0_amt = touch_amount_5d.get(self.trade_date, 0.0)
+            logger.info(
+                f"[DataBundle] 5日触板分钟成交额 | 任务:{len(tasks)}对 "
+                f"| D0:{d0_amt / 1e9:.4f}万亿元"
+            )
+        except Exception as e:
+            logger.warning(f"[DataBundle] 触板分钟成交额加载失败（非致命）：{e}")
+            self.macro_cache["limit_touch_amount_5d"] = {d: 0.0 for d in self.lookback_dates_5d}
 
     def _load_minute_data(self):
         """

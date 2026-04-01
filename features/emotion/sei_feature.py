@@ -257,9 +257,13 @@ class SEIFeature(BaseFeature):
         ret_abs = abs(ret)
 
         # [5] VWAP 偏离度（筹码散乱程度）
-        cum_vol        = np.cumsum(volume_arr)
-        cum_amt        = np.cumsum(close_arr * volume_arr)
-        vwap_arr       = cum_amt / (cum_vol + eps)
+        # 修复：集合竞价等前市 bar 的 volume=0 导致 cum_vol=0，
+        #       此时 vwap_arr[0]=0，偏离度 = close/1e-6 ≈ 12,000,000，
+        #       均值约 50,000，× vwap_coeff=28 = -1,400,000 → SEI 恒为 0。
+        # 修复方案：cum_vol=0 时 VWAP 取当前 close（无成交=筹码不散乱），偏离=0。
+        cum_vol  = np.cumsum(volume_arr)
+        cum_amt  = np.cumsum(close_arr * volume_arr)
+        vwap_arr = np.where(cum_vol > 0, cum_amt / (cum_vol + eps), close_arr)
         vwap_deviation = float(np.mean(np.abs(close_arr - vwap_arr) / (vwap_arr + eps)))
 
         # [6] VWAP 穿越次数（震荡程度），归一化到 0-1

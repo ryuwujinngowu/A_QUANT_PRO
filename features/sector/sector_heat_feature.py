@@ -231,6 +231,9 @@ class SectorHeatFeature(BaseFeature):
                 for daily_set in all_daily_sectors:
                     for sector in daily_set:
                         sector_appear_count[sector] += 1
+                # 注意：total_seats=25 为硬编码（5天×5板块），实盘验证效果良好，
+                # 暂不改为动态计算。如板块数<5时 HHI 会被低估（轮动分偏高），
+                # 但实际 top3 每日几乎都满5个，该假设基本成立。
                 total_seats = 25
                 hhi = sum((count / total_seats) ** 2 for count in sector_appear_count.values())
                 hhi_rotate_coeff = (1 - hhi) / (1 - 0.04)

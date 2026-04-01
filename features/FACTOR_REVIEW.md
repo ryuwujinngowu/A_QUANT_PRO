@@ -1,6 +1,6 @@
 # 因子计算口径 Review 文档
 
-> 生成日期：2026-03-29
+> 生成日期：2026-04-01
 > 覆盖范围：features/ 全部因子模块 + learnEngine/label.py 标签定义
 > 注册状态：✅ 已启用 / ❌ 已注释（import 被注释）/ ⚠️ 已知问题
 
@@ -451,6 +451,51 @@
 
 ---
 
+### 2.13 涨停板情绪因子（limit_emotion）✅
+
+**新增日期**：2026-04-01
+**类型**：全局因子（无stock_code，广播到所有个股行）
+**数据来源**：`limit_list_ths` 表（同花顺口径，`limit_type="炸板池"`/`"涨停池"`）+ 分钟线（`kline_min`）
+
+#### 输出因子
+
+| 列名 | 含义 | 单位 | 中性值 |
+|------|------|------|-------|
+| `market_zhaban_count` | D0 炸板数（当日最高价触及涨停、收盘未封板的股票数，同花顺口径） | 只 | 0 |
+| `market_zhaban_ratio` | D0炸板数 / mean(D1~D4炸板数)，clip[0.1, 10.0] | 倍 | 1.0 |
+| `market_limit_touch_amount` | D0 涨停+炸板股中，首次触板那根分钟K线成交额全市场累加（剔除ST） | 万亿元 | 0.0 |
+| `market_limit_touch_amount_ratio` | D0触板分钟成交额 / mean(D1~D4触板分钟成交额)，clip[0.1, 10.0] | 倍 | 1.0 |
+
+#### 计算口径
+
+**炸板数**：直接查 `limit_list_ths` 表 `limit_type="炸板池"`，与涨停数口径统一（同一数据源）。
+
+**触板分钟成交额（精确定义）**：
+1. 取当日涨停池 + 炸板池所有股票，剔除 ST（ST 涨幅5%，干扰主板/创业板信号）
+2. 查日线 `high` 作为涨停价参照（触板股当日 `high = 涨停价`）
+3. 对每只股票，加载 D 日分钟线，找首次 `bar.high >= daily_high - 0.01`（0.01元容差防浮点误差）的那根K线
+4. 累加该根K线的 `amount`（单位：千元）
+
+**D1~D4历史分母**：同样用分钟线精确触板成交额（`data_bundle._load_limit_touch_data` 并发加载D0~D4全部），分子分母口径完全一致。
+
+#### 三维联动解读（配合 market_macro 的 market_limit_up_5d_trend 使用）
+
+| 信号组合 | 市场含义 |
+|---------|---------|
+| 涨停多 + 炸板少 + 触板成交高 | 资金积极封板，做多合力强 |
+| 涨停多 + 炸板多 + 触板成交高 | 多空分歧大，博弈激烈但封板意愿不足 |
+| 涨停少 + 炸板多 + 触板成交低 | 情绪收敛，空方主导 |
+
+#### IO 设计
+
+- `macro_cache["zhaban_df"]`：D0炸板池 DataFrame
+- `macro_cache["zhaban_counts_5d"]`：`{date: count}` D0~D4每日炸板数
+- `macro_cache["limit_touch_codes_5d"]`：`{date: [ts_code,...]}` D0~D4每日涨停+炸板codes
+- `macro_cache["limit_touch_amount_5d"]`：`{date: amount_千元}` 分钟线精确触板成交额
+- 因子 `calculate()` 内零 IO，全部从 `macro_cache` 读取
+
+---
+
 ## 三、已知问题汇总
 
 ### 高风险（数据偏差）
@@ -458,7 +503,7 @@
 |------|------|------|
 | `red_session_pm_ratio=-1` 与 `[0,1]` 混用 | sector_stock_feature.py | -1是停牌标记，对XGBoost产生非单调影响，建议单独拆出is_suspended指示变量 |
 | `adapt_score` 全局标量 | sector_heat_feature.py | 同一天所有样本值相同，XGBoost无法跨样本分裂，仅有"日期效应"而非个股区分度 |
-| `adapt_score` HHI固定 `total_seats=25` | sector_heat_feature.py:229 | 每天板块数可能<5，应改为 `sum(实际出现总次数)` |
+| `adapt_score` HHI固定 `total_seats=25` | sector_heat_feature.py:229 | 每天板块数可能<5，理论上应改为动态总席位，但实盘验证效果良好，**暂保持固定25不改** |
 
 ### 中风险（计算精度）
 | 问题 | 位置 | 说明 |
