@@ -143,6 +143,11 @@ def get_strategy_runtime_model_pattern(strategy_id: str) -> str:
 
 
 def get_strategy_runtime_model_path(strategy_id: str) -> str:
+    """
+    返回 runtime_model 目录中最新（mtime 最大）的模型文件路径。
+    若目录不存在或无匹配文件，返回占位路径（运行时会报 FileNotFoundError）。
+    多文件时自动选最新，并打印 warning，不再抛异常。
+    """
     runtime_dir = get_strategy_runtime_model_dir(strategy_id)
     if not os.path.isdir(runtime_dir):
         return os.path.join(runtime_dir, f"{strategy_id}_V1.pkl")
@@ -150,14 +155,20 @@ def get_strategy_runtime_model_path(strategy_id: str) -> str:
     pattern = re.compile(get_strategy_runtime_model_pattern(strategy_id))
     candidates = [
         os.path.join(runtime_dir, name)
-        for name in sorted(os.listdir(runtime_dir))
+        for name in os.listdir(runtime_dir)
         if pattern.match(name)
     ]
     if not candidates:
         return os.path.join(runtime_dir, f"{strategy_id}_V1.pkl")
+    # 多个候选时按 mtime 降序，取最新
+    candidates.sort(key=lambda p: os.path.getmtime(p), reverse=True)
     if len(candidates) > 1:
-        raise RuntimeError(
-            f"runtime_model 目录存在多个候选模型，请手工清理后再运行: {runtime_dir} | candidates={candidates}"
+        import warnings
+        warnings.warn(
+            f"[train_config] runtime_model 目录存在多个候选模型，自动选最新: "
+            f"{os.path.basename(candidates[0])}  "
+            f"(其余: {[os.path.basename(p) for p in candidates[1:]]})",
+            stacklevel=2,
         )
     return candidates[0]
 

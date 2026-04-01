@@ -75,7 +75,7 @@ class SectorHeatStrategy(BaseStrategy):
         self.strategy_name = "板块热度XGBoost盘前选股，开盘买入策略"
         self.strategy_params = {
             "buy_top_k":   6,        # 每日最多买入 N 只
-            "sell_type":   "open",   # D+1 卖出类型：open=次日开盘，close=次日收盘
+            "sell_type":   "close",   # D+1 卖出类型：open=次日开盘，close=次日收盘
             "min_prob":    0.6,      # 最低买入概率阈值（0 = 不过滤）
             "load_minute": True,     # 是否加载分钟线（保证特征与训练口径一致）
             "model_path": self._get_runtime_model_path(),
@@ -83,10 +83,11 @@ class SectorHeatStrategy(BaseStrategy):
 
         # 新架构组件（与 dataset.py 使用同一套 FeatureEngine）
         self._sector_heat   = SectorHeatFeature()
-        self._feature_engine = FeatureEngine()
+        self._feature_engine = None    # 懒加载，模型加载后根据所需模块创建精简版引擎
 
         # 模型（懒加载，首次调用 generate_signal 时加载）
         self._model = None
+        self._required_feature_modules = None   # 推断时所需的最小模块集（从 meta.json 读取）
 
         # # 风险惩罚配置（使用选股模型专用预设，所有惩罚参数统一由 risk_penalty_core 管理）
         # self._risk_config: RiskPenaltyConfig = RiskPenaltyConfig.for_strategy_model()
@@ -111,6 +112,8 @@ class SectorHeatStrategy(BaseStrategy):
         self.clear_signal()
         self.hold_stock_dict.clear()
         self._model = None  # 重置模型，下次使用时重新加载
+        self._feature_engine = None
+        self._required_feature_modules = None
         self._last_buy_signal_details = []
 
     def get_last_buy_signal_details(self) -> List[Dict[str, any]]:
@@ -256,6 +259,7 @@ class SectorHeatStrategy(BaseStrategy):
         return build_bundle_from_context(
             context,
             load_minute=self.strategy_params["load_minute"],
+            required_modules=self._required_feature_modules,  # None=全量（训练），List=精简推断
         )
 
     # ------------------------------------------------------------------ #
@@ -301,7 +305,9 @@ class SectorHeatStrategy(BaseStrategy):
                 logger.warning(f"{trade_date} Feature bundle 为空，跳过买入")
                 self._last_buy_signal_details = []
                 return {}
-            feature_df = self._feature_engine.run_single_date(bundle)
+            # _feature_engine 在 _ensure_model 成功后已创建（精简模块版）
+            engine = self._feature_engine or FeatureEngine()
+            feature_df = engine.run_single_date(bundle)
         except Exception as e:
             logger.error(f"{trade_date} 特征计算失败: {e}", exc_info=True)
             self._last_buy_signal_details = []
@@ -400,10 +406,15 @@ class SectorHeatStrategy(BaseStrategy):
     # ------------------------------------------------------------------ #
 
     def _ensure_model(self) -> bool:
-        """加载模型并校验 feature_names_in_ 属性（供 reindex 对齐列序）"""
+        """
+        加载模型并校验 feature_names_in_ 属性（供 reindex 对齐列序）。
+        同时推导 _required_feature_modules，用于推断时按需裁剪数据/特征加载。
+        """
         if self._model is not None:
             return True
-        path = self.strategy_params["model_path"]
+        # 每次重新发现 runtime_model 目录中最新模型，避免缓存旧路径
+        path = self._get_runtime_model_path()
+        self.strategy_params["model_path"] = path
         if not os.path.exists(path):
             logger.error(
                 f"模型文件不存在: {path}\n"
@@ -422,15 +433,54 @@ class SectorHeatStrategy(BaseStrategy):
                 )
                 self._model = None
                 return False
+
+            # ── 推导所需因子模块（优先读 meta.json，回退到列名反推）──────────
+            modules = self._load_required_modules_from_meta(path)
+            if modules is None:
+                from features.feature_registry import feature_registry
+                modules = feature_registry.get_modules_for_columns(
+                    list(self._model.feature_names_in_)
+                )
+                logger.info(
+                    f"[{self.strategy_name}] meta.json 不存在，动态推导所需模块: {modules}"
+                )
+            self._required_feature_modules = modules
+
+            # ── 创建精简版 FeatureEngine（仅含所需模块）──────────────────────
+            self._feature_engine = FeatureEngine(modules) if modules else FeatureEngine()
+
             logger.info(
                 f"模型加载成功: {path} "
-                f"| 特征数: {len(self._model.feature_names_in_)}"
+                f"| 特征数: {len(self._model.feature_names_in_)} "
+                f"| 推断模块: {modules}"
             )
             return True
         except Exception as e:
             logger.error(f"模型加载失败: {e}")
             self._model = None
+            self._feature_engine = None
+            self._required_feature_modules = None
             return False
+
+    @staticmethod
+    def _load_required_modules_from_meta(model_pkl_path: str):
+        """
+        读取与模型同目录的 .meta.json，返回 feature_modules 列表。
+        文件不存在或字段缺失时返回 None（调用方回退到动态推导）。
+        """
+        meta_path = model_pkl_path.replace(".pkl", ".meta.json")
+        if not os.path.exists(meta_path):
+            return None
+        try:
+            import json as _json
+            with open(meta_path, "r", encoding="utf-8") as f:
+                meta = _json.load(f)
+            modules = meta.get("feature_modules")
+            if modules and isinstance(modules, list):
+                return modules
+        except Exception as e:
+            logger.warning(f"meta.json 读取失败，回退动态推导: {e}")
+        return None
 
     # ------------------------------------------------------------------ #
     # 候选池构建（逻辑与 dataset.py 完全对齐）

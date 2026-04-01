@@ -162,6 +162,32 @@ class StkFactorProFeature(BaseFeature):
 
     feature_name = "stk_factor_pro"
 
+    factor_columns = [
+        "macd_dif", "macd_dea", "macd_bar", "macd_golden_cross",
+        "kdj_k", "kdj_d", "kdj_j", "kdj_overbought",
+        "rsi_6", "rsi_12", "rsi_24", "rsi_diverge",
+        "boll_pct", "boll_width",
+        "bias1", "bias2", "bias3",
+        "cci", "wr", "wr1",
+        "atr_pct", "mfi", "vr",
+        "asi", "asit", "bbi_bias",
+        "brar_ar", "brar_br", "cr",
+        "dfma_dif", "dfma_difma",
+        "dmi_adx", "dmi_adxr", "dmi_mdi", "dmi_pdi",
+        "downdays", "updays", "lowdays", "topdays",
+        "dpo", "madpo",
+        "ma_bias_5", "ma_bias_10", "ma_bias_20", "ma_bias_30",
+        "ma_bias_60", "ma_bias_90", "ma_bias_250",
+        "ema_bias_5", "ema_bias_10", "ema_bias_20", "ema_bias_30",
+        "ema_bias_60", "ema_bias_90", "ema_bias_250",
+        "expma_bias_12", "expma_bias_50",
+        "emv", "maemv",
+        "ktn_pct", "mass", "ma_mass",
+        "mtm_pct", "mtmma_pct",
+        "psy", "psyma", "roc", "maroc",
+        "taq_pct", "trix", "trma", "xsii_pct",
+    ]
+
     # ------------------------------------------------------------------ #
     # 主计算入口
     # ------------------------------------------------------------------ #

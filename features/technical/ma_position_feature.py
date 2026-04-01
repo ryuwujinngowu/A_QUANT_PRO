@@ -71,6 +71,13 @@ class MAPositionFeature(BaseFeature):
 
     feature_name = "ma_position"
 
+    factor_columns = [
+        "ma5", "ma10", "ma13",
+        "bias5", "bias10", "bias13",
+        "ma5_slope", "ma_align",
+        "pos_20d", "pos_5d", "from_high_20d",
+    ]
+
     # 本模块关注的均线周期
     MA_PERIODS = [5, 10, 13]
 

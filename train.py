@@ -34,6 +34,16 @@ import learnEngine.train_config as cfg
 from utils.log_utils import logger
 
 
+def _derive_feature_modules(feature_cols: list) -> list:
+    """从模型特征列名反推所需因子模块（用于推断时按需裁剪数据加载）。"""
+    try:
+        from features.feature_registry import feature_registry
+        return feature_registry.get_modules_for_columns(feature_cols)
+    except Exception as e:
+        logger.warning(f"[train] feature_modules 推导失败，meta.json 中留空: {e}")
+        return []
+
+
 # ============================================================
 # 可配置参数（详细配置见 learnEngine/train_config.py）
 # ============================================================
@@ -492,6 +502,7 @@ if __name__ == "__main__":
             "split_spec_path": artifacts["split_spec_path"],
             "selected_features_path": artifacts["selected_features_path"],
             "selected_features": feature_cols,
+            "feature_modules": _derive_feature_modules(feature_cols),
             "target_label": TARGET_LABEL,
             "xgb_params": override_params or getattr(xgb_model, "base_params", {}),
             "train_rows": int(len(X_train)),

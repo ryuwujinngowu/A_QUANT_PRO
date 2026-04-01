@@ -24,7 +24,7 @@ bundle = build_bundle(
 # 从策略共享 context 直接构建（替代 strategy.build_feature_bundle_from_context）：
 bundle = build_bundle_from_context(context, load_minute=True)
 """
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 
 from features.data_bundle import FeatureDataBundle
 
@@ -34,6 +34,7 @@ def build_bundle(
     target_ts_codes: List[str],
     strategy_context: Optional[Dict] = None,
     load_minute: bool = True,
+    required_modules: Optional[List[str]] = None,
 ) -> FeatureDataBundle:
     """
     统一 FeatureDataBundle 构造入口。
@@ -56,12 +57,14 @@ def build_bundle(
         top3_sectors=ctx.get("top3_sectors", []),
         adapt_score=ctx.get("adapt_score", 0.0),
         load_minute=load_minute,
+        required_modules=required_modules,
     )
 
 
 def build_bundle_from_context(
     context: Dict,
     load_minute: bool = True,
+    required_modules: Optional[List[str]] = None,
 ) -> Optional[FeatureDataBundle]:
     """
     从策略共享 context 字典直接构建 bundle。
@@ -81,4 +84,5 @@ def build_bundle_from_context(
         target_ts_codes=target_ts_codes,
         strategy_context=context,
         load_minute=load_minute,
+        required_modules=required_modules,
     )

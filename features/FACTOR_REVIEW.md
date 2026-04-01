@@ -474,7 +474,7 @@
 1. 取当日涨停池 + 炸板池所有股票，剔除 ST（ST 涨幅5%，干扰主板/创业板信号）
 2. 查日线 `high` 作为涨停价参照（触板股当日 `high = 涨停价`）
 3. 对每只股票，加载 D 日分钟线，找首次 `bar.high >= daily_high - 0.01`（0.01元容差防浮点误差）的那根K线
-4. 累加该根K线的 `amount`（单位：千元）
+4. 累加该根K线的 `amount`（Tushare stk_mins 原始单位为**元**，代码中 `÷1000` 转换为千元后再累加，与日线成交额口径一致）
 
 **D1~D4历史分母**：同样用分钟线精确触板成交额（`data_bundle._load_limit_touch_data` 并发加载D0~D4全部），分子分母口径完全一致。
 
@@ -497,6 +497,10 @@
 ---
 
 ## 三、已知问题汇总
+
+> **已修复（2026-04-01）**
+> - `individual_feature.py` `stock_concepts_map` 三重 key 混淆 bug（WHERE con_code→ts_code，map key/value 互换，_concept_codes_needed 收集错字段），已全部修复。`stock_strength_d0` 板块维度权重现在可正常激活。
+> - `market_limit_touch_amount`：分钟线 amount 单位原为元但按千元处理（×1000偏差），已在 `data_bundle._load_limit_touch_data` 修复（÷1000）。
 
 ### 高风险（数据偏差）
 | 问题 | 位置 | 说明 |

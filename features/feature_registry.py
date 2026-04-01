@@ -96,6 +96,39 @@ class FeatureRegistry:
         """
         return list(cls._registry.keys())
 
+    @classmethod
+    def get_modules_for_columns(cls, column_names: List[str]) -> List[str]:
+        """
+        给定一批列名，返回能产出这些列的因子模块名称列表（去重、保持注册顺序）。
+
+        用途：推断时根据 model.feature_names_in_ 找出需要运行的最小模块集，
+        从而跳过不需要的数据加载（_load_hp_ext_cache / _load_minute_data 等耗时步骤）。
+
+        未被任何模块认领的列名（如来自旧模型的已删除因子）会输出 warning 但不报错——
+        策略层已有 reindex(fill_value=0) 兜底，模型仍可正常预测。
+
+        :param column_names: 模型所需的特征列名列表（model.feature_names_in_）
+        :return: 所需因子模块名称列表
+        """
+        col_set = set(column_names)
+        claimed: set = set()
+        result: List[str] = []
+
+        for name, feature_cls in cls._registry.items():
+            cols = getattr(feature_cls, "factor_columns", None)
+            if cols and col_set.intersection(cols):
+                result.append(name)
+                claimed.update(cols)
+
+        unclaimed = col_set - claimed - {"stock_code", "trade_date"}
+        if unclaimed:
+            import logging
+            logging.getLogger(__name__).warning(
+                f"[FeatureRegistry] {len(unclaimed)} 列未被任何模块认领（旧模型/已删因子）: "
+                f"{sorted(unclaimed)[:10]}{'...' if len(unclaimed) > 10 else ''}"
+            )
+        return result
+
 
 # 全局单例实例 — 所有模块通过这一个对象访问注册中心
 feature_registry = FeatureRegistry()

@@ -51,6 +51,15 @@ class FeatureDataBundle:
         macro_cache         : dict，预加载的宏观数据（涨跌停池/连板/最强板块/指数日线）
     """
 
+    # ── 各数据加载方法对应的最小因子模块集 ─────────────────────────────────────
+    # None（required_modules=None）= 训练路径，加载全部数据
+    _MODULES_NEEDING_MACRO       = frozenset({
+        "sector_heat", "market_macro", "individual", "agent_return_stats", "limit_emotion",
+    })
+    _MODULES_NEEDING_HP_EXT      = frozenset({"hp_stage", "hp_style", "hp_cycle", "active_stats"})
+    _MODULES_NEEDING_LIMIT_TOUCH = frozenset({"limit_emotion"})
+    _MODULES_NEEDING_MINUTE      = frozenset({"sector_stock"})
+
     def __init__(
             self,
             trade_date: str,
@@ -59,6 +68,7 @@ class FeatureDataBundle:
             top3_sectors: List[str],
             adapt_score: float = 0.0,
             load_minute: bool = True,
+            required_modules=None,   # None=全量（训练路径）；List[str]=推断路径按需裁剪
     ):
         self.trade_date = trade_date
         self.target_ts_codes = target_ts_codes
@@ -74,12 +84,22 @@ class FeatureDataBundle:
         self.macro_cache: Dict[str, pd.DataFrame] = {}
         self.hp_ext_cache: Dict = {}               # 高位股情绪 + 市场广度因子扩展数据
 
+        # required_modules=None → 全量模式（训练），不裁剪
+        _req = frozenset(required_modules) if required_modules is not None else None
+
         self._load_trade_dates()
         self._load_daily_data()
-        self._load_macro_data()
-        self._load_hp_ext_cache()
-        self._load_limit_touch_data()   # D0 触板分钟成交额（依赖 hp_ext_cache 的 st_set）
-        if load_minute:
+
+        if _req is None or _req & self._MODULES_NEEDING_MACRO:
+            self._load_macro_data()
+
+        if _req is None or _req & self._MODULES_NEEDING_HP_EXT:
+            self._load_hp_ext_cache()
+
+        if _req is None or _req & self._MODULES_NEEDING_LIMIT_TOUCH:
+            self._load_limit_touch_data()   # 依赖 hp_ext_cache["st_set"]（缺失时安全降级）
+
+        if load_minute and (_req is None or _req & self._MODULES_NEEDING_MINUTE):
             self._load_minute_data()
 
     def _load_trade_dates(self):
@@ -576,7 +596,7 @@ class FeatureDataBundle:
                 if "amount" in min_df.columns:
                     touch_amount_5d[date] = touch_amount_5d.get(date, 0.0) + float(
                         min_df.loc[first_idx, "amount"] or 0
-                    )
+                    ) / 1000   # stk_mins amount 单位为元，÷1000 转换为千元与日线口径一致
 
             self.macro_cache["limit_touch_amount_5d"] = touch_amount_5d
             d0_amt = touch_amount_5d.get(self.trade_date, 0.0)

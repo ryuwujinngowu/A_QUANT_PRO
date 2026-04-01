@@ -605,16 +605,18 @@ class IndividualFeature(BaseFeature):
                 ensure_ths_daily_data(_d)
 
             # Step 2: 批量查 ths_member，获取 target_codes 所属板块代码
+            # ths_member: ts_code=股票代码, con_code=板块代码
             _ph_c = ", ".join(["%s"] * len(target_codes))
             _member_rows = db.query(
                 f"SELECT ts_code, con_code FROM ths_member "
-                f"WHERE con_code IN ({_ph_c}) AND is_new = 'Y'",
+                f"WHERE ts_code IN ({_ph_c}) AND is_new = 'Y'",
                 params=tuple(target_codes),
             ) or []
             _concept_codes_needed: set = set()
             for _r in _member_rows:
-                stock_concepts_map.setdefault(_r["con_code"], []).append(_r["ts_code"])
-                _concept_codes_needed.add(_r["ts_code"])
+                # 正确映射：股票代码 → [板块代码列表]
+                stock_concepts_map.setdefault(_r["ts_code"], []).append(_r["con_code"])
+                _concept_codes_needed.add(_r["con_code"])
 
             # Step 3: 批量查 ths_daily，获取板块各日涨幅
             if _concept_codes_needed:
