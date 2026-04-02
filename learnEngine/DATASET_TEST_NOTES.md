@@ -141,19 +141,62 @@ candidate_df["sector_name"]   = ""   # 新增这行
 
 ---
 
-## 六、正式运行前检查清单
+## 六、2025-03-10 单日测试结果（2026-04-02 实测）
 
-- [ ] 测试单日 (`--start 2025-03-10 --end 2025-03-10`) 输出 CSV 无 KeyError
-- [ ] 检查输出 CSV 列数（预期 ~300+列）
-- [ ] 检查 label1_3pct 分布（sector_heat/high_low/trend: 正例率约10-20%）
-- [ ] 检查 label_d2_5pct 分布（oversold_reversal: 正例率约15-25%）
-- [ ] 检查 NaN 比例（ths_hot 相关特征允许有较高 NaN，其他特征 NaN 应 <5%）
-- [ ] 单日耗时确认（目标 <10min/日）
+**运行结果**：✅ 流程全部跑通，无崩溃
+- 耗时：约 3 分钟（分钟线已有 DB 缓存，所以比预期快）
+- 输出：485 行 × 426 列
+- 标签分布：label1={0:390, 1:95}（正例率 19.6%），label1_3pct={0:309, 1:176}
+- 策略分布：sector_heat=570行, high_low=293行, trend_follow=88行, oversold=29行
+- 特征列缺失率：正常范围内（<5%），ths_hot/ths_daily相关特征有合理NaN
+
+**已确认正常的警告**：
+- `hp_stage_peak_time_rate` / `agent_high_position_intraday_5d_ratio_d0` 单日单值 → 全局因子，同日相同是正常的
+- `label_5d_min_dd_30pct` 全0 → 单日样本量少，正常
+- Split spec 写出失败 → 单日测试无法切分，正常
+- label1 缺失 254 行（已 dropna 过滤） → 这些行被正确丢弃，最终 CSV 中 label1 全部非空
+
+---
+
+## 七、待排查问题（2026-04-02 发现）
+
+### [BUG-6] `stock_up_vol_ratio_d0` / `stock_dn_vol_ratio_d0` / `stock_chase_success_d0` 全为 1.0
+
+**现象**：485 行中这 3 列 nunique=1，全部等于 1.0
+**已核实**：
+- DataCleaner.get_kline_min_by_stock_date 返回正确分钟数据（000016.SZ raw up_vol_ratio=6.07）
+- 手动 winsorize 测试：30 只样本 → 值域 [0.86, 5.88]，正常多样
+- 说明 raw 计算正确，但 CSV 中全为 1.0
+**待查**：从 individual_feature.calculate() → FeatureEngine 合并 → dataset assembly 的哪个环节出了问题
+**注意**：d1~d4 的对应列有正常值域（d1: nunique=4，mean=0.9951）
+
+### [待确认] `open_regime` 相关列 100% NaN（10列）
+
+`feat_pred_open_regime_*` / `label_open_regime_*` 全部为 NaN。
+→ 如果这是规划中的未来特征，属正常占位；如果应该有数据，需要排查。
+
+### [已记录，待核实] label1 缺失 254 行的原因
+
+最终 CSV 无影响（dropna 后 485 行全有 label1），但需要确认：
+1. 缺失来源：是停牌（D+1 kline 无数据）？还是 stock_close_d0<=0 触发的价格校验过滤？
+2. D+1 (2025-03-11) 和 D+2 (2025-03-12) 均为交易日，D+1 有 5358 只股票数据
+
+---
+
+## 八、正式运行前检查清单
+
+- [x] 测试单日 (`--start 2025-03-10 --end 2025-03-10`) 输出 CSV 无崩溃 ✅
+- [x] 检查输出 CSV 列数（426列，超预期）✅
+- [x] 检查 label1 分布（正例率 19.6%，合理）✅
+- [ ] 修复 BUG-6（stock_up/dn_vol_ratio_d0 全为1.0，根因未定位）
+- [ ] 确认 open_regime 列是否为预留占位
+- [ ] 运行更多抽检日期（建议 2024-11 到 2026-03 区间内各抽2-3天）
+- [ ] 单日耗时确认（目标 <10min/日，当前3min含缓存命中）
 - [ ] 确认磁盘空间充足（509日 × 预计 2MB/日 ≈ 1GB）
 
 ---
 
-## 七、正式运行配置
+## 九、正式运行配置
 
 `learnEngine/dataset.py` 中 `DATE_RANGES`（正式运行时去掉 `--start/--end` 参数使用此配置）：
 ```python
@@ -172,7 +215,7 @@ echo "PID: $!"
 
 ---
 
-## 八、给下次 Session 的提醒
+## 十、给下次 Session 的提醒
 
 1. **检查最新 git 提交**：所有修复都在 master 分支，SCP 更新或 git pull 同步
 2. **ths_hot 特征 NaN 是正常的**：历史数据 sparse，`_THS_HOT_TRIED_DATES` 缓存生效后不会浪费时间
