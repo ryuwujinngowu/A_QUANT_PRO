@@ -2563,12 +2563,44 @@ def ensure_moneyflow_data(trade_date: str) -> None:
         logger.warning(f"[ensure_moneyflow_data] {trade_date} 补拉失败：{e}")
 
 
+# 进程级缓存：记录各稀疏表的最早已知数据日期，避免对历史缺失日期重复打 API
+_THS_HOT_MIN_DATE_CACHE:   Optional[str] = None   # "YYYYMMDD" or "unknown"
+_THS_DAILY_MIN_DATE_CACHE: Optional[str] = None   # "YYYYMMDD" or "unknown"
+
+
+def _get_ths_hot_min_date() -> Optional[str]:
+    """查询 ths_hot 最早数据日期（进程内缓存，只查一次）"""
+    global _THS_HOT_MIN_DATE_CACHE
+    if _THS_HOT_MIN_DATE_CACHE is None:
+        try:
+            rows = db.query("SELECT MIN(trade_date) FROM ths_hot")
+            val = rows[0].get("MIN(trade_date)") if rows else None
+            _THS_HOT_MIN_DATE_CACHE = str(val).replace("-", "") if val else "unknown"
+        except Exception:
+            _THS_HOT_MIN_DATE_CACHE = "unknown"
+    return None if _THS_HOT_MIN_DATE_CACHE == "unknown" else _THS_HOT_MIN_DATE_CACHE
+
+
+def _get_ths_daily_min_date() -> Optional[str]:
+    """查询 ths_daily 最早数据日期（进程内缓存，只查一次）"""
+    global _THS_DAILY_MIN_DATE_CACHE
+    if _THS_DAILY_MIN_DATE_CACHE is None:
+        try:
+            rows = db.query("SELECT MIN(trade_date) FROM ths_daily")
+            val = rows[0].get("MIN(trade_date)") if rows else None
+            _THS_DAILY_MIN_DATE_CACHE = str(val).replace("-", "") if val else "unknown"
+        except Exception:
+            _THS_DAILY_MIN_DATE_CACHE = "unknown"
+    return None if _THS_DAILY_MIN_DATE_CACHE == "unknown" else _THS_DAILY_MIN_DATE_CACHE
+
+
 def ensure_ths_hot_data(trade_date: str) -> None:
     """
     确保 ths_hot 表有指定交易日的热股榜数据。
     若 DB 无数据，走 API 补拉（DB→API→DB 链路）。
 
     历史补拉使用 is_new='Y'（每日22:30后的最终榜，无未来函数）。
+    优化：若请求日期早于表内最早数据日期，跳过 API 补拉（历史数据确实不存在）。
 
     :param trade_date: 交易日，支持 YYYY-MM-DD / YYYYMMDD
     """
@@ -2576,6 +2608,12 @@ def ensure_ths_hot_data(trade_date: str) -> None:
 
     trade_date_fmt = trade_date.replace("-", "")
     trade_date_dash = f"{trade_date_fmt[:4]}-{trade_date_fmt[4:6]}-{trade_date_fmt[6:]}"
+
+    # 若表有数据且请求日期早于最早日期 → 历史缺失，跳过 API（避免超时浪费）
+    min_date = _get_ths_hot_min_date()
+    if min_date and trade_date_fmt < min_date:
+        return
+
     check_sql = "SELECT 1 FROM ths_hot WHERE trade_date = %s LIMIT 1"
     try:
         existing = db.query(check_sql, (trade_date_dash,))
@@ -2591,6 +2629,7 @@ def ensure_ths_daily_data(trade_date: str) -> None:
     """
     确保 ths_daily 表有指定交易日的板块指数行情数据。
     若 DB 无数据，走 API 补拉（DB→API→DB 链路）。
+    优化：若请求日期早于表内最早数据日期，跳过 API 补拉（历史数据确实不存在）。
 
     :param trade_date: 交易日，支持 YYYY-MM-DD / YYYYMMDD
     """
@@ -2598,6 +2637,12 @@ def ensure_ths_daily_data(trade_date: str) -> None:
 
     trade_date_fmt  = trade_date.replace("-", "")
     trade_date_dash = f"{trade_date_fmt[:4]}-{trade_date_fmt[4:6]}-{trade_date_fmt[6:]}"
+
+    # 若表有数据且请求日期早于最早日期 → 历史缺失，跳过 API（避免超时浪费）
+    min_date = _get_ths_daily_min_date()
+    if min_date and trade_date_fmt < min_date:
+        return
+
     check_sql = "SELECT 1 FROM ths_daily WHERE trade_date = %s LIMIT 1"
     try:
         existing = db.query(check_sql, (trade_date_dash,))
