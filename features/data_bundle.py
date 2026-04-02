@@ -79,6 +79,7 @@ class FeatureDataBundle:
         self.lookback_dates_5d: List[str] = []
         self.lookback_dates_20d: List[str] = []
         self.lookback_dates_22d: List[str] = []   # D-21 ~ D0（高位股20日涨幅计算所需）
+        self.lookback_dates_60d: List[str] = []   # D-59 ~ D0（trend_pullback等60日窗口因子用）
         self.daily_grouped: Dict[tuple, dict] = {}
         self.minute_cache: Dict[tuple, pd.DataFrame] = {}
         self.macro_cache: Dict[str, pd.DataFrame] = {}
@@ -112,6 +113,9 @@ class FeatureDataBundle:
             # lookback_dates_22d：含 D-21 到 D0 共 22 个交易日，用于高位股 20 日涨幅基准
             start_22d = (d_date - timedelta(days=50)).strftime("%Y-%m-%d")
             self.lookback_dates_22d = get_trade_dates(start_22d, self.trade_date)[-22:]
+            # lookback_dates_60d：含 D-59 到 D0 共 60 个交易日，用于 trend_pullback 等60日窗口因子
+            start_60d = (d_date - timedelta(days=120)).strftime("%Y-%m-%d")
+            self.lookback_dates_60d = get_trade_dates(start_60d, self.trade_date)[-60:]
             logger.info(f"[DataBundle] {self.trade_date} 交易日加载完成 | 5日: {self.lookback_dates_5d}")
         except Exception as e:
             logger.error(f"[DataBundle] 交易日加载失败：{e}")
@@ -120,7 +124,7 @@ class FeatureDataBundle:
     def _load_daily_data(self):
         """批量加载日线（仅查候选股，多线程并发拉取各日期数据）"""
         try:
-            all_dates = list(set(self.lookback_dates_5d + self.lookback_dates_20d))
+            all_dates = list(set(self.lookback_dates_5d + self.lookback_dates_20d + self.lookback_dates_60d))
 
             def _fetch_one(date):
                 df = get_daily_kline_data(trade_date=date, ts_code_list=self.target_ts_codes)

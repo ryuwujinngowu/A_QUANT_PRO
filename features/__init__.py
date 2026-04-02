@@ -78,6 +78,7 @@ from features.macro.active_stats_feature import ActiveStatsFeature         # noq
 from features.macro.agent_return_stats_feature import AgentReturnStatsFeature  # noqa: F401  # 短线agent日内收益5日相对强弱（全局因子）
 from features.emotion.ths_hot_feature import THSHotFeature                 # noqa: F401  # 同花顺热股榜 d0~d4 排名归一化得分（个股因子）
 from features.macro.limit_emotion_feature import LimitEmotionFeature       # noqa: F401  # 涨停板情绪：炸板数/炸板比/触板成交额/触板量比（全局因子）
+from features.individual.trend_pullback_feature import TrendPullbackFeature  # noqa: F401  # 趋势回调位置：60日高点调整天数/幅度 + 15日最大阳线（个股因子）
 # from features.individual.moneyflow_feature import MoneyflowFeature         # noqa: F401  # 个股资金面因子：大单/超大单/主力/小单净占比 d0~d4（个股因子，双源融合）
 
 __all__ = [
