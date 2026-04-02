@@ -262,6 +262,7 @@ class TrendFollowStrategy(BaseStrategy):
         candidate_df["trade_date"]    = trade_date
         candidate_df["strategy_id"]   = self.strategy_id
         candidate_df["strategy_name"] = self.strategy_name
+        candidate_df["sector_name"]   = ""
 
         # FeatureDataBundle 需要 sector_candidate_map / top3_sectors
         # 本策略不依赖板块，传入单虚拟板块供 bundle 构造

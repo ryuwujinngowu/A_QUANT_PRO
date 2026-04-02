@@ -2567,6 +2567,10 @@ def ensure_moneyflow_data(trade_date: str) -> None:
 _THS_HOT_MIN_DATE_CACHE:   Optional[str] = None   # "YYYYMMDD" or "unknown"
 _THS_DAILY_MIN_DATE_CACHE: Optional[str] = None   # "YYYYMMDD" or "unknown"
 
+# 进程级已尝试集合：API 补拉过但仍无数据的日期，跳过后续重试
+_THS_HOT_TRIED_DATES:   set = set()   # 已尝试但无数据的 YYYYMMDD 日期
+_THS_DAILY_TRIED_DATES: set = set()   # 已尝试但无数据的 YYYYMMDD 日期
+
 
 def _get_ths_hot_min_date() -> Optional[str]:
     """查询 ths_hot 最早数据日期（进程内缓存，只查一次）"""
@@ -2600,7 +2604,8 @@ def ensure_ths_hot_data(trade_date: str) -> None:
     若 DB 无数据，走 API 补拉（DB→API→DB 链路）。
 
     历史补拉使用 is_new='Y'（每日22:30后的最终榜，无未来函数）。
-    优化：若请求日期早于表内最早数据日期，跳过 API 补拉（历史数据确实不存在）。
+    优化1：若请求日期早于表内最早数据日期，跳过 API 补拉（历史数据确实不存在）。
+    优化2：进程内已尝试过但 API 仍无数据的日期，直接跳过（ths_hot 稀疏表有大量空洞日期）。
 
     :param trade_date: 交易日，支持 YYYY-MM-DD / YYYYMMDD
     """
@@ -2614,6 +2619,10 @@ def ensure_ths_hot_data(trade_date: str) -> None:
     if min_date and trade_date_fmt < min_date:
         return
 
+    # 本进程已尝试过但仍无数据的日期，不重试（ths_hot 稀疏，API 对空洞日期超时30s）
+    if trade_date_fmt in _THS_HOT_TRIED_DATES:
+        return
+
     check_sql = "SELECT 1 FROM ths_hot WHERE trade_date = %s LIMIT 1"
     try:
         existing = db.query(check_sql, (trade_date_dash,))
@@ -2621,8 +2630,12 @@ def ensure_ths_hot_data(trade_date: str) -> None:
             return
         logger.info(f"[ensure_ths_hot_data] {trade_date} 无热榜数据，触发 API 补拉")
         data_cleaner.clean_and_insert_ths_hot(trade_date=trade_date_fmt, is_new="Y")
+        # 补拉后再查一次，若仍无数据则标记为已尝试（避免后续重试超时）
+        if not db.query(check_sql, (trade_date_dash,)):
+            _THS_HOT_TRIED_DATES.add(trade_date_fmt)
     except Exception as e:
         logger.warning(f"[ensure_ths_hot_data] {trade_date} 补拉失败：{e}")
+        _THS_HOT_TRIED_DATES.add(trade_date_fmt)
 
 
 def ensure_ths_daily_data(trade_date: str) -> None:
@@ -2643,6 +2656,10 @@ def ensure_ths_daily_data(trade_date: str) -> None:
     if min_date and trade_date_fmt < min_date:
         return
 
+    # 本进程已尝试过但仍无数据的日期，不重试
+    if trade_date_fmt in _THS_DAILY_TRIED_DATES:
+        return
+
     check_sql = "SELECT 1 FROM ths_daily WHERE trade_date = %s LIMIT 1"
     try:
         existing = db.query(check_sql, (trade_date_dash,))
@@ -2650,8 +2667,12 @@ def ensure_ths_daily_data(trade_date: str) -> None:
             return
         logger.info(f"[ensure_ths_daily_data] {trade_date} 无板块日行情数据，触发 API 补拉")
         data_cleaner.clean_and_insert_ths_daily(trade_date=trade_date_fmt)
+        # 补拉后再查一次，若仍无数据则标记为已尝试
+        if not db.query(check_sql, (trade_date_dash,)):
+            _THS_DAILY_TRIED_DATES.add(trade_date_fmt)
     except Exception as e:
         logger.warning(f"[ensure_ths_daily_data] {trade_date} 补拉失败：{e}")
+        _THS_DAILY_TRIED_DATES.add(trade_date_fmt)
 
 
 def get_stock_sector_gains(
