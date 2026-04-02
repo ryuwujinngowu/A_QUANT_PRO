@@ -42,6 +42,7 @@ from utils.common_tools import (
     calc_limit_up_price,
     ensure_limit_list_ths_data,
 )
+from utils.db_utils import db
 from utils.log_utils import logger
 
 
@@ -504,14 +505,18 @@ if __name__ == "__main__":
     for date in to_process:
         logger.info(f"\n========== 处理日期: {date} ==========")
         try:
-            # ---- Step 1: 预拉取当日宏观数据入库 ----
+            # ---- Step 1: 预拉取当日宏观数据入库（已有则跳过，避免历史数据生成时重复打 API）----
             date_fmt = date.replace("-", "")
             try:
-                data_cleaner.clean_and_insert_limit_list_ths(trade_date=date_fmt, limit_type="涨停池")
-                data_cleaner.clean_and_insert_limit_list_ths(trade_date=date_fmt, limit_type="跌停池")
-                data_cleaner.clean_and_insert_limit_step(trade_date=date_fmt)
-                data_cleaner.clean_and_insert_limit_cpt_list(trade_date=date_fmt)
-                data_cleaner.clean_and_insert_index_daily(trade_date=date_fmt)
+                if not db.query("SELECT 1 FROM limit_list_ths WHERE trade_date=%s LIMIT 1", (date_fmt,)):
+                    data_cleaner.clean_and_insert_limit_list_ths(trade_date=date_fmt, limit_type="涨停池")
+                    data_cleaner.clean_and_insert_limit_list_ths(trade_date=date_fmt, limit_type="跌停池")
+                if not db.query("SELECT 1 FROM limit_step WHERE trade_date=%s LIMIT 1", (date_fmt,)):
+                    data_cleaner.clean_and_insert_limit_step(trade_date=date_fmt)
+                if not db.query("SELECT 1 FROM limit_cpt_list WHERE trade_date=%s LIMIT 1", (date_fmt,)):
+                    data_cleaner.clean_and_insert_limit_cpt_list(trade_date=date_fmt)
+                if not db.query("SELECT 1 FROM index_daily WHERE trade_date=%s LIMIT 1", (date_fmt,)):
+                    data_cleaner.clean_and_insert_index_daily(trade_date=date_fmt)
             except Exception as e:
                 logger.error(f"{date} 宏观数据入库失败: {e}", exc_info=True)
 
