@@ -403,7 +403,13 @@ def validate_train_dataset(csv_path: str) -> pd.DataFrame:
 # ============================================================
 
 if __name__ == "__main__":
+    import argparse
     warnings.filterwarnings("ignore")
+
+    _parser = argparse.ArgumentParser(description="训练集生成")
+    _parser.add_argument("--start", default=None, help="开始日期 yyyy-mm-dd（覆盖 DATE_RANGES）")
+    _parser.add_argument("--end",   default=None, help="结束日期 yyyy-mm-dd（覆盖 DATE_RANGES）")
+    _args = _parser.parse_args()
 
     # ==================== 可配置参数 ====================
     # 支持多时间段：每个元素为 (start_date, end_date)，格式 yyyy-mm-dd
@@ -412,6 +418,11 @@ if __name__ == "__main__":
         ("2023-01-01", "2023-09-30"),
         ("2024-11-01", "2026-03-10"),
     ]
+    # CLI 覆盖：--start / --end 可缩短范围，方便单日测试
+    if _args.start and _args.end:
+        DATE_RANGES = [(_args.start, _args.end)]
+    elif _args.start:
+        DATE_RANGES = [(_args.start, _args.start)]
     DATASET_RUN_ID       = _cfg.create_dataset_run_id("dataset")
     DATASET_DIR          = _cfg.get_dataset_dir(DATASET_RUN_ID)
     os.makedirs(DATASET_DIR, exist_ok=True)
