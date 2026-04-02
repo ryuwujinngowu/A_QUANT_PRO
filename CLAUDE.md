@@ -1,8 +1,8 @@
 # a_quant 项目记忆文档
 
-> 最后更新：2026-03-28
-> 分支：`claude/review-feature-factors-b6CUx`
-> **新增**: 特征层全面 Review（因子覆盖 + 数据正确性 + stk_factor_pro 评估）+ P7 新增4个全局因子（hp_stage/hp_style/hp_cycle/liquid_stats）
+> 最后更新：2026-04-01
+> 分支：`master`
+> **新增**: P8 三项修复（limit_touch 单位/模型路径/individual概念映射）+ 推断时特征裁剪架构（FeatureDataBundle.required_modules + meta.json）
 
 ---
 
@@ -239,7 +239,7 @@
 
 **🔴 高风险（必须修复）：**
 - **label1 阈值代码与文档不符**：文档注释写 ≥5%，代码实际用 `d1_intra_return >= 0.03`（3%）
-  - 文件：`learnEngine/label.py:95`，需明确统一阈值并同步文档
+  - 文件：`learnEngine/label.py:95`，需明确统一阈值并同步文档(用户明确说明这个问题暂缓，仅做记录)
 - **market_vol_ratio 自引用 bug**：`d0` 的量比 = `vol_d0 / mean(vol_d0~d4)`，分子自己参与分母均值计算
   - 文件：`features/macro/market_macro_feature.py:141~149`
   - 正确做法：d0 量比分母应为 `mean(vol_d1~d4)`，不含自身
@@ -250,7 +250,7 @@
 **🟡 中风险（建议优化）：**
 - **adapt_score HHI 固定假设 bug**：`total_seats=25`（5天×5板块）是硬编码假设，实际每天板块数可能 <5
   - 文件：`features/sector/sector_heat_feature.py:229`
-  - 修复：改为 `total_seats = sum(sector_appear_count.values())`（动态计算实际出现总次数）
+  - 修复：改为 `total_seats = sum(sector_appear_count.values())`（动态计算实际出现总次数）(用户明确说这个暂缓修复，已在实盘验证)
 - **fillna(0) 语义混乱**：`pos_20d=NaN` 填 0 → 含义变为"20日最低点"（强看空信号），非中性值
   - 文件：`learnEngine/dataset.py:142`
   - 建议：各列显式定义中性值（pos_20d→0.5，bias→0，等）
@@ -311,6 +311,37 @@
 27. **Review Agent P2 修复**
     - `hp_stage_vwap_bias` 加 `np.clip(-30, 30)` 防止异常极值拉偏加权均值
     - `hp_cycle_feature.py` 注释更正：全零/单值时返回中性值 0.5（不是 0.0）
+
+### P8 三项修复 + 推断特征裁剪架构（2026-04-01）
+
+28. **limit_touch_amount 分钟成交额单位修复**（`features/data_bundle.py:579`）
+    - 根因：Tushare `stk_mins` 的 `amount` 单位为**元**，日线 `amount` 为**千元**，代码按千元处理导致结果虚高1000倍（显示5.64万亿，实际56亿）
+    - 修复：`_load_limit_touch_data` 累加时 `/ 1000`（元→千元）
+    - 影响：`market_limit_touch_amount` 因子绝对值恢复正常；`_ratio` 因子因分子分母口径一致，比值历史上无误差
+
+29. **runtime_model 自动选最新模型**（`learnEngine/train_config.py` + `sector_heat_strategy.py`）
+    - 修复：`get_strategy_runtime_model_path` 多候选时按 mtime 降序取最新，不再抛 RuntimeError
+    - 修复：`_ensure_model` 每次重新发现路径（不缓存 init 时路径），`initialize()` 后也能正确找到新模型
+    - **注意**：runtime_model 目录允许保留多个版本，系统自动选最新，建议保持1个以避免歧义
+
+30. **individual_feature `stock_concepts_map` 三重 bug 修复**（`features/individual/individual_feature.py`）
+    - Bug 1：`WHERE con_code IN (stock_codes)` 用股票代码匹配板块代码字段 → 永远返回0行
+    - Bug 2：`stock_concepts_map[con_code] = [ts_code]` key/value 反了，后续 `get(ts_code)` 永远 None
+    - Bug 3：`_concept_codes_needed.add(ts_code)` 收集股票代码，但 Step3 查板块日行情用板块代码
+    - 修复：`WHERE ts_code IN`，`setdefault(ts_code).append(con_code)`，`add(con_code)`
+    - 影响：`stock_strength_d0` 的板块维度权重（个股涨幅>板块均值×2 → weight=2.0）此前从未生效，修复后权重分配更准确
+
+31. **推断时特征裁剪架构**（影响 7 个文件，见下）
+    - 背景：训练集需全量因子（~15模块），推断只需模型实际使用的子集，原架构推断也跑全量导致从30秒退化到5分钟
+    - **核心机制**：`FeatureDataBundle(required_modules=List[str])` 条件性跳过耗时加载
+      - `required_modules=None`（默认）→ 全量，训练路径不变
+      - 传入模块列表 → 按映射表跳过：`_load_hp_ext_cache`（hp_stage/hp_style/hp_cycle/active_stats不需要时跳）、`_load_limit_touch_data`（limit_emotion不需要时跳）、`_load_minute_data`（sector_stock不需要时跳）
+    - **元数据流**：
+      - `train.py`：meta.json 新增 `feature_modules` 字段（从 `feature_names_in_` 反推）
+      - `sector_heat_strategy._ensure_model()`：读 runtime `<model>.meta.json` 获取模块列表；meta 不存在时动态推导（零破坏性兜底）
+      - 推导函数：`feature_registry.get_modules_for_columns(column_names)` 利用各模块的 `factor_columns` 属性
+    - **新增 `factor_columns`**：`MAPositionFeature`（11列）、`StkFactorProFeature`（70+列）补充声明
+    - **晋升模型注意事项**：晋升时必须同时复制 `.pkl` 和 `.meta.json` 到 `runtime_model/`，命名 `sector_heat_Vx.meta.json`；只复制 pkl 系统自动回退动态推导（正确但略慢）
 
 ### 历史修复（本会话前）
 - **日期格式 Bug**：DB 存储 `trade_date` 为 `YYYY-MM-DD`，代码比较用 `YYYYMMDD`，修复：`.astype(str).str.replace("-", "")`

@@ -463,10 +463,12 @@ def _compute_behavioral_factors(
         curr_c    = float(curr_day.get("close", 0) or 0)
 
         # ── 昨日均价（用作次日浮盈判断基准）────────────────────
+        # amount 单位：千元；volume 单位：手（1手=100股）
+        # VWAP(元/股) = amount*1000(元) / (volume*100(股)) = amount*10 / volume
         prev_amt = float(prev_day.get("amount", 0) or 0)
         prev_vol = float(prev_day.get("volume", 0) or 0)
         if prev_vol > eps:
-            prev_vwap = prev_amt / (prev_vol * 100.0)
+            prev_vwap = prev_amt * 10.0 / prev_vol
         else:
             prev_vwap = float(prev_day.get("close", curr_c) or curr_c)
 

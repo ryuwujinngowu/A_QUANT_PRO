@@ -73,6 +73,12 @@ STRATEGY_CONFIGS: Dict[str, Dict] = {
             # e.g. "momentum_score_5d",
         ],
     },
+
+    "oversold_reversal": {
+        # 超跌反包：D+1开盘买入，D+2收盘卖出 → 复用 label_d2_return
+        "label": "label_d2_return",
+        "strategy_specific_cols": [],
+    },
 }
 
 
