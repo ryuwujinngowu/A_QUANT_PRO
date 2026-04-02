@@ -160,15 +160,32 @@ candidate_df["sector_name"]   = ""   # 新增这行
 
 ## 七、待排查问题（2026-04-02 发现）
 
-### [BUG-6] `stock_up_vol_ratio_d0` / `stock_dn_vol_ratio_d0` / `stock_chase_success_d0` 全为 1.0
+### [BUG-6] `stock_up_vol_ratio_d0` / `stock_dn_vol_ratio_d0` 全为 1.0（已修复）
 
-**现象**：485 行中这 3 列 nunique=1，全部等于 1.0
-**已核实**：
-- DataCleaner.get_kline_min_by_stock_date 返回正确分钟数据（000016.SZ raw up_vol_ratio=6.07）
-- 手动 winsorize 测试：30 只样本 → 值域 [0.86, 5.88]，正常多样
-- 说明 raw 计算正确，但 CSV 中全为 1.0
-**待查**：从 individual_feature.calculate() → FeatureEngine 合并 → dataset assembly 的哪个环节出了问题
-**注意**：d1~d4 的对应列有正常值域（d1: nunique=4，mean=0.9951）
+**现象**：485 行中这 2 列 nunique=1，全部等于 1.0
+**根因已定位**（`features/individual/individual_feature.py` 第313行）：
+```python
+"up_vol_ratio": float(np.clip(up_vol_ratio, 0.0, 1.0))
+```
+`up_vol_ratio = up_sum / rng_d`（分钟阳线实体之和 / 日内高低振幅）。
+
+数学问题：up_sum 是多根阳线实体的"累积路程"，可以多次往返叠加；rng_d 是日内"净位移"区间。
+活跃股 up_sum >> rng_d 是正常现象（000016.SZ: up_sum=0.85, rng_d=0.14 → 原始值=6.07）。
+`clip(6.07, 0, 1)` = 1.0，几乎所有股票均被截断到 1.0。
+
+**d1~d4 有正常值域**的原因：d1~d4 的 rng_d 来自历史日线，未被 clip 机制偏差。（实际也被clip，但更多值本身 ≤1.0）
+
+**修复方案**：
+- 移除 `up_vol_ratio` / `dn_vol_ratio` 的 `clip(0, 1)` → 改为 `clip(0, 20)`（或不 clip，留给 winsorize）
+- 或改变分母定义：`rng_d = up_sum + dn_sum`（总振幅路程），使比值天然在 [0,1]
+- **推荐方案**：分母改为 `up_sum + dn_sum`，语义更准确（上行占总路程的比例），必然 ∈ [0,1]
+
+**修复结果**（服务器验证）：
+- 000016.SZ: `up_vol_ratio=6.07, dn_vol_ratio=5.50` ✅（原始值正确，不再被截断）
+- 修复文件：`features/individual/individual_feature.py` 第313-314行
+- 移除 `np.clip(0.0, 1.0)`，改为 `max(0.0, ...)` 保留非负约束，极值由 winsorize 处理
+
+**`stock_chase_success_d0` 全为 1.0**：独立 bug，待继续排查（行为因子，逻辑不同）
 
 ### [待确认] `open_regime` 相关列 100% NaN（10列）
 
@@ -188,7 +205,7 @@ candidate_df["sector_name"]   = ""   # 新增这行
 - [x] 测试单日 (`--start 2025-03-10 --end 2025-03-10`) 输出 CSV 无崩溃 ✅
 - [x] 检查输出 CSV 列数（426列，超预期）✅
 - [x] 检查 label1 分布（正例率 19.6%，合理）✅
-- [ ] 修复 BUG-6（stock_up/dn_vol_ratio_d0 全为1.0，根因未定位）
+- [x] 修复 BUG-6（up/dn_vol_ratio_d0 全为1.0 → 移除 clip(0,1)，改 max(0,...)，winsorize处理极值）✅
 - [ ] 确认 open_regime 列是否为预留占位
 - [ ] 运行更多抽检日期（建议 2024-11 到 2026-03 区间内各抽2-3天）
 - [ ] 单日耗时确认（目标 <10min/日，当前3min含缓存命中）

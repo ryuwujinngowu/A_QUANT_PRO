@@ -310,8 +310,8 @@ def _compute_minute_factors(
 
     return {
         "vwap_pos":         float(np.clip(vwap_pos,         0.0, 1.0)),
-        "up_vol_ratio":     float(np.clip(up_vol_ratio,     0.0, 1.0)),
-        "dn_vol_ratio":     float(np.clip(dn_vol_ratio,     0.0, 1.0)),
+        "up_vol_ratio":     float(max(0.0, up_vol_ratio)),   # 不 clip(0,1)：分子=阳线路程累计，可远超 rng_d，winsorize 处理极值
+        "dn_vol_ratio":     float(max(0.0, dn_vol_ratio)),   # 同上
         "vol_conc":         float(np.clip(vol_conc,         0.0, 1.0)),
         "high_hold_ratio":  float(np.clip(high_hold_ratio,  0.0, 1.0)),
         "buy_vol_ratio":    float(max(0.0, buy_vol_ratio)),
