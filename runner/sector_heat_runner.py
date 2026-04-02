@@ -181,7 +181,7 @@ def run_daily_signal(trade_date: str, dry_run: bool = False) -> bool:
 
     # ── Step 3: 调用策略买入信号生成（不依赖引擎，直接调用核心方法）────────
     # 延迟导入：避免在 import 阶段就触发模型加载
-    from strategies.sector_heat.sector_heat_strategy import SectorHeatStrategy
+    from strategies import SectorHeatStrategy
 
     try:
         strategy = SectorHeatStrategy()

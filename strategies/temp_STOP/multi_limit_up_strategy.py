@@ -14,7 +14,7 @@ from config.config  import (
 )
 
 from data.data_cleaner import data_cleaner
-from strategies.base_strategy import BaseStrategy
+from strategies import BaseStrategy
 from utils.log_utils import logger
 
 # 分钟线缓存开关（全局配置）

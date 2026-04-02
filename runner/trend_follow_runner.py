@@ -157,7 +157,7 @@ def run_daily_signal(trade_date: str, dry_run: bool = False) -> bool:
 
     # ── Step 2: 调用策略买入信号生成 ────────────────────────────────────
     # TrendFollowStrategy._generate_buy_signal 内部自行查数据，无需外部传 daily_df
-    from strategies.trend_follow.trend_follow_strategy import TrendFollowStrategy
+    from strategies import TrendFollowStrategy
 
     model_name = "trend_follow"
     try:

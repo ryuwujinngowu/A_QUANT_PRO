@@ -7,10 +7,8 @@ from utils.common_tools import get_trade_dates, get_daily_kline_data
 from backtest.account import Account
 from backtest.metrics import BacktestMetrics
 from data.data_cleaner import data_cleaner
-from data.data_fetcher import data_fetcher
-from strategies.base_strategy import BaseStrategy
-from position_tracker import PositionTracker, TrackerConfig, TrackedPosition
-from utils.db_utils import db
+from strategies import BaseStrategy
+from position_tracker import PositionTracker, TrackedPosition
 from utils.log_utils import logger
 
 

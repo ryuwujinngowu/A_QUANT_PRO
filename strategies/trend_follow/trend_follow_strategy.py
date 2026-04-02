@@ -9,7 +9,7 @@
         批量预加载 HFQ kline 后传入 preloaded_kline 参数，零额外 DB 查询
 
 信号执行：
-  D 日收盘后运行 → 模型输出买入信号 → D+1 日开盘买入 → D+2 日收盘卖出
+  D 日收盘后运行 → 模型输出买入信号 → D+1 日开盘买入 → D+1 日收盘卖出
 
 无未来函数保证：
   - 所有候选池构建、特征计算均使用 D 日及之前数据
@@ -18,14 +18,14 @@
 import os
 import pickle
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
 
 import learnEngine.train_config as cfg
 from features import FeatureEngine, FeatureDataBundle
-from features.ma_indicator import MAIndicator
+from features.ma_indicator import TechnicalFeatures
 from strategies.base_strategy import BaseStrategy
 from utils.common_tools import (
     get_trade_dates,
@@ -41,16 +41,9 @@ from utils.xgb_compat import safe_predict_proba
 _RANK_TOP_N         = 100    # 60日涨幅排名取前N
 _HOT_EXCLUDE_TOP_N  = 10     # 近20日涨幅前N名剔除（过热）
 _NEW_STOCK_DAYS     = 61     # 上市≤N个交易日视为新股
-_MIN_MA_DAYS        = 30     # MA30至少需要的日线数
-_MIN_AMOUNT_YI      = 0.5    # 最低日均成交额（亿元），≈500万千元
-
-# FeatureEngine 精简模块（不依赖板块数据，推断时提速）
-_FEATURE_MODULES = [
-    "market_macro",
-    "individual",
-    "ma_position",
-    "trend_pullback",
-]
+_MIN_MA_DAYS        = 60     # MA30至少需要的日线数
+# 成交额过滤仅用于候选池粗筛（此处保留常量供 build_training_candidates 将来使用，当前未启用）
+_MIN_AMOUNT_YI      = 0.5    # 最低日均成交额（亿元）
 
 
 class TrendFollowStrategy(BaseStrategy):
@@ -75,9 +68,9 @@ class TrendFollowStrategy(BaseStrategy):
             "load_minute": True,
             "model_path":  self._get_runtime_model_path(),
         }
-        self._ma_calc                    = MAIndicator()
+        self._ma_calc                    = TechnicalFeatures()
         self._model                      = None
-        self._required_feature_modules   = _FEATURE_MODULES
+        self._required_feature_modules   = None   # None = 全量特征，与训练时 FeatureEngine() 保持一致
         self._last_buy_signal_details: List[Dict] = []
 
         self.initialize()
@@ -97,7 +90,7 @@ class TrendFollowStrategy(BaseStrategy):
         return True
 
     def get_training_label_target(self) -> str:
-        return "label1"
+        return "label1"   # D+1 日内收益 >= 5%，对应 D+1 开盘买入/收盘卖出的口径
 
     def get_model_registry_info(self) -> Dict[str, str]:
         base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

@@ -5,7 +5,7 @@ from config.config import DEFAULT_INIT_CAPITAL
 # from strategies.model_dip_strategy import ModelDipStrategy
 # from strategies.model_surge_strategy import ModelSurgeStrategy
 # from strategies.multi_limit_up_strategy import MultiLimitUpStrategy
-from strategies.sector_heat.sector_heat_strategy import SectorHeatStrategy                  #热点情绪板块筛选买入策略
+from strategies import SectorHeatStrategy                  #热点情绪板块筛选买入策略
 # from strategies.long_high_low_switch_strategy import HighLowSwitchStrategy      #高低切轮动策略
 
 

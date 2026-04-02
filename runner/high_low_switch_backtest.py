@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from backtest.engine import MultiStockBacktestEngine
 from config.config import DEFAULT_INIT_CAPITAL
-from strategies.long_high_low_switch_strategy import HighLowSwitchStrategy
+from strategies import HighLowSwitchStrategy
 
 
 def main():

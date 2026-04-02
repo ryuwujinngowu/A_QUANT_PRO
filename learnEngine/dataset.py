@@ -18,7 +18,6 @@ import json
 import os
 import sys
 import warnings
-from collections import defaultdict
 from datetime import datetime, timedelta
 from typing import List, Dict, Tuple
 
@@ -28,16 +27,15 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from config.config import FILTER_BSE_STOCK, FILTER_STAR_BOARD, FILTER_688_BOARD
 from data.data_cleaner import data_cleaner
-from features import FeatureEngine, FeatureDataBundle
+from features import FeatureEngine
 import learnEngine.train_config as _cfg
 from learnEngine.label import LabelEngine
 from learnEngine.split_spec import write_split_spec
-from strategies.sector_heat.sector_heat_strategy import SectorHeatStrategy
-from strategies.high_low_switch_ml_strategy import HighLowSwitchMLStrategy
+from strategies import SectorHeatStrategy
+from strategies import HighLowSwitchMLStrategy
+from strategies import TrendFollowStrategy
+from strategies import OversoldReversalStrategy
 from utils.common_tools import (
-    get_stocks_in_sector,
-    filter_st_stocks,
-    sort_by_recent_gain,
     get_trade_dates,
     get_daily_kline_data,
     has_recent_limit_up_batch,
@@ -51,14 +49,14 @@ LABEL_COLUMNS = {
     "label1", "label2", "label1_3pct", "label1_8pct", "label_d2_limit_down",
     "label_10d_60pct", "label_d1_gap_up", "label_5d_min_dd_30pct", "label_d2_drop_5_9p5",
     "label_raw_return", "label_open_gap", "label_d1_high", "label_d1_low",
-    "label_d1_pct_chg", "label_d2_return", "label_5d_30pct", "label_d1_open_up",
+    "label_d1_pct_chg", "label_d2_return", "label_d2_5pct", "label_5d_30pct", "label_d1_open_up",
     *_cfg.RESERVED_FUTURE_LABEL_COLS,
 }
 
 BINARY_LABEL_COLUMNS = {
     "label1", "label2", "label1_3pct", "label1_8pct", "label_d2_limit_down",
     "label_10d_60pct", "label_d1_gap_up", "label_5d_min_dd_30pct", "label_d2_drop_5_9p5",
-    "label_5d_30pct", "label_d1_open_up",
+    "label_5d_30pct", "label_d1_open_up", "label_d2_5pct",
 }
 
 FEATURE_FILL_EXCLUDE_COLUMNS = {
@@ -370,7 +368,7 @@ def validate_train_dataset(csv_path: str) -> pd.DataFrame:
         c for c in [
             "label1", "label2", "label1_3pct", "label1_8pct", "label_d2_limit_down",
             "label_10d_60pct", "label_d1_gap_up", "label_5d_min_dd_30pct", "label_d2_drop_5_9p5",
-            "label_5d_30pct", "label_d1_open_up",
+            "label_5d_30pct", "label_d1_open_up", "label_d2_5pct",
         ] if c in df.columns
     ]
     for col in binary_label_cols:
@@ -439,7 +437,7 @@ if __name__ == "__main__":
     feature_engine    = FeatureEngine()          # 使用 features/__init__.py 的新引擎
     label_engine      = LabelEngine(_label_start, _label_end)
     # 多策略注册：所有 supports_ml_training()==True 的策略均参与训练集生成
-    _strategies       = [SectorHeatStrategy(), HighLowSwitchMLStrategy()]
+    _strategies       = [SectorHeatStrategy(), HighLowSwitchMLStrategy(), TrendFollowStrategy(), OversoldReversalStrategy()]
     _sector_heat_strat = _strategies[0]          # 用于构建共享 FeatureDataBundle
     dates_manager     = ProcessedDatesManager(PROCESSED_DATES_FILE, FACTOR_VERSION)
 

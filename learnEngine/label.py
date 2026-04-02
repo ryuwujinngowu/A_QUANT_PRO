@@ -162,8 +162,10 @@ class LabelEngine:
                 # label2：D+1 日内盈利 AND D+2 高开（值得隔夜持股的强势票）
                 label2 = 1 if (d1_close > d1_open) and (d2_open > d1_close) else 0
 
-                # label_d2_return：持有至 D+2 收盘的总收益
+                # label_d2_return：持有至 D+2 收盘的总收益（D+1 open → D+2 close）
                 label_d2_return = round((d2_close - d1_open) / d1_open, 6) if d2_close > 0 else None
+                # label_d2_5pct：D+2 收益 ≥ 5%（超跌反包策略主训练标签）
+                label_d2_5pct   = (1 if label_d2_return >= 0.05 else 0) if label_d2_return is not None else None
 
                 # label_d2_limit_down：D+2 跌停（主板 -10%，阈值 -9.5% 以包含精度误差）
                 label_d2_limit_down = 1 if d2_pct_chg <= -9.5 else 0
@@ -172,6 +174,7 @@ class LabelEngine:
                 label2              = None
                 label_d2_return     = None
                 label_d2_limit_down = None
+                label_d2_5pct       = None
 
             # ── 浮点标签（日内结构）─────────────────────────────────────────
             label_raw_return = round(d1_intra_return, 6)
@@ -254,6 +257,7 @@ class LabelEngine:
                 "label_d1_low":         label_d1_low,
                 "label_d1_pct_chg":     label_d1_pct_chg,
                 "label_d2_return":      label_d2_return,
+                "label_d2_5pct":        label_d2_5pct,
                 "label_5d_30pct":       label_5d_30pct,
                 "label_d1_open_up":     label_d1_open_up,
             })
@@ -270,6 +274,7 @@ class LabelEngine:
                 f"label_10d_60pct:{result['label_10d_60pct'].sum()} | "
                 f"label_d1_gap_up:{result['label_d1_gap_up'].fillna(0).sum()} | "
                 f"label_5d_min_dd_30pct:{result['label_5d_min_dd_30pct'].sum()} | "
-                f"label_d2_drop_5_9p5:{result['label_d2_drop_5_9p5'].fillna(0).sum()}"
+                f"label_d2_drop_5_9p5:{result['label_d2_drop_5_9p5'].fillna(0).sum()} | "
+                f"label_d2_5pct:{result['label_d2_5pct'].fillna(0).sum()}"
             )
         return result

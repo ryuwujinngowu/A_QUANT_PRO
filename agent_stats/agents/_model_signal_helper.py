@@ -16,7 +16,7 @@ import pandas as pd
 
 from config.config import FILTER_BSE_STOCK
 import learnEngine.train_config as cfg
-from strategies.sector_heat.sector_heat_strategy import SectorHeatStrategy
+from strategies import SectorHeatStrategy
 from utils.log_utils import logger
 from utils.xgb_compat import safe_predict_proba
 

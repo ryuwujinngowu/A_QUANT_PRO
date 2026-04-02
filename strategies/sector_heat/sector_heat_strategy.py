@@ -19,7 +19,6 @@
 """
 import os
 import pickle
-from collections import defaultdict
 from datetime import datetime, timedelta
 from typing import Dict, List, Tuple
 
@@ -27,13 +26,11 @@ import numpy as np
 import pandas as pd
 
 from config.config import FILTER_BSE_STOCK, FILTER_STAR_BOARD, FILTER_688_BOARD
-from data.data_cleaner import data_cleaner
-from features import FeatureEngine, FeatureDataBundle
+from features import FeatureEngine
 from features.bundle_factory import build_bundle_from_context
 from features.sector.sector_heat_feature import SectorHeatFeature
 from strategies.base_strategy import BaseStrategy
 import learnEngine.train_config as cfg
-from position_tracker import TrackerConfig
 from utils.common_tools import (
     filter_st_stocks,
     get_daily_kline_data,
@@ -178,7 +175,7 @@ class SectorHeatStrategy(BaseStrategy):
         return True
 
     def get_training_label_target(self) -> str:
-        return "label1"
+        return "label1_3pct"
 
     def get_model_registry_info(self) -> Dict[str, str]:
         base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

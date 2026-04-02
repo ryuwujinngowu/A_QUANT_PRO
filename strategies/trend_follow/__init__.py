@@ -1,0 +1,1 @@
+from .trend_follow_strategy import TrendFollowStrategy

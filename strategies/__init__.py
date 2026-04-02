@@ -1,1 +1,4 @@
 from .sector_heat.sector_heat_strategy import SectorHeatStrategy
+from .high_low_switch.high_low_switch_ml_strategy import HighLowSwitchMLStrategy
+from .trend_follow.trend_follow_strategy import TrendFollowStrategy
+from .oversold_reversal.oversold_reversal_strategy import OversoldReversalStrategy

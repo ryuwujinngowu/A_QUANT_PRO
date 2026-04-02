@@ -2,7 +2,6 @@
 趋势股回调位置因子（trend_pullback）
 =====================================
 输出列（个股级因子，含 stock_code + trade_date）：
-
   pullback_days_from_high60  : D0 距60日内最高点（最高价 high）的交易日数；0=今日是高点，60=高点在最早一天
   pullback_pct_from_high60   : D0 收盘相对60日最高点的涨跌幅（%），≤0，clip[-50, 0]
   days_since_max_yang15      : D0 距15个交易日内最大阳线（pct_chg最高的正收益日）的交易日数；0=今日是最大阳线
@@ -10,14 +9,6 @@
   pullback_time_ratio        : pullback_days_from_high60 / 60，∈[0,1]，归一化调整时长（跨股可比）
   pullback_depth_ratio       : |pullback_pct| / max(0.01, max_yang15_pct)，调整幅度/最大阳线幅度；
                                衡量已吐回最大阳线涨幅的比例，clip[0, 10]
-
-设计说明（XGBoost学习调整时间/幅度规律）：
-  - 4个原始因子：让模型学习绝对量（调整几天、跌了多少、阳线多强、阳线多久前）
-  - 2个派生比率：归一化跨股比较 + 调整深度与发动力量的相对关系
-  - 组合使用：model可以学到"调整3-8天 + 跌幅5-10% + 大阳线在10天前 + 吐回50%"之类的pattern
-
-数据来源：data_bundle.daily_grouped（不复权日线，60日窗口，零IO）
-注意：60日窗口需 data_bundle.lookback_dates_60d 支持（FeatureDataBundle已扩展）
 """
 import pandas as pd
 import numpy as np
@@ -42,15 +33,19 @@ class TrendPullbackFeature(BaseFeature):
         "pullback_depth_ratio",
     ]
 
-    # 中性值：数据不足时填充，不引入方向性偏差
+    # 🛑【修复1】无偏中性值：数据不足时填中位数，不误导XGBoost
     _NEUTRAL = {
-        "pullback_days_from_high60": 0,
+        "pullback_days_from_high60": 30,    # 60日中位数，非0（非假高点）
         "pullback_pct_from_high60":  0.0,
-        "days_since_max_yang15":     0,
+        "days_since_max_yang15":     7,     # 15日中位数，非0
         "max_yang15_pct":            0.0,
-        "pullback_time_ratio":       0.0,
+        "pullback_time_ratio":       0.5,   # 归一化中位数
         "pullback_depth_ratio":      0.0,
     }
+    # 固定窗口常量
+    MAX_LOOKBACK_HIGH = 60
+    MAX_LOOKBACK_YANG = 15
+    YANG_THRESHOLD = 0.01  # 🛑【修复2】阳线阈值：过滤平盘/微小涨幅
 
     def calculate(self, data_bundle) -> tuple:
         trade_date    = data_bundle.trade_date
@@ -65,83 +60,81 @@ class TrendPullbackFeature(BaseFeature):
         for ts_code in target_codes:
             row = {"stock_code": ts_code, "trade_date": trade_date}
 
-            # ── 按时间升序取60日日线（最后一个=D0）──────────────────────────
+            # 🛑【修复3】固定60交易日窗口，补全缺失数据，保证天数计算准确
             daily_data = []
             for date in lookback_60d:
                 d = daily_grouped.get((ts_code, date))
                 if d:
                     daily_data.append({
-                        "high":    float(d.get("high",    0) or 0),
-                        "close":   float(d.get("close",   0) or 0),
+                        "high":    float(d.get("high", 0) or 0),
+                        "close":   float(d.get("close", 0) or 0),
                         "pct_chg": float(d.get("pct_chg", 0) or 0),
                     })
+                else:
+                    # 缺失数据填充空值，保留窗口长度
+                    daily_data.append({"high": 0, "close": 0, "pct_chg": 0})
 
-            if len(daily_data) < 2:
+            # 数据不足直接填充中性值
+            if len([x for x in daily_data if x["high"] > 0]) < 2:
                 row.update(self._NEUTRAL)
                 rows.append(row)
                 continue
 
-            n       = len(daily_data)
             d0_close = daily_data[-1]["close"]
 
-            # ── Factor 1&2：60日最高价高点 ──────────────────────────────────
-            max_high     = 0.0
-            max_high_pos = 0    # 在 daily_data 中的索引（0=最旧）
+            # ── Factor 1&2：60日最高价高点（固定60日窗口）──────────────────
+            max_high = 0.0
+            max_high_pos = 0
             for i, d in enumerate(daily_data):
-                if d["high"] > max_high:
-                    max_high     = d["high"]
+                if d["high"] > max_high and d["high"] > 0:
+                    max_high = d["high"]
                     max_high_pos = i
 
             if max_high > 0 and d0_close > 0:
-                # pullback_days：高点到D0的交易日数（高点在D0则为0）
-                pullback_days = n - 1 - max_high_pos
-                pullback_pct  = float(np.clip(
-                    (d0_close - max_high) / max_high * 100, -50.0, 0.0
-                ))
+                # 🛑【修复4】固定60日计算天数，100%准确
+                pullback_days = self.MAX_LOOKBACK_HIGH - 1 - max_high_pos
+                pullback_days = np.clip(pullback_days, 0, self.MAX_LOOKBACK_HIGH)
+                pullback_pct = float(np.clip((d0_close - max_high) / max_high * 100, -50.0, 0.0))
             else:
-                pullback_days = 0
-                pullback_pct  = 0.0
+                pullback_days = self._NEUTRAL["pullback_days_from_high60"]
+                pullback_pct = self._NEUTRAL["pullback_pct_from_high60"]
 
             row["pullback_days_from_high60"] = pullback_days
             row["pullback_pct_from_high60"]  = round(pullback_pct, 4)
 
-            # ── Factor 3&4：15日内最大阳线 ──────────────────────────────────
-            # 取最近15个有效日（D-14~D0）；pct_chg>0 为阳线
-            window_15 = daily_data[-15:]
-            max_yang_pct   = 0.0
-            max_yang_pos   = -1   # 在 window_15 中的索引
+            # ── Factor 3&4：15日内最大阳线（严格筛选阳线）──────────────────
+            window_15 = daily_data[-self.MAX_LOOKBACK_YANG:]
+            max_yang_pct = 0.0
+            max_yang_pos = -1
+
             for i, d in enumerate(window_15):
-                if d["pct_chg"] > max_yang_pct:
+                # 🛑【修复5】仅统计真正阳线（涨幅>0.01），排除平盘
+                if d["pct_chg"] > self.YANG_THRESHOLD and d["pct_chg"] > max_yang_pct:
                     max_yang_pct = d["pct_chg"]
                     max_yang_pos = i
 
             if max_yang_pos >= 0:
-                days_since_yang = len(window_15) - 1 - max_yang_pos
-                max_yang_pct    = float(np.clip(max_yang_pct, 0.0, 30.0))
+                days_since_yang = self.MAX_LOOKBACK_YANG - 1 - max_yang_pos
+                max_yang_pct = float(np.clip(max_yang_pct, 0.0, 30.0))
             else:
-                # 15日内无阳线：中性值
-                days_since_yang = 0
-                max_yang_pct    = 0.0
+                # 无阳线：中性值
+                days_since_yang = self._NEUTRAL["days_since_max_yang15"]
+                max_yang_pct = self._NEUTRAL["max_yang15_pct"]
 
             row["days_since_max_yang15"] = days_since_yang
             row["max_yang15_pct"]        = round(max_yang_pct, 4)
 
-            # ── 派生因子 ──────────────────────────────────────────────────────
-            row["pullback_time_ratio"] = round(pullback_days / 60.0, 4)
+            # ── 派生因子（口径统一）──────────────────────────────────────
+            row["pullback_time_ratio"] = round(pullback_days / self.MAX_LOOKBACK_HIGH, 4)
 
             if max_yang_pct > 0:
                 depth = abs(pullback_pct) / max(0.01, max_yang_pct)
                 row["pullback_depth_ratio"] = round(float(np.clip(depth, 0.0, 10.0)), 4)
             else:
-                row["pullback_depth_ratio"] = 0.0
+                row["pullback_depth_ratio"] = self._NEUTRAL["pullback_depth_ratio"]
 
             rows.append(row)
 
-        if not rows:
-            return pd.DataFrame(), {}
-
-        feature_df = pd.DataFrame(rows)
-        logger.debug(
-            f"[趋势回调] {trade_date} 计算完成 | 股票数:{len(rows)}"
-        )
+        feature_df = pd.DataFrame(rows) if rows else pd.DataFrame()
+        logger.debug(f"[趋势回调] {trade_date} 计算完成 | 股票数:{len(rows)}")
         return feature_df, {}

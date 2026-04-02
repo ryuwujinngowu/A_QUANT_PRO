@@ -207,7 +207,7 @@ EXCLUDE_COLS = [
     "stock_code", "trade_date",
     "label1", "label2", "label1_3pct", "label1_8pct", "label_d2_limit_down",
     "label_raw_return", "label_open_gap", "label_d1_high", "label_d1_low",
-    "label_d1_pct_chg", "label_d2_return", "label_5d_30pct", "label_d1_open_up",
+    "label_d1_pct_chg", "label_d2_return", "label_d2_5pct", "label_5d_30pct", "label_d1_open_up",
     "sector_name", "top3_sectors",
     "sample_id", "strategy_id", "strategy_name",
     *RESERVED_FUTURE_LABEL_COLS,

@@ -22,7 +22,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from strategies.base_strategy import BaseStrategy
+from strategies import BaseStrategy
 from features.ma_indicator import technical_features
 from utils.common_tools import (
     filter_st_stocks,

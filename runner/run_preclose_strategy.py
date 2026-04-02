@@ -21,7 +21,7 @@ import argparse
 from datetime import datetime
 
 from data_realtime.realtime_fetcher import RealtimeFetcher
-from strategies.sector_heat.sector_heat_strategy import SectorHeatStrategy
+from strategies import SectorHeatStrategy
 from utils.log_utils import logger
 
 
