@@ -432,7 +432,7 @@ if __name__ == "__main__":
     DATASET_MANIFEST_PATH = _cfg.get_dataset_manifest_path(DATASET_DIR)
     CONFIG_SNAPSHOT_PATH  = _cfg.get_dataset_config_snapshot_path(DATASET_DIR)
     # 因子逻辑有变更（新增列、修改计算公式）时必须更新版本号，否则旧数据不会重跑
-    FACTOR_VERSION        = "v5.2_vwap_fix"
+    FACTOR_VERSION        = "v5.3_trade_date_fix"
     # =====================================================
 
     # ---------- 从多段日期范围收集全部交易日 ----------
@@ -577,7 +577,11 @@ if __name__ == "__main__":
                 _meta = _cdf[
                     ["ts_code", "strategy_id", "strategy_name", "sector_name"]
                 ].rename(columns={"ts_code": "stock_code"})
-                _base = feature_df_base.drop(columns=["sector_name"], errors="ignore")
+                # BUG-11修复：始终从循环变量 date 注入 trade_date，避免非sector_heat股票
+                # 在 LEFT JOIN 后 trade_date=NaN，导致后续 label 合并失败（NaN != date）
+                _meta["trade_date"] = date
+                # 从 feature_df_base 中剔除 trade_date 和 sector_name，防止列冲突
+                _base = feature_df_base.drop(columns=["sector_name", "trade_date"], errors="ignore")
                 _slice = _meta.merge(_base, on="stock_code", how="left")
                 strategy_slices.append(_slice)
 
