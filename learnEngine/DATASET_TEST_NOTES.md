@@ -269,17 +269,88 @@ echo "PID: $!"
 
 **备注**：该问题当前仅作历史记录保留，不纳入本轮继续 debug 范围。
 
-### [待确认] `hp_style_breadth_ratio = 0.0` 全为零
+### [已确认正常] `hp_style_breadth_ratio = 0.0` 全为零
 
-**现象**：`hp_style_breadth_ratio = 0.0` 和 `hp_style_height_pct = 0.0` 全为0。但当日 `hp_stage_pct_chg = 4.744%`（高位股涨了4.7%）。
-**可能原因**：`hp_style` 看的是"做到新高的股票数量"，即使高位股涨了也未必有股票做到120日/历史新高。可能是正常数据（2025-06-20是震荡市）。
-**排查**：检查 `hp_style_feature.py` 的计算逻辑，确认 cnt_100 的定义。
+**现象**：`hp_style_breadth_ratio = 0.0` 和 `hp_style_height_pct = 0.0` 全为0。
+**确认原因**（2026-04-03 查阅 hp_style_feature.py）：
+- `cnt_100` 统计 **10日涨幅 > 100%** 的股票数（翻倍！极端门槛）
+- `cnt_50` 统计 10日涨幅 > 50% 的股票数
+- 震荡市（2025-06-20）cnt_50=0 → `breadth_ratio = 0/max(1,0) = 0.0`，正常
+- `hp_style` 衡量的是市场是否处于极端亢奋状态（有连板+大涨股），0.0 = 市场平静，语义正确
+- **不是 bug ✅**
 
 ### [已观察，属正常] 其他单值列
 - `agent_middle_position_*_d0~d4` 全为 1.0：中仓策略在该日期无历史信号，返回默认值1.0
 - `xsii_pct = 0.5`：该因子无数据，填充中性值0.5
 - `ths_hot_score_d0 = 0.0`：THS热度数据稀疏，该日期无数据 → 0，正常
 - `label_5d_30pct/10d_60pct/min_dd_30pct` 全为0：单日测试样本量少，正常
+
+---
+
+## 十五、2026-04-03 Session 发现与修复
+
+### [BUG-9] label1 含非法值 'label1'（并发测试 RUN_ID 碰撞导致）
+
+**现象**：2025-04-29 单日测试最终校验报 `ValueError: 二分类标签列存在非法取值: label1 -> ['0', '1', 'label1']`
+
+**根因**：多个单日测试在同一秒内启动，`create_dataset_run_id` 只精确到秒，导致两个进程拿到相同的 RUN_ID（如 `dataset_20260402_234547`）。其中一个进程用 `first_write=True` 写入 header，另一个随后追加时也写入了 header 行（作为数据写入），CSV 中出现 header 行被当作数据行。
+
+**影响**：仅影响"同一秒内并发启动的多次单日测试"，正式顺序运行无此问题。
+
+**缓解**：最终校验 (`validate_train_dataset`) 会检测到该问题并抛出异常，不会生成污染的训练集。
+
+**建议修复**：`create_dataset_run_id` 中加入毫秒或 PID 后缀，如 `datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:18]`（或加 `os.getpid()`），避免碰撞。⚠️ **但这不是阻塞项，正式运行（非并发）不需要修复**。
+
+---
+
+### [BUG-10] 最终训练集存在重复 sample_id（同 BUG-9 根因）
+
+**现象**：2025-02-05 单日测试报 `ValueError: 最终训练集存在重复 sample_id: 2`
+
+**根因**：同 BUG-9，并发测试写入了同一 CSV 文件（重复 sample_id 来自两个进程写入同一日期的重复数据）。正式顺序运行已有 DataSetAssembler 内部去重兜底，不受影响。
+
+---
+
+### [BUG-11] 非 sector_heat 股票 label1 全 NaN → 被 dropna 丢弃（已修复）
+
+**现象**：所有测试日期都有大量 `label1 缺失`：
+- 2024-12-04: 307/841 行（36%）
+- 2025-02-05: 177/558 行（32%）
+- 2025-04-29: 184/359 行（51%）
+- 2025-06-20: 161/244 行（66%）
+
+修复前：2025-06-20 只写入 63 行（本应 ~220 行）
+
+**根因**（`learnEngine/dataset.py` Step 4.5）：
+1. `FeatureEngine` 用 **INNER JOIN** 合并特征模块，`SectorStockFeature` 只覆盖 sector_heat 的 43 只股票 → `feature_df_base` 只有 43 行
+2. Step 4.5 中 `_meta`（没有 `trade_date`）LEFT JOIN `feature_df_base`（有 `trade_date` 但只有 43 行）
+3. 非 sector_heat 股票的 `trade_date = NaN`（JOIN 不到）
+4. 后续 label 合并 `on=["stock_code", "trade_date"]`：NaN != "2025-06-20" → label1 = NaN → `dropna` 丢弃
+
+同时，即使修复 trade_date，非 sector_heat 股票的 `stock_close_d0=NaN`（SectorStockFeature 列），DataSetAssembler 的价格健全性检查也会将其丢弃。
+
+**修复**（两步，commits 9b1ca5c + 73ffdd7）：
+1. Step 4.5: `_meta["trade_date"] = date` + 从 `_base` 移除 `trade_date`
+2. Step 4.6（新增）: 从 `data_bundle.hp_ext_cache["market_all_d0"]` 回填非 sector_heat 股票的 `stock_close_d0`（零 IO，口径与 SectorStockFeature 一致）
+
+**修复后结果（2025-06-20）**：
+- 写入 224 行（244 候选 - 20 重复）✅
+- `label1 缺失` 警告消失 ✅
+- 日志：`stock_close_d0 从 market_all_d0 回填 161 只非sector_heat股票` ✅
+
+**已知遗留问题**（非 sector_heat 股票）：
+- sector_stock 特征列（~160列，含 stock_open/high/low/pct_chg/hdi/profit/loss 等 d0~d4）全为 NaN
+- `DataSetAssembler` 的 fillna 规则：`_cpr_`→0.5, `_trend_r2_`→0.5, 其他→0
+- `stock_cpr=0` 语义为"收于日内最低价"（强看空），对非 sector_heat 样本产生系统性偏差
+- **当前不修复**：这些样本会带有系统性噪音，但仍有价值（其他特征维度正常）。若影响模型质量，后续考虑：① SectorStockFeature 为非 sector_heat 股票输出中性值，或 ② 在 DataSetAssembler 里针对 sector_stock 列的中性值 fillna 规则补全
+
+**FACTOR_VERSION** 已更新为 `v5.3_trade_date_fix`（强制重跑所有已处理日期）
+
+---
+
+### [已确认正常] open_regime 相关列 100% NaN
+
+`feat_pred_open_regime_*` / `label_open_regime_*` 全 NaN：这是 `_apply_reserved_future_schema` 注入的预留占位列，当前无实现，正常。不是 bug ✅
 
 ---
 
