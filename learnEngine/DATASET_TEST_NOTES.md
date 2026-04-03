@@ -1010,7 +1010,52 @@ for strat in df['strategy_id'].unique():
     print(f"{strat}: stock_open_d0 非零 {pct:.1f}%")
 ```
 
-**注意**：修复后需更新 `FACTOR_VERSION`（在 `learnEngine/dataset.py`）并清空 `processed_dates.json`，强制重跑所有日期。
+**修复实施（已完成，commit d34555b）**：
+
+**修改文件**：`features/sector/sector_stock_feature.py`
+
+**核心改动**：
+1. 将 `_compute_sei` 闭包和 `sei_calc = self.sei_calculator` 从 sector 循环内移到循环外（不改变语义，仅提升为 calculate() 方法级别的变量）
+2. 循环内新增 `sector_processed_codes: set` 记录所有 Top3 板块已处理的股票
+3. 循环结束后增加**阶段 3**：
+   - 取 `data_bundle.target_ts_codes - sector_processed_codes` 为 `extra_codes`
+   - 为 extra_codes 构建独立的 `extra_sei_cache`，复用同一个 `_compute_sei` 闭包
+   - 组装特征行，per-stock 因子用真实数据计算，sector 级别填中性值
+
+**关键代码位置**：
+- `features/sector/sector_stock_feature.py` 约 258-265 行：`sei_calc` + `_compute_sei` 移到循环外
+- 约 280 行：`sector_processed_codes: set = set()`
+- 约 280 行（sector 循环内）：`sector_processed_codes.update(sector_ts_codes)`
+- 约 490-630 行：阶段 3 全部新增代码
+
+**FACTOR_VERSION**：已更新为 `v5.4_non_sector_stock_fix`（强制重跑所有已处理日期）
+
+**验证结果（服务器 2024-11-08 单日测试，2026-04-03 实测）**：
+- 阶段 3 执行日志：`非sector_heat候选股补充计算 | extra_codes: 673只，SEI任务: 3360`
+- 板块个股特征完成：样本 **1089只**（修复前只有 ~416 只 sector_heat 股票）
+- 最终写入 **1298 行**（四策略均有分布：sector_heat=652, high_low_switch=696, oversold_reversal=134, trend_follow=96）
+- 无报错，运行时间 ~4min，符合预期
+
+**待验证（下次 Session）**：
+1. 抽检修复后 CSV 中 non-sector_heat 策略的 `stock_open_d0` 非零比（目标：接近 100%）
+2. 抽检 `stock_cpr_d0` 值域是否正常（应在 [0, 1] 之间，不再全为 0）
+3. 抽检 `stock_vol_ratio_d0` 是否为真实量比（不再全为 0）
+4. 确认 sector_heat 样本特征无回归（对比修复前后值域）
+
+**验证脚本**：
+```python
+import pandas as pd
+# 用修复后生成的 CSV
+df = pd.read_csv("learnEngine/datasets/train_dataset_server_20241108_v4.csv")
+df = df[df['strategy_id'] != 'strategy_id'].reset_index(drop=True)
+for strat in df['strategy_id'].unique():
+    sub = df[df['strategy_id'] == strat]
+    zero_open = (sub['stock_open_d0'] == 0).mean() * 100
+    zero_cpr  = (sub['stock_cpr_d0'] == 0).mean() * 100
+    zero_vol  = (sub['stock_vol_ratio_d0'] == 0).mean() * 100
+    print(f"{strat} (n={len(sub)}): open_zero={zero_open:.1f}%, cpr_zero={zero_cpr:.1f}%, vol_zero={zero_vol:.1f}%")
+```
+修复后预期：non-sector_heat 策略三列的 0 值率均 < 15%（停牌股正常为 0）。
 
 ---
 
