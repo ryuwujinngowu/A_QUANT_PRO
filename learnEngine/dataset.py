@@ -599,6 +599,27 @@ if __name__ == "__main__":
                 f"| 策略分布: {feature_df['strategy_id'].value_counts().to_dict()}"
             )
 
+            # ---- Step 4.6: 为非 sector_heat 股票回填 stock_close_d0 ----
+            # 非 sector_heat 股票缺少 SectorStockFeature 的 stock_close_d0 列（NaN），
+            # DataSetAssembler 的价格健全性检查会将其丢弃。
+            # 从 data_bundle.hp_ext_cache["market_all_d0"] 补充 D0 收盘价（已在内存，零 IO）。
+            if "stock_close_d0" in feature_df.columns:
+                _missing_close = feature_df["stock_close_d0"].isna()
+                if _missing_close.any():
+                    _d0_df = getattr(data_bundle, "hp_ext_cache", {}).get("market_all_d0", pd.DataFrame())
+                    if not _d0_df.empty and "close" in _d0_df.columns:
+                        _close_map = dict(zip(
+                            _d0_df["ts_code"].astype(str),
+                            _d0_df["close"].astype(float)
+                        ))
+                        feature_df.loc[_missing_close, "stock_close_d0"] = (
+                            feature_df.loc[_missing_close, "stock_code"].map(_close_map)
+                        )
+                        _filled = int(_missing_close.sum()) - int(feature_df["stock_close_d0"].isna().sum())
+                        logger.info(
+                            f"{date} stock_close_d0 从 market_all_d0 回填 {_filled} 只非sector_heat股票"
+                        )
+
             # ---- Step 5: 标签生成（以 trade_date=D 为样本定义，与特征列统一）----
             # feature_df["trade_date"] = D；标签也以 D 为基准生成 D+1 / D+2 结果
             label_df = label_engine.generate_single_date(
