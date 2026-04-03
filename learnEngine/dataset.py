@@ -15,6 +15,7 @@
 """
 
 import json
+import gc
 import os
 import sys
 import warnings
@@ -474,6 +475,7 @@ if __name__ == "__main__":
     _parser = argparse.ArgumentParser(description="训练集生成")
     _parser.add_argument("--start", default=None, help="开始日期 yyyy-mm-dd（覆盖 DATE_RANGES）")
     _parser.add_argument("--end",   default=None, help="结束日期 yyyy-mm-dd（覆盖 DATE_RANGES）")
+    _parser.add_argument("--resume-dir", default=None, help="续跑：指定已有数据集目录路径，自动跳过已处理日期")
     _args = _parser.parse_args()
 
     # ==================== 可配置参数 ====================
@@ -488,9 +490,16 @@ if __name__ == "__main__":
         DATE_RANGES = [(_args.start, _args.end)]
     elif _args.start:
         DATE_RANGES = [(_args.start, _args.start)]
-    DATASET_RUN_ID       = _cfg.create_dataset_run_id("dataset")
-    DATASET_DIR          = _cfg.get_dataset_dir(DATASET_RUN_ID)
-    os.makedirs(DATASET_DIR, exist_ok=True)
+    # 续跑模式：复用已有目录，读取已有 run_id 和 processed_dates
+    if _args.resume_dir:
+        DATASET_DIR    = os.path.abspath(_args.resume_dir)
+        _manifest_path = _cfg.get_dataset_manifest_path(DATASET_DIR)
+        _old_manifest  = json.load(open(_manifest_path)) if os.path.exists(_manifest_path) else {}
+        DATASET_RUN_ID = _old_manifest.get("dataset_run_id", os.path.basename(DATASET_DIR))
+    else:
+        DATASET_RUN_ID = _cfg.create_dataset_run_id("dataset")
+        DATASET_DIR    = _cfg.get_dataset_dir(DATASET_RUN_ID)
+        os.makedirs(DATASET_DIR, exist_ok=True)
     OUTPUT_CSV_PATH      = _cfg.get_dataset_csv_path(DATASET_DIR)
     PROCESSED_DATES_FILE = _cfg.get_processed_dates_path(DATASET_DIR)
     DATASET_MANIFEST_PATH = _cfg.get_dataset_manifest_path(DATASET_DIR)
@@ -796,6 +805,7 @@ if __name__ == "__main__":
 
             consecutive_fails = 0  # 本日成功，重置计数器
             logger.info(f"✅ {date} 处理完成，写入 {len(clean_df)} 行")
+            gc.collect()  # 每日处理后主动释放内存，降低峰值
 
         except Exception as e:
             consecutive_fails += 1
