@@ -30,8 +30,11 @@ TRAIN_CONFIG_SNAPSHOT_NAME = "train_config.snapshot.json"
 
 
 def create_dataset_run_id(prefix: Optional[str] = None) -> str:
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return f"{prefix}_{ts}" if prefix else ts
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    pid = os.getpid()
+    rand = os.urandom(2).hex()
+    base = f"{ts}_p{pid}_{rand}"
+    return f"{prefix}_{base}" if prefix else base
 
 
 def get_dataset_dir(run_id: str) -> str:
@@ -67,13 +70,33 @@ def get_selected_features_path(strategy_id: Optional[str], dataset_dir: Optional
 def _dataset_dir_is_valid(dataset_dir: str) -> bool:
     csv_path = get_dataset_csv_path(dataset_dir)
     split_path = get_split_spec_path(dataset_dir)
-    if not (os.path.isdir(dataset_dir) and os.path.exists(csv_path) and os.path.exists(split_path)):
+    manifest_path = get_dataset_manifest_path(dataset_dir)
+    if not (
+        os.path.isdir(dataset_dir)
+        and os.path.exists(csv_path)
+        and os.path.exists(split_path)
+        and os.path.exists(manifest_path)
+    ):
         return False
     try:
         with open(split_path, encoding="utf-8") as f:
             spec = json.load(f)
+        with open(manifest_path, encoding="utf-8") as f:
+            manifest = json.load(f)
+
         saved_csv = spec.get("dataset_csv")
-        return bool(saved_csv) and os.path.abspath(saved_csv) == os.path.abspath(csv_path)
+        manifest_csv = manifest.get("dataset_csv")
+        manifest_status = manifest.get("status")
+        validation_status = manifest.get("validation_status")
+
+        return (
+            bool(saved_csv)
+            and bool(manifest_csv)
+            and os.path.abspath(saved_csv) == os.path.abspath(csv_path)
+            and os.path.abspath(manifest_csv) == os.path.abspath(csv_path)
+            and manifest_status == "completed"
+            and validation_status == "passed"
+        )
     except Exception:
         return False
 

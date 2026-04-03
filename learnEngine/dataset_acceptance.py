@@ -51,37 +51,47 @@ class ProcessedDatesManager:
     """管理已处理日期的读写，确保原子性"""
 
     def __init__(self, file_path: str, factor_version: str):
-        self.file_path      = file_path
+        self.file_path = file_path
         self.factor_version = factor_version
-        self.processed_dates = self._load()
+        self.processed_dates: List[str] = []
+        self.date_row_counts: Dict[str, int] = {}
+        self._load_into_state()
 
-    def _load(self) -> List[str]:
+    def _load_into_state(self):
         """加载已处理日期；因子版本不一致则清空（强制重跑）"""
         if not os.path.exists(self.file_path):
-            return []
+            return
         try:
             with open(self.file_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 if data.get("factor_version") != self.factor_version:
                     logger.warning("因子版本变更，清空已处理记录（将重新生成全量数据）")
-                    return []
-                return sorted(data.get("processed_dates", []))
+                    return
+                self.processed_dates = sorted(data.get("processed_dates", []))
+                raw_counts = data.get("date_row_counts", {}) or {}
+                self.date_row_counts = {
+                    str(k): int(v) for k, v in raw_counts.items() if v is not None
+                }
         except Exception as e:
             logger.error(f"加载已处理日期失败: {e}")
-            return []
+            self.processed_dates = []
+            self.date_row_counts = {}
 
     def is_processed(self, date: str) -> bool:
         return date in self.processed_dates
 
-    def add(self, date: str):
+    def add(self, date: str, row_count: int):
         """添加并立即持久化（写入成功后调用，保证幂等）"""
+        self.date_row_counts[str(date)] = int(row_count)
         if date not in self.processed_dates:
             self.processed_dates.append(date)
-            self._save()
+        self.processed_dates = sorted(set(self.processed_dates))
+        self._save()
 
     def reset(self):
         """清空已处理记录（如训练集 CSV 被删除，需重新生成时调用）"""
         self.processed_dates = []
+        self.date_row_counts = {}
         if os.path.exists(self.file_path):
             os.remove(self.file_path)
         logger.warning("已处理日期记录已重置，将重新生成全量数据")
@@ -89,15 +99,69 @@ class ProcessedDatesManager:
     def _save(self):
         with open(self.file_path, "w", encoding="utf-8") as f:
             json.dump(
-                {"factor_version": self.factor_version,
-                 "processed_dates": sorted(self.processed_dates)},
+                {
+                    "factor_version": self.factor_version,
+                    "processed_dates": sorted(self.processed_dates),
+                    "date_row_counts": {k: int(v) for k, v in sorted(self.date_row_counts.items())},
+                },
                 f, ensure_ascii=False, indent=2
             )
 
 
-# ============================================================
-# 数据集清洗器
-# ============================================================
+def _write_json(path: str, payload: dict):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+
+def _build_run_config_snapshot(dataset_run_id: str, factor_version: str, date_ranges, strategies) -> dict:
+    return {
+        "dataset_run_id": dataset_run_id,
+        "factor_version": factor_version,
+        "val_ratio": _cfg.VAL_RATIO,
+        "target_label": _cfg.TARGET_LABEL,
+        "exclude_cols": _cfg.EXCLUDE_COLS,
+        "strategy_id": getattr(_cfg, "STRATEGY_ID", None),
+        "date_ranges": date_ranges,
+        "strategies": [s.strategy_id for s in strategies],
+    }
+
+
+def _build_manifest_base(
+        dataset_run_id: str,
+        dataset_dir: str,
+        dataset_csv: str,
+        factor_version: str,
+        date_ranges,
+        planned_trade_dates,
+) -> dict:
+    now = datetime.now().isoformat(timespec="seconds")
+    return {
+        "dataset_run_id": dataset_run_id,
+        "dataset_dir": dataset_dir,
+        "dataset_csv": dataset_csv,
+        "created_at": now,
+        "last_updated_at": now,
+        "factor_version": factor_version,
+        "date_ranges": date_ranges,
+        "planned_trade_dates": planned_trade_dates,
+        "planned_date_count": len(planned_trade_dates),
+        "completed_date_count": 0,
+        "rows_written_so_far": 0,
+        "status": "running",
+        "validation_status": "pending",
+    }
+
+
+def _read_csv_date_row_counts(csv_path: str) -> Dict[str, int]:
+    if not os.path.exists(csv_path):
+        return {}
+    df = pd.read_csv(csv_path, usecols=["trade_date"])
+    if "trade_date" not in df.columns:
+        return {}
+    counts = df["trade_date"].astype(str).value_counts().to_dict()
+    return {str(k): int(v) for k, v in counts.items()}
+
+
 
 class DataSetAssembler:
     """单日数据校验 & 清洗"""
@@ -379,6 +443,20 @@ if __name__ == "__main__":
     _sector_heat_strat = _strategies[0]          # 用于构建共享 FeatureDataBundle
     dates_manager     = ProcessedDatesManager(PROCESSED_DATES_FILE, FACTOR_VERSION)
 
+    manifest = _build_manifest_base(
+        dataset_run_id=DATASET_RUN_ID,
+        dataset_dir=DATASET_DIR,
+        dataset_csv=OUTPUT_CSV_PATH,
+        factor_version=FACTOR_VERSION,
+        date_ranges=DATE_RANGES,
+        planned_trade_dates=all_trade_dates,
+    )
+    _write_json(DATASET_MANIFEST_PATH, manifest)
+    _write_json(
+        CONFIG_SNAPSHOT_PATH,
+        _build_run_config_snapshot(DATASET_RUN_ID, FACTOR_VERSION, DATE_RANGES, _strategies),
+    )
+
     # ---------- 确定待处理日期 ----------
     to_process      = [d for d in all_trade_dates if not dates_manager.is_processed(d)]
 
@@ -389,21 +467,44 @@ if __name__ == "__main__":
     #       避免重复写入（最终校验的 deduplicate 作为兜底）
     if os.path.exists(OUTPUT_CSV_PATH) and to_process:
         try:
-            csv_dates = set(
-                pd.read_csv(OUTPUT_CSV_PATH, usecols=["trade_date"])["trade_date"]
-                .astype(str).unique()
+            csv_row_counts = _read_csv_date_row_counts(OUTPUT_CSV_PATH)
+            tracked_counts = dates_manager.date_row_counts
+            mismatched = {
+                d: (tracked_counts.get(d), csv_row_counts.get(d))
+                for d in sorted(set(tracked_counts) | set(csv_row_counts))
+                if d in set(all_trade_dates) and tracked_counts.get(d) != csv_row_counts.get(d)
+            }
+            untracked_csv_dates = sorted(
+                d for d in csv_row_counts
+                if d in set(all_trade_dates) and d not in tracked_counts
             )
-            retroactive = csv_dates & set(all_trade_dates) - set(dates_manager.processed_dates)
+            if mismatched or untracked_csv_dates:
+                details = []
+                if untracked_csv_dates:
+                    details.append(f"未登记但出现在CSV中的日期: {untracked_csv_dates}")
+                if mismatched:
+                    details.append(f"日期行数不一致: {mismatched}")
+                raise RuntimeError("启动一致性检查发现疑似部分写入/损坏，拒绝自动续跑 | " + " | ".join(details))
+
+            retroactive = [
+                d for d in sorted(set(csv_row_counts) & set(all_trade_dates))
+                if d not in dates_manager.processed_dates and d in tracked_counts and tracked_counts.get(d) == csv_row_counts.get(d)
+            ]
             if retroactive:
                 logger.info(
-                    f"启动一致性修复：CSV 中已有数据但未标记完成的日期 → {sorted(retroactive)}，"
-                    f"自动补充标记（避免重复写入）"
+                    f"启动一致性修复：CSV 与 processed_dates 行数一致的日期补充标记 → {retroactive}"
                 )
-                for d in sorted(retroactive):
-                    dates_manager.add(d)
+                for d in retroactive:
+                    dates_manager.add(d, csv_row_counts[d])
                 to_process = [d for d in all_trade_dates if not dates_manager.is_processed(d)]
         except Exception as e:
-            logger.warning(f"启动一致性检查失败（忽略，继续正常处理）: {e}")
+            manifest["status"] = "failed"
+            manifest["validation_status"] = "failed"
+            manifest["last_error_date"] = None
+            manifest["last_error_message"] = str(e)
+            manifest["last_updated_at"] = datetime.now().isoformat(timespec="seconds")
+            _write_json(DATASET_MANIFEST_PATH, manifest)
+            raise
 
     # ── CSV 删除但全部日期已标记 → 重置 ────────────────────────────────────
     if not to_process and not os.path.exists(OUTPUT_CSV_PATH):
@@ -541,6 +642,7 @@ if __name__ == "__main__":
                 clean_df = clean_df.reindex(columns=fixed_columns, fill_value=0)
 
             # ---- Step 9: 原子性写入 ----
+            expected_rows = len(clean_df)
             clean_df.to_csv(
                 OUTPUT_CSV_PATH,
                 mode="a", header=first_write,
@@ -552,17 +654,29 @@ if __name__ == "__main__":
             # 用独立 try 包裹：若 JSON 写盘失败（磁盘满等），不应影响数据，
             # 下次启动时由"启动一致性检查"补充标记即可
             try:
-                dates_manager.add(date)
+                dates_manager.add(date, expected_rows)
             except Exception as mark_err:
                 logger.warning(
                     f"{date} 标记已处理失败（数据已写入，下次启动将自动补偿）: {mark_err}"
                 )
+
+            manifest["completed_date_count"] = len(dates_manager.processed_dates)
+            manifest["last_completed_date"] = date
+            manifest["rows_written_so_far"] = int(manifest.get("rows_written_so_far", 0)) + expected_rows
+            manifest["last_updated_at"] = datetime.now().isoformat(timespec="seconds")
+            _write_json(DATASET_MANIFEST_PATH, manifest)
 
             consecutive_fails = 0  # 本日成功，重置计数器
             logger.info(f"✅ {date} 处理完成，写入 {len(clean_df)} 行")
 
         except Exception as e:
             consecutive_fails += 1
+            manifest["status"] = "failed"
+            manifest["validation_status"] = "failed"
+            manifest["last_error_date"] = date
+            manifest["last_error_message"] = str(e)
+            manifest["last_updated_at"] = datetime.now().isoformat(timespec="seconds")
+            _write_json(DATASET_MANIFEST_PATH, manifest)
             logger.error(
                 f"{date} 处理失败 (连续失败 {consecutive_fails}/{MAX_CONSECUTIVE_FAILS}): {e}",
                 exc_info=True,
@@ -606,33 +720,22 @@ if __name__ == "__main__":
                 validated_df["strategy_id"].value_counts().to_dict()
                 if not validated_df.empty and "strategy_id" in validated_df.columns else {}
             )
-            manifest = {
-                "dataset_run_id": DATASET_RUN_ID,
-                "dataset_dir": DATASET_DIR,
-                "dataset_csv": OUTPUT_CSV_PATH,
-                "split_spec_path": _cfg.get_split_spec_path(DATASET_DIR),
-                "created_at": datetime.now().isoformat(timespec="seconds"),
-                "factor_version": FACTOR_VERSION,
-                "date_ranges": DATE_RANGES,
+            manifest.update({
+                "split_spec_path": split_spec_path,
+                "created_at": manifest.get("created_at"),
+                "last_updated_at": datetime.now().isoformat(timespec="seconds"),
                 "strategies": sorted(rows_by_strategy.keys()),
                 "row_count": int(len(validated_df)) if validated_df is not None else 0,
                 "rows_by_strategy": rows_by_strategy,
+                "status": "completed",
                 "validation_status": "passed",
-            }
-            with open(DATASET_MANIFEST_PATH, "w", encoding="utf-8") as f:
-                json.dump(manifest, f, ensure_ascii=False, indent=2)
+            })
+            _write_json(DATASET_MANIFEST_PATH, manifest)
 
-            config_snapshot = {
-                "dataset_run_id": DATASET_RUN_ID,
-                "factor_version": FACTOR_VERSION,
-                "val_ratio": _cfg.VAL_RATIO,
-                "target_label": _cfg.TARGET_LABEL,
-                "exclude_cols": _cfg.EXCLUDE_COLS,
-                "strategy_id": getattr(_cfg, "STRATEGY_ID", None),
-                "date_ranges": DATE_RANGES,
-            }
-            with open(CONFIG_SNAPSHOT_PATH, "w", encoding="utf-8") as f:
-                json.dump(config_snapshot, f, ensure_ascii=False, indent=2)
+            _write_json(
+                CONFIG_SNAPSHOT_PATH,
+                _build_run_config_snapshot(DATASET_RUN_ID, FACTOR_VERSION, DATE_RANGES, _strategies),
+            )
             logger.info(f"✅ Dataset artifact 目录已固化: {DATASET_DIR}")
         except Exception as e:
             logger.error(f"Dataset manifest/config snapshot 写出失败: {e}")
