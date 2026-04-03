@@ -136,7 +136,14 @@ class TrendFollowStrategy(BaseStrategy):
                 "SELECT ts_code, close FROM kline_day_hfq WHERE trade_date = %s",
                 params=(date_fmt,),
             ) or []
-            return {r["ts_code"]: float(r["close"]) for r in rows if r.get("close")}
+            return {
+                r["ts_code"]: float(r["close"])
+                for r in rows
+                if r.get("close") and not (
+                    r["ts_code"].endswith(".BJ")
+                    or r["ts_code"].startswith(("83", "87", "88"))
+                )
+            }
         except Exception as e:
             logger.warning(f"[TrendFollow] HFQ收盘价查询失败 {date}: {e}")
             return {}

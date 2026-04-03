@@ -545,8 +545,15 @@ class FeatureDataBundle:
             for date in lookback_5d:
                 codes = touch_codes_5d.get(date, [])
                 for c in codes:
-                    if c not in st_set:
-                        tasks.append((date, c))
+                    if c in st_set:
+                        continue
+                    # 剔除北交所/科创板/创业板：涨跌停规则与主板不同（BJ 30%），
+                    # 不纳入主板涨停情绪统计，且 BJ 无分钟线数据会触发大量无效重试
+                    if (c.endswith(".BJ") or c.startswith(("83", "87", "88"))
+                            or c.startswith("688")
+                            or (c.startswith(("300", "301", "302")) and c.endswith(".SZ"))):
+                        continue
+                    tasks.append((date, c))
 
             if not tasks:
                 self.macro_cache["limit_touch_amount_5d"] = {d: 0.0 for d in lookback_5d}

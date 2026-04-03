@@ -830,4 +830,104 @@ rows = db.query("SELECT close, amount, volume FROM kline_day WHERE ts_code='0000
 
 ---
 
-*记录人：Claude Sonnet 4.6（2026-04-02 Session）*
+## 十六、2026-04-03 Session — 四问排查 & 修复
+
+### Q1 检查结论：中性值不污染当前模型
+
+**结论：当前 sector_heat 模型训练不受非 sector_heat 行的中性值影响**
+
+原因：
+- `train.py` 的 `load_and_prepare(strategy_id="sector_heat")` 在训练前按 `strategy_id` 过滤行
+- 非 sector_heat 行（trend_follow/oversold/high_low_switch）被过滤掉，不进入训练矩阵
+- sector_heat 自己的样本行：sector_stock 列（stock_hdi/stock_vol_ratio/stock_sector_20d_rank）均有真实值
+
+**潜在隐患（已修复）：**
+- 若未来训练其他策略模型（trend_follow 等），其样本的 sector_stock 列均为 0-填充（错误语义）
+- 修复：在 `strategy_configs.py` 将 `stock_hdi_d*`、`stock_vol_ratio_d*`、`stock_sector_20d_rank` 加入 sector_heat 的 `strategy_specific_cols`，未来训练其他策略时自动排除这些列
+
+**已修复文件：** `learnEngine/strategy_configs.py`
+
+---
+
+### Q2 BUG-12 — BJ 股来源排查 + 双重修复
+
+**全貌：两处独立的 BJ 过滤遗漏**
+
+`FILTER_BSE_STOCK = True` 已在 `config/config.py` 设置，但并未被统一调用。
+`dataset.py` 中的 `_filter_ts_code_by_board` 函数**从未被调用**（死代码）。
+
+**各策略过滤状态（候选池层）：**
+- `sector_heat`：自有 `_filter_ts_code_by_board` 实例方法 ✅
+- `high_low_switch`：`_is_main_board()` 排除 `.BJ` ✅
+- `oversold_reversal`：`_build_candidate_pool` 明确过滤 `.BJ` ✅
+- **`trend_follow`：`_get_hfq_close_on_date` 查全市场 `kline_day_hfq`，无 BJ 过滤 ❌ → 修复1**
+
+**第二来源（FeatureDataBundle 层）：**
+- `data_bundle.py` 的 `_load_limit_touch_data` 从 `limit_list_ths`（涨停池）加载分钟线
+- 涨停池包含全市场涨停股票（含 BJ 股）
+- 过滤逻辑只剔除 ST，**未剔除 BJ/688/300** → **修复2**
+- 症状：4 只 BJ 股 × 5 日 = 20 对分钟线任务，全部 10 次重试失败 → 触发限流模式 → 每请求额外 +3s
+
+**症状：** 正常情况下 810 对分钟线需 ~8-10 分钟，BJ 进入后 +20对×30s超时 = 额外10分钟，加上进入限流模式后每对 +3s，实际退化到 57+ 分钟
+
+**修复文件：**
+1. `strategies/trend_follow/trend_follow_strategy.py:139` — dict comprehension 中过滤 `.BJ`
+2. `features/data_bundle.py:543~552` — `_load_limit_touch_data` 任务收集时增加 BJ/688/300 过滤
+
+---
+
+### Q3 检查结论：断点续跑/中性填充/自动中断机制均正常
+
+1. **断点续跑** ✅：
+   - `ProcessedDatesManager` 确保写入 CSV 后才标记日期
+   - 启动时读 CSV 中已有日期补偿未标记的（进程在写入与标记之间崩溃的场景）
+   - 跨进程或进程崩溃都能续跑，幂等保证
+
+2. **中性值填充** ✅：
+   - `DataSetAssembler.validate_and_clean` 有精细规则：
+     - `_exact_neutral`：pos_20d→0.5、pos_5d→0.5、from_high_20d→0.1、boll_pct→0.5
+     - `_pattern_neutral`：`_cpr_`→0.5、`_trend_r2_`→0.5
+     - 剩余数值列：`fillna(0)`
+   - 注意：`stk_factor_pro` 超时中性值行在 `train.py` 中被额外过滤（rsi_6=50 & kdj_k=50 & cci=0 组合）
+
+3. **自动中断** ✅：
+   - `MAX_CONSECUTIVE_FAILS = 5`（dataset.py:494）
+   - 连续 5 个日期处理失败 → raise RuntimeError，防止系统性故障静默空跑
+   - 单日失败只 continue，不累计全局计数，策略性失败（无热点板块）不计入
+
+---
+
+### Q4 各策略每日入围股票数（代码推算）
+
+从策略代码参数估算（实际数字因市场环境差异较大）：
+
+| 策略 | 候选池逻辑 | 预估每日只数 |
+|------|-----------|------------|
+| sector_heat | 3热门板块 × top3-5只 | ~9-15 |
+| high_low_switch | 涨停首/二板 + 5日涨10-35% | ~20-50 |
+| trend_follow | 60日Top100 - 过热10 - MA过滤 | ~50-80（修复BJ后略减） |
+| oversold_reversal | 跌幅TopN 主板过滤 | ~20-40 |
+| **合计（含跨策略重叠）** | | **~100-180 行/日** |
+
+BUG-11修复后实测（2025-06-20）：244 候选行，224行写入（去重后）✅
+
+---
+
+### 人工复核数据集说明
+
+- **文件路径**：`learnEngine/datasets/train_dataset_server_20260402.csv`（从服务器 `dataset_20260402_234548` 下载）
+- **内容**：4个交易日（2025-02-05 / 2025-04-29 / 2025-12-04 / 2026-03-06），629行（含4行嵌入式header）
+- **策略分布**：sector_heat(513) / high_low_switch(57) / trend_follow(35) / oversold_reversal(21)
+- **已确认**：无 BJ 股（该数据集生成时已通过 sector_heat 候选池过滤）；`stock_close_d0` 无 null/zero 行
+- **已知问题**：4行嵌入式header行（`strategy_id`列等于"strategy_id"），需在分析前过滤
+- **复核建议**：使用 pandas，过滤嵌入header后分析标签分布、特征分布、各策略样本代表性
+
+```python
+import pandas as pd
+df = pd.read_csv("learnEngine/datasets/train_dataset_server_20260402.csv")
+df = df[df['strategy_id'] != 'strategy_id'].reset_index(drop=True)
+```
+
+---
+
+*记录人：Claude Sonnet 4.6（2026-04-03 Session）*

@@ -37,10 +37,16 @@ STRATEGY_CONFIGS: Dict[str, Dict] = {
         # 默认训练标签（可在 train_config.py 中覆盖）
         "label": "label1",
 
-        # 本策略候选池生成时额外写入的专属列（对其他策略样本为 NaN）
+        # 本策略候选池生成时额外写入的专属列（对其他策略样本为 NaN 或错误中性值）
         # 训练其他策略时，这些列会被自动排除
         "strategy_specific_cols": [
-            "adapt_score",      # 板块热度适应分（SectorHeatStrategy 独有）
+            "adapt_score",          # 板块热度适应分（SectorHeatStrategy 独有）
+            # sector_stock 板块内特征：只对 sector_heat 候选股有意义；
+            # 其他策略的样本经 LEFT JOIN 后这些列为 NaN，fillna(0) 后语义错误
+            # （stock_vol_ratio=0 等同于停牌信号，stock_hdi=0 极端低难度，均非中性）
+            "stock_sector_20d_rank",
+            *[f"stock_hdi_d{i}" for i in range(5)],
+            *[f"stock_vol_ratio_d{i}" for i in range(5)],
         ],
     },
 
