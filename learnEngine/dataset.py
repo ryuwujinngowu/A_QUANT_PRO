@@ -805,7 +805,12 @@ if __name__ == "__main__":
 
             consecutive_fails = 0  # 本日成功，重置计数器
             logger.info(f"✅ {date} 处理完成，写入 {len(clean_df)} 行")
-            gc.collect()  # 每日处理后主动释放内存，降低峰值
+            gc.collect()
+            try:
+                import ctypes
+                ctypes.CDLL("libc.so.6").malloc_trim(0)  # 强制将 Python 内存池空闲页归还 OS
+            except Exception:
+                pass
 
         except Exception as e:
             consecutive_fails += 1
