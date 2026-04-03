@@ -253,8 +253,55 @@ class SectorStockFeature(BaseFeature):
         }
 
         # ================================================================
+        # SEI/HDI 计算闭包（移到循环外，供 sector 股票和非 sector 股票共用）
+        # ================================================================
+        sei_calc = self.sei_calculator
+
+        def _compute_sei(task):
+            daily_key, daily_row, pre_close = task
+            ts_code, target_date = daily_key
+            up_limit   = calc_limit_up_price(ts_code, pre_close)
+            down_limit = calc_limit_down_price(ts_code, pre_close)
+            minute_df  = minute_cache.get(daily_key, pd.DataFrame())
+
+            # 昨日 VWAP（元/股）= amount(千元) × 1000 / (volume(手) × 100股/手)
+            #                  = amount × 10 / volume
+            # 注意：kline_day 列名为 volume（不是 vol），data_cleaner 入库时已重命名
+            # 用于浮盈持续时间计算；找不到昨日数据则传 0（sei_feature 内部降级为昨收）
+            vwap_prev = 0.0
+            try:
+                idx = all_dates_20d.index(target_date)
+                if idx > 0:
+                    prev_row = daily_grouped.get((ts_code, all_dates_20d[idx - 1]), {})
+                    prev_vol = float(prev_row.get("volume", 0) or 0)  # ← volume，非 vol
+                    prev_amt = float(prev_row.get("amount", 0) or 0)
+                    if prev_vol > 0:
+                        vwap_prev = prev_amt * 10 / prev_vol   # 千元×1000/(手×100) = 元/股
+            except (ValueError, IndexError):
+                pass
+
+            hdi, factors = sei_calc._calculate_minute_hdi(
+                minute_df, pre_close, up_limit, down_limit, vwap_prev=vwap_prev
+            )
+            if factors:
+                sei = sei_calc._factors_to_sei(factors, up_limit)
+            else:
+                sei = hdi = 50.0
+                factors = SEIFeature.calc_daily_atomic(
+                    open_price  = daily_row.get("open",  pre_close),
+                    high_price  = daily_row.get("high",  pre_close),
+                    low_price   = daily_row.get("low",   pre_close),
+                    close_price = daily_row.get("close", pre_close),
+                    pre_close   = pre_close,
+                )
+            return daily_key, {"sei": float(sei), "hdi": float(hdi), "factors": factors}
+
+        # ================================================================
         # 阶段 1：板块级预计算
         # ================================================================
+        # 记录所有板块已处理的股票，供后续非 sector_heat 股票跳过重复计算
+        sector_processed_codes: set = set()
+
         for sector_idx, sector_name in enumerate(top3_sectors, 1):
             if not sector_name or sector_name not in sector_map:
                 continue
@@ -263,6 +310,7 @@ class SectorStockFeature(BaseFeature):
                 continue
 
             sector_ts_codes: List[str] = sector_d0_df["ts_code"].unique().tolist()
+            sector_processed_codes.update(sector_ts_codes)
 
             # ---- 20 日涨幅排名 ----
             rank_map, rank_median = {}, 0
@@ -297,48 +345,6 @@ class SectorStockFeature(BaseFeature):
                     if not pre_close or pre_close <= 0:
                         continue
                     sei_tasks.append((daily_key, daily_row, pre_close))
-
-            # 单任务 SEI/HDI 计算（纯 CPU + numpy，释放 GIL，线程安全）
-            sei_calc = self.sei_calculator
-
-            def _compute_sei(task):
-                daily_key, daily_row, pre_close = task
-                ts_code, target_date = daily_key
-                up_limit   = calc_limit_up_price(ts_code, pre_close)
-                down_limit = calc_limit_down_price(ts_code, pre_close)
-                minute_df  = minute_cache.get(daily_key, pd.DataFrame())
-
-                # 昨日 VWAP（元/股）= amount(千元) × 1000 / (volume(手) × 100股/手)
-                #                  = amount × 10 / volume
-                # 注意：kline_day 列名为 volume（不是 vol），data_cleaner 入库时已重命名
-                # 用于浮盈持续时间计算；找不到昨日数据则传 0（sei_feature 内部降级为昨收）
-                vwap_prev = 0.0
-                try:
-                    idx = all_dates_20d.index(target_date)
-                    if idx > 0:
-                        prev_row = daily_grouped.get((ts_code, all_dates_20d[idx - 1]), {})
-                        prev_vol = float(prev_row.get("volume", 0) or 0)  # ← volume，非 vol
-                        prev_amt = float(prev_row.get("amount", 0) or 0)
-                        if prev_vol > 0:
-                            vwap_prev = prev_amt * 10 / prev_vol   # 千元×1000/(手×100) = 元/股
-                except (ValueError, IndexError):
-                    pass
-
-                hdi, factors = sei_calc._calculate_minute_hdi(
-                    minute_df, pre_close, up_limit, down_limit, vwap_prev=vwap_prev
-                )
-                if factors:
-                    sei = sei_calc._factors_to_sei(factors, up_limit)
-                else:
-                    sei = hdi = 50.0
-                    factors = SEIFeature.calc_daily_atomic(
-                        open_price  = daily_row.get("open",  pre_close),
-                        high_price  = daily_row.get("high",  pre_close),
-                        low_price   = daily_row.get("low",   pre_close),
-                        close_price = daily_row.get("close", pre_close),
-                        pre_close   = pre_close,
-                    )
-                return daily_key, {"sei": float(sei), "hdi": float(hdi), "factors": factors}
 
             # 多线程并行计算 SEI/HDI
             with ThreadPoolExecutor(max_workers=_SEI_WORKERS) as pool:
@@ -482,6 +488,147 @@ class SectorStockFeature(BaseFeature):
                     row[f"sector_avg_loss_{day_tag}"]   = sector_day_factors[day_tag]["loss"]
 
                 result_rows.append(row)
+
+        # ================================================================
+        # 阶段 3：非 sector_heat 候选股特征计算（BUG-12 修复）
+        # ================================================================
+        # 对于未被任何板块覆盖的候选股，同样计算完整的 per-stock 因子。
+        # sector 级别字段填中性值（sector_id=0, sector_name="", rank=0, avg_profit/loss=50.0）
+        # 这些股票的日线/分钟线数据已包含在 data_bundle 中（target_ts_codes 扩展后已预加载）。
+        all_target_codes = list(getattr(data_bundle, "target_ts_codes", None) or [])
+        extra_codes = [c for c in all_target_codes if c not in sector_processed_codes]
+
+        if extra_codes:
+            # 收集额外股票的 SEI/HDI 任务
+            extra_sei_tasks = []
+            extra_seen_keys: set = set()
+            for ts_code in extra_codes:
+                for _, target_date in day_tag_map.items():
+                    daily_key = (ts_code, target_date)
+                    if daily_key in extra_seen_keys or daily_key not in daily_grouped:
+                        continue
+                    extra_seen_keys.add(daily_key)
+                    daily_row = daily_grouped[daily_key]
+                    pre_close = daily_row.get("pre_close", 0)
+                    if not pre_close or pre_close <= 0:
+                        continue
+                    extra_sei_tasks.append((daily_key, daily_row, pre_close))
+
+            extra_sei_cache: Dict[tuple, dict] = {}
+            if extra_sei_tasks:
+                with ThreadPoolExecutor(max_workers=_SEI_WORKERS) as pool:
+                    for key, result in pool.map(_compute_sei, extra_sei_tasks):
+                        extra_sei_cache[key] = result
+
+            # 组装每只非 sector 股票的特征行（无板块均值，填中性 50.0）
+            for ts_code in extra_codes:
+                d0_key = (ts_code, trade_date)
+                if d0_key not in daily_grouped:
+                    continue
+
+                d0_data = daily_grouped[d0_key]
+                row = {
+                    "stock_code":            ts_code,
+                    "trade_date":            trade_date,
+                    "sector_id":             0,      # 无板块
+                    "sector_name":           "",
+                    "stock_sector_20d_rank": 0,      # 无排名
+                }
+
+                for day_tag, target_date in day_tag_map.items():
+                    daily_key  = (ts_code, target_date)
+                    daily_data = daily_grouped.get(daily_key)
+                    cache      = extra_sei_cache.get(daily_key)
+
+                    # ---- 原始行情 ----
+                    if daily_data:
+                        row[f"stock_open_{day_tag}"]             = daily_data.get("open",    d0_data.get("open",    0))
+                        row[f"stock_high_{day_tag}"]             = daily_data.get("high",    d0_data.get("high",    0))
+                        row[f"stock_low_{day_tag}"]              = daily_data.get("low",     d0_data.get("low",     0))
+                        row[f"stock_close_{day_tag}"]            = daily_data.get("close",   d0_data.get("close",   0))
+                        row[f"stock_pct_chg_{day_tag}"]          = daily_data.get("pct_chg", 0.0)
+                        row[f"stock_amount_5d_ratio_{day_tag}"]  = self._calc_amount_ratio(
+                            ts_code, target_date, all_dates_5d, daily_grouped
+                        )
+                    else:
+                        row[f"stock_open_{day_tag}"]             = d0_data.get("open",  0)
+                        row[f"stock_high_{day_tag}"]             = d0_data.get("high",  0)
+                        row[f"stock_low_{day_tag}"]              = d0_data.get("low",   0)
+                        row[f"stock_close_{day_tag}"]            = d0_data.get("close", 0)
+                        row[f"stock_pct_chg_{day_tag}"]          = 0.0
+                        row[f"stock_amount_5d_ratio_{day_tag}"]  = 0.0
+
+                    # ---- 情绪合成分 + 全量原子因子 ----
+                    if daily_data and cache:
+                        pct_chg = daily_data.get("pct_chg", 0)
+                        sei     = cache["sei"]
+                        hdi     = cache["hdi"]
+                        f       = cache["factors"]
+
+                        if pct_chg > 1e-6:
+                            row[f"stock_profit_{day_tag}"] = round(sei, 2)
+                            row[f"stock_loss_{day_tag}"]   = 0.0
+                        elif pct_chg < -1e-6:
+                            row[f"stock_profit_{day_tag}"] = 0.0
+                            row[f"stock_loss_{day_tag}"]   = round(100 - sei, 2)
+                        else:
+                            row[f"stock_profit_{day_tag}"] = 0.0
+                            row[f"stock_loss_{day_tag}"]   = 0.0
+
+                        row[f"stock_hdi_{day_tag}"]          = hdi
+                        row[f"stock_gap_return_{day_tag}"]   = f.get("gap_return",     ATOMIC_NEUTRAL["gap_return"])
+                        row[f"stock_candle_{day_tag}"]        = f.get("candle_type",    ATOMIC_NEUTRAL["candle_type"])
+                        row[f"stock_cpr_{day_tag}"]           = f.get("cpr",            ATOMIC_NEUTRAL["cpr"])
+                        row[f"stock_max_dd_{day_tag}"]        = f.get("max_dd_intra",   ATOMIC_NEUTRAL["max_dd_intra"])
+                        row[f"stock_upper_shadow_{day_tag}"]  = f.get("upper_shadow",   ATOMIC_NEUTRAL["upper_shadow"])
+                        row[f"stock_lower_shadow_{day_tag}"]  = f.get("lower_shadow",   ATOMIC_NEUTRAL["lower_shadow"])
+                        row[f"stock_trend_r2_{day_tag}"]      = f.get("trend_r2",       ATOMIC_NEUTRAL["trend_r2"])
+                        row[f"stock_vwap_dev_{day_tag}"]      = f.get("vwap_deviation", ATOMIC_NEUTRAL["vwap_deviation"])
+                        row[f"stock_seal_times_{day_tag}"]               = f.get("seal_times",             0)
+                        row[f"stock_break_times_{day_tag}"]              = f.get("break_times",            0)
+                        row[f"stock_lift_times_{day_tag}"]               = f.get("lift_times",             0)
+                        row[f"stock_vol_ratio_{day_tag}"]                = self._calc_vol_ratio(
+                            ts_code, target_date, all_dates_5d, daily_grouped
+                        )
+                        row[f"stock_red_time_ratio_{day_tag}"]           = f.get("red_time_ratio",          ATOMIC_NEUTRAL["red_time_ratio"])
+                        row[f"stock_float_profit_time_ratio_{day_tag}"]  = f.get("float_profit_time_ratio", ATOMIC_NEUTRAL["float_profit_time_ratio"])
+                        row[f"stock_red_session_pm_ratio_{day_tag}"]     = f.get("red_session_pm_ratio",    ATOMIC_NEUTRAL["red_session_pm_ratio"])
+                        row[f"stock_float_session_pm_ratio_{day_tag}"]   = f.get("float_session_pm_ratio",  ATOMIC_NEUTRAL["float_session_pm_ratio"])
+                        row[f"stock_expect_surprise_{day_tag}"]          = self._calc_expect_surprise(f, pct_chg)
+
+                    else:
+                        # 停牌或完全无数据
+                        row[f"stock_profit_{day_tag}"]                   = 0.0
+                        row[f"stock_loss_{day_tag}"]                     = 0.0
+                        row[f"stock_hdi_{day_tag}"]                      = SUSPENDED_FILL["hdi"]
+                        row[f"stock_gap_return_{day_tag}"]               = SUSPENDED_FILL["gap_return"]
+                        row[f"stock_candle_{day_tag}"]                   = SUSPENDED_FILL["candle_type"]
+                        row[f"stock_cpr_{day_tag}"]                      = SUSPENDED_FILL["cpr"]
+                        row[f"stock_max_dd_{day_tag}"]                   = SUSPENDED_FILL["max_dd_intra"]
+                        row[f"stock_upper_shadow_{day_tag}"]             = SUSPENDED_FILL["upper_shadow"]
+                        row[f"stock_lower_shadow_{day_tag}"]             = SUSPENDED_FILL["lower_shadow"]
+                        row[f"stock_trend_r2_{day_tag}"]                 = SUSPENDED_FILL["trend_r2"]
+                        row[f"stock_vwap_dev_{day_tag}"]                 = SUSPENDED_FILL["vwap_deviation"]
+                        row[f"stock_seal_times_{day_tag}"]               = 0
+                        row[f"stock_break_times_{day_tag}"]              = 0
+                        row[f"stock_lift_times_{day_tag}"]               = 0
+                        row[f"stock_vol_ratio_{day_tag}"]                = SUSPENDED_FILL["vol_ratio"]
+                        row[f"stock_red_time_ratio_{day_tag}"]           = SUSPENDED_FILL["red_time_ratio"]
+                        row[f"stock_float_profit_time_ratio_{day_tag}"]  = SUSPENDED_FILL["float_profit_time_ratio"]
+                        row[f"stock_red_session_pm_ratio_{day_tag}"]     = SUSPENDED_FILL["red_session_pm_ratio"]
+                        row[f"stock_float_session_pm_ratio_{day_tag}"]   = SUSPENDED_FILL["float_session_pm_ratio"]
+                        row[f"stock_expect_surprise_{day_tag}"]          = 50.0
+
+                    # ---- 板块平均（无板块上下文，填中性值）----
+                    row[f"sector_avg_profit_{day_tag}"] = 50.0
+                    row[f"sector_avg_loss_{day_tag}"]   = 50.0
+
+                result_rows.append(row)
+
+            logger.info(
+                f"[板块个股特征] {trade_date} 非sector_heat候选股补充计算"
+                f" | extra_codes: {len(extra_codes)} | SEI任务: {len(extra_sei_tasks)}"
+            )
 
         feature_df = pd.DataFrame(result_rows)
         logger.info(

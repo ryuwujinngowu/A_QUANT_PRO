@@ -342,7 +342,7 @@ echo "PID: $!"
 - sector_stock 特征列（~160列，含 stock_open/high/low/pct_chg/hdi/profit/loss 等 d0~d4）全为 NaN
 - `DataSetAssembler` 的 fillna 规则：`_cpr_`→0.5, `_trend_r2_`→0.5, 其他→0
 - `stock_cpr=0` 语义为"收于日内最低价"（强看空），对非 sector_heat 样本产生系统性偏差
-- **当前不修复**：这些样本会带有系统性噪音，但仍有价值（其他特征维度正常）。若影响模型质量，后续考虑：① SectorStockFeature 为非 sector_heat 股票输出中性值，或 ② 在 DataSetAssembler 里针对 sector_stock 列的中性值 fillna 规则补全
+- **2026-04-03 更新**：已确认为重大 Bug（BUG-12），需修复。见下方 BUG-12 详细说明。
 
 **FACTOR_VERSION** 已更新为 `v5.3_trade_date_fix`（强制重跑所有已处理日期）
 
@@ -927,6 +927,90 @@ import pandas as pd
 df = pd.read_csv("learnEngine/datasets/train_dataset_server_20260402.csv")
 df = df[df['strategy_id'] != 'strategy_id'].reset_index(drop=True)
 ```
+
+---
+
+## 十六、BUG-12：非 sector_heat 策略的 stock_* 因子批量 0 值（2026-04-03 发现）
+
+### [BUG-12] 非 sector_heat 策略约 80% 样本的 ~160 个 stock_* 因子全为 0（严重）
+
+**状态**：⚠️ 已定位根因，正在修复（`features/sector/sector_stock_feature.py`）
+
+**现象**（`train_dataset_server_20241108_v4.csv` 实测）：
+
+| 策略 | 样本数 | stock_open_d0 非零比 | 说明 |
+|------|-------|---------------------|------|
+| sector_heat | 416 | 100% | 正常 |
+| high_low_switch | 663 | **17.8%** | 82% 为虚假 0 |
+| oversold_reversal | 133 | **10.5%** | 90% 为虚假 0 |
+| trend_follow | 86 | **32.6%** | 67% 为虚假 0 |
+
+受影响列（约 160 列）：`stock_open/high/low/close/pct_chg/profit/loss/hdi/gap_return/candle/cpr/max_dd/upper_shadow/lower_shadow/trend_r2/vwap_dev/seal_times/break_times/lift_times/vol_ratio/red_time_ratio/float_profit_time_ratio/red_session_pm_ratio/float_session_pm_ratio/expect_surprise` × d0~d4，以及 `sector_avg_profit/loss` × d0~d4。
+
+非零的 17-33% 是该策略候选股恰好也在 sector_heat Top3 板块中的股票（被 SectorStockFeature 计算到了）。
+
+**根因（数据流追踪）**：
+
+1. `SectorStockFeature.calculate()` 只遍历 `data_bundle.sector_candidate_map`（sector_heat Top3板块内的候选股），其他策略的候选股从不出现在 `sector_map` 中。
+
+2. `dataset.py` Step 4.5 中：
+   ```python
+   _slice = _meta.merge(_base, on="stock_code", how="left")
+   ```
+   非 sector_heat 股票在 `_base`（feature_df_base）里没有行 → LEFT JOIN 后这 ~160 列全为 `NaN`。
+
+3. `DataSetAssembler.validate_and_clean()` 中：
+   ```python
+   df.loc[:, numeric_feature_cols] = df.loc[:, numeric_feature_cols].fillna(0)
+   ```
+   NaN → 0，导致最终训练集中非 sector_heat 策略的 stock_* 因子批量为 0。
+
+4. `0` 的语义问题（严重）：
+   - `stock_cpr=0` → "收于日内最低价"（最强看空信号）
+   - `stock_open=stock_close=0` → 价格 0（明显错误）
+   - `stock_profit=stock_loss=0` → 无情绪（虚假中性）
+   - `stock_vol_ratio=0` → 停牌（错误！股票有正常成交）
+
+**为何之前没被发现**：
+- 单日测试（2025-03-10）sector_heat 占主导，非 sector_heat 样本少
+- BUG-11 修复后才让非 sector_heat 样本得以写入 CSV
+- 之前 Claude 没有按全策略抽检 stock_* 因子的 0 值比例
+
+**影响评估**：
+- 训练集中 ~80% 非 sector_heat 样本的核心行情因子全错
+- 如果用全策略混合训练一个模型，模型会学到"0值 → 非 sector_heat 策略"的 spurious correlation
+- 即使只用 sector_heat 样本训练，数据集质量也因此被高估（因其他策略本应提供的对比信号缺失）
+
+**修复方案**（已确定，待实施）：
+
+**修改文件**：`features/sector/sector_stock_feature.py`，在 `calculate()` 方法中。
+
+**核心思路**：`SectorStockFeature.calculate()` 在处理完所有 Top3 板块后，额外遍历 `data_bundle.target_ts_codes` 中**未被任何板块覆盖**的股票，用相同的 SEI/HDI/分钟线逻辑计算所有 per-stock 因子，但 sector 级别字段填中性值：
+- `sector_id = 0`（无板块）
+- `sector_name = ""`（无板块名）
+- `stock_sector_20d_rank = 0`（无排名）
+- `sector_avg_profit_{d} = 50.0`（中性，无板块赚钱效应）
+- `sector_avg_loss_{d} = 50.0`（中性，无板块亏钱效应）
+
+**关键实现细节**：
+- 需将 `_compute_sei` 闭包移到 sector 循环外（或用等价方式），供非 sector_heat 股票复用
+- `seen_keys` 需在 sector 循环外维护，避免重复计算（非 sector 股票的 SEI 与 sector 股票独立互不影响）
+- 非 sector_heat 股票的分钟线已在 `data_bundle.minute_cache` 中（`target_ts_codes` 扩展后已拉取）
+- 非 sector_heat 股票无法计算 `stock_sector_20d_rank`（没有板块上下文），填 0
+
+**影响范围**：仅 `features/sector/sector_stock_feature.py`，其他文件不需要改动。
+
+**修复后验证方法**：
+```python
+# 用 train_dataset_server_20241108_v4.csv 或重跑单日测试
+# 检查 non-sector_heat 策略的 stock_open_d0 非零比，应接近 100%
+for strat in df['strategy_id'].unique():
+    sub = df[df['strategy_id'] == strat]
+    pct = (sub['stock_open_d0'] != 0).sum() / len(sub) * 100
+    print(f"{strat}: stock_open_d0 非零 {pct:.1f}%")
+```
+
+**注意**：修复后需更新 `FACTOR_VERSION`（在 `learnEngine/dataset.py`）并清空 `processed_dates.json`，强制重跑所有日期。
 
 ---
 

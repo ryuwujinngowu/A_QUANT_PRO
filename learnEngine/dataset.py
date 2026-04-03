@@ -432,7 +432,7 @@ if __name__ == "__main__":
     DATASET_MANIFEST_PATH = _cfg.get_dataset_manifest_path(DATASET_DIR)
     CONFIG_SNAPSHOT_PATH  = _cfg.get_dataset_config_snapshot_path(DATASET_DIR)
     # 因子逻辑有变更（新增列、修改计算公式）时必须更新版本号，否则旧数据不会重跑
-    FACTOR_VERSION        = "v5.3_trade_date_fix"
+    FACTOR_VERSION        = "v5.4_non_sector_stock_fix"
     # =====================================================
 
     # ---------- 从多段日期范围收集全部交易日 ----------
