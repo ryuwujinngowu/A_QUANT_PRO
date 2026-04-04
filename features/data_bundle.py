@@ -19,7 +19,7 @@ from utils.common_tools import (
     get_hp_cycle_slice_avg_gain, get_active_stock_stats,
     get_kline_day_range, get_market_breadth_liquidity_stats,
 )
-from data.data_cleaner import data_cleaner
+from data.data_cleaner import data_cleaner, TushareRateLimitAbort
 from utils.log_utils import logger
 from features.utils.high_position_utils import (
     compute_high_pos_selection, HP_BASE_PCT,
@@ -499,6 +499,8 @@ class FeatureDataBundle:
                             hp_minute_cache[(code, minute_date)] = data_cleaner.get_kline_min_by_stock_date(
                                 code, minute_date
                             )
+                        except TushareRateLimitAbort:
+                            raise  # abort 信号必须向上传播，不允许在此吞掉
                         except Exception as e:
                             logger.warning(f"[DataBundle] hp_ext_cache 高位股分钟线失败 | {code} {minute_date} | {e}")
                             hp_minute_cache[(code, minute_date)] = pd.DataFrame()
@@ -512,6 +514,8 @@ class FeatureDataBundle:
                 f"活跃股:{active_stats.get('active_total', 0)}只"
             )
 
+        except TushareRateLimitAbort:
+            raise  # abort 信号必须向上传播，不允许在此吞掉
         except Exception as e:
             logger.warning(f"[DataBundle] hp_ext_cache加载异常（非致命，高位股因子将返回中性值）：{str(e)[:200]}")
             self.hp_ext_cache = {}
@@ -615,6 +619,8 @@ class FeatureDataBundle:
                 f"[DataBundle] 5日触板分钟成交额 | 任务:{len(tasks)}对 "
                 f"| D0:{d0_amt / 1e9:.4f}万亿元"
             )
+        except TushareRateLimitAbort:
+            raise  # 限流终止信号必须向上传播，不允许吞掉
         except Exception as e:
             logger.warning(f"[DataBundle] 触板分钟成交额加载失败（非致命）：{e}")
             self.macro_cache["limit_touch_amount_5d"] = {d: 0.0 for d in self.lookback_dates_5d}
@@ -677,5 +683,7 @@ class FeatureDataBundle:
                 f"| 有数据:{total - empty_count} | 无数据:{empty_count}"
                 f"（其中当日缺失:{len(today_empty)}）"
             )
+        except TushareRateLimitAbort:
+            raise  # 限流终止信号必须向上传播，不允许吞掉
         except Exception as e:
             logger.warning(f"[DataBundle] 分钟线加载异常（非致命）：{str(e)[:120]}")
