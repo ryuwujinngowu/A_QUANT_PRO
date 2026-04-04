@@ -1059,4 +1059,140 @@ for strat in df['strategy_id'].unique():
 
 ---
 
-*记录人：Claude Sonnet 4.6（2026-04-03 Session）*
+## 十七、BUG-12 Major 修复真实验证（v5 数据集，2026-04-03）
+
+**测试数据集**：`dataset_20260403_143219`（2024-11-08 单日，1298行，v5.4_non_sector_stock_fix）
+
+### 验证结果：全部通过 ✅
+
+| 检查项 | 预期 | 实测 | 状态 |
+|---|---|---|---|
+| Stage 3 触发 | extra_codes > 0 | 673只，SEI任务3360 | ✅ |
+| stock_open_d0 非sector_heat零值率 | < 15% | **0.0%** | ✅ |
+| stock_vol_ratio_d0 非sector_heat零值率 | < 15% | **0.0%** | ✅ |
+| stock_cpr_d0 值域 [0,1] | 越界=0 | min=0.000, max=1.000 | ✅ |
+| sector_avg_profit_d0 非sector_heat≈50.0 | >80% | 81.9%，mean=53.68 | ✅ |
+| sector_heat stock_open_d0有效率 | 100% | **100.0%** | ✅ |
+| BJ股票混入 | 0 | 0 | ✅ |
+| sample_id 重复 | 0 | 0 | ✅ |
+
+### 4策略样本质量验证
+
+**各策略label覆盖率（全部NaN率=0%）**：
+- sector_heat(416): label1正样本19.7%, label1_3pct=42.5%
+- high_low_switch(663): label1=19.2%, label1_3pct=32.4%
+- trend_follow(86): label1=19.8%, label1_3pct=33.7%
+- oversold_reversal(133): label1=3.0%, label_d2_5pct=2.3%（超跌策略正样本率低为正常）
+
+**候选池逻辑验证**：
+- oversold_reversal: D0 pct_chg 100%为负，mean=-5.03%，min=-10.0% ✅（跌幅榜逻辑正确）
+- sector_heat: 84只股票属多个Top3板块（重复行），属正常设计行为
+- trend_follow: MA5>MA30 过滤生效（86只，从100只过滤14只）
+- high_low_switch: 663只候选，市场涨停122只/跌停3只，涨停氛围正常
+
+**sector_heat专属列隔离验证**：
+- adapt_score: 全局标量（当日=7.0），所有行相同 → 已在strategy_specific_cols中声明，训练非sector_heat时排除 ✅
+- stock_sector_20d_rank: 非sector_heat中81.9%=0（Stage3中性值），余18.1%为同时入选sector_heat候选池的股票 ✅
+- stock_vol_ratio_d0~d4: 非sector_heat零值率0.0%~0.2%，与sector_heat持平 ✅
+
+### 新发现
+
+**INFO-1（非BUG，设计决策）：科创板688进入部分策略**
+- sector_heat: 18只 688.SH；trend_follow: 7只 688.SH
+- 原因：`FILTER_688_BOARD = False`（config/config.py:21）设计上不过滤
+- oversold_reversal 和 high_low_switch 在候选池构建时代码级显式过滤了688
+- 影响评估：688涨跌停限制±20%（vs主板±10%），label1（≥5%日内收益）数值口径一致无问题；但688的市场动态不同于主板，可能引入噪声
+- **建议**：如果后续发现688样本label分布异常，可在config.py设`FILTER_688_BOARD=True`
+
+---
+
+## 十八、BUG-13：oversold_reversal label 类型不匹配（待修复）
+
+**发现时间**：2026-04-03
+
+**影响**：当前不影响运行（仅 sector_heat 在训练），但未来训练 oversold_reversal 模型时会导致错误
+
+**根因**：
+- `learnEngine/strategy_configs.py` → `oversold_reversal.label = "label_d2_return"`（连续浮点：持有2日总收益，如 0.03, -0.02）
+- `oversold_reversal_strategy.get_training_label_target()` → 返回 `"label_d2_5pct"`（二分类：0/1）
+- 如果通过 `get_strategy_label("oversold_reversal")` 确定训练 y 列，XGBoost 会把连续值当**回归**目标，而非分类
+
+**修复方案**：将 `strategy_configs.py` 中 oversold_reversal 的 label 改为 `"label_d2_5pct"`
+
+**文件**：`learnEngine/strategy_configs.py:83`
+```python
+# 修改前：
+"label": "label_d2_return",
+
+# 修改后：
+"label": "label_d2_5pct",    # 与 get_training_label_target() 保持一致
+```
+
+---
+
+## 十九、BUG-14：trend_follow 未在 strategy_configs.py 注册（低优先级）
+
+**发现时间**：2026-04-03
+
+**影响**：
+- `get_strategy_label("trend_follow")` 返回 fallback `"label1"`（与 `get_training_label_target()` 返回 `"label1"` 一致，无实际影响）
+- `get_effective_exclude_cols("trend_follow", ...)` 可以运行，只是 trend_follow 不声明自己的 strategy_specific_cols
+
+**修复方案**：在 `strategy_configs.py` 的 `STRATEGY_CONFIGS` 中补充 trend_follow 条目：
+```python
+"trend_follow": {
+    "label": "label1",
+    "strategy_specific_cols": [],
+},
+```
+
+---
+
+## 三、因子独立计算验证记录（2026-04-04）
+
+### 背景
+
+2025-07-02 ~ 2025-07-18 共13个交易日因 Tushare 分钟线每日50K次限额耗尽，原 `data_bundle.py` 的 `except Exception` 吞掉了 `TushareRateLimitAbort`，导致这13天以"部分填充中性值"状态写入训练集。已 drop 并重跑。
+
+重跑完成后，对重跑日期（2025-07-02、2025-07-07、2025-07-09）选取6只股票，直接查数据库分钟线 / 日线，按 FACTOR_REVIEW.md 文档口径独立计算因子，与 CSV 值逐项对比。
+
+### 验证方法
+
+1. 直接 `SELECT` `kline_min`（分钟线）和 `kline_day`（日线）原始数据
+2. 按以下口径手工计算，不调用任何特征模块：
+   - **VWAP**：`cum(close × volume) / cum(volume)`（注意：不用 `amount` 字段，代码口径）
+   - **vwap_prev**（前日均价）：`amount(千元) × 10 / volume(手)` = 元/股
+   - **red_session_pm_ratio**：`pm_red / (am_red + pm_red)`，无红盘 = -1
+   - **HDI**：加权合成 + CANDLE_HDI_ADJUST，权重见 FACTOR_REVIEW.md §2.2
+   - **pv_corr**：pearson(close, amount字段)
+3. 共验证 11 个因子 × 6 股 = **66 项**
+
+### 验证结果
+
+| 股票 | 日期 | bars | pre_close | candle | 结果 |
+|------|------|------|-----------|--------|------|
+| 002295.SZ | 2025-07-02 | 241 | 8.56 | 2(真阳) | ✅ 11/11 |
+| 600684.SH | 2025-07-02 | 241 | 4.43 | -2(真阴) | ✅ 11/11 |
+| 600152.SH | 2025-07-07 | 241 | 6.62 | 2(真阳) | ✅ 11/11 |
+| 603226.SH | 2025-07-07 | 241 | 12.60 | 2(真阳) | ✅ 11/11 |
+| 688291.SH | 2025-07-09 | 241 | 40.75 | -2(真阴) | ✅ 11/11 |
+| 002314.SZ | 2025-07-09 | 241 | 3.33 | -2(真阴) | ✅ 11/11 |
+
+**66/66 全部吻合，绝对差 < 0.005。**
+
+### 口径注意事项（已验证）
+
+| 口径 | 正确做法 | 错误做法（踩坑）|
+|------|---------|----------------|
+| VWAP 计算 | `cum(close×volume)/cum(volume)` | ~~用 `amount` 字段直接 cum~~ |
+| vwap_dev | 基于 close×volume VWAP | ~~基于 amount/volume VWAP~~ |
+| vwap_prev（前日均价） | `amount(千元)×10/volume(手)` | ~~直接 amount/volume~~ |
+| pv_corr | pearson(close, **amount字段**) | ~~pearson(close, volume)~~ |
+| HDI 首次验证偏差 | 修正 VWAP 口径后差值归零 | 旧口径差 ±0.5~1.0分 |
+
+### 结论
+
+重跑的13天数据计算口径完全正确，与文档定义一致，训练集质量合格。
+
+---
+*记录人：Claude Opus 4.6（2026-04-03 Session）*

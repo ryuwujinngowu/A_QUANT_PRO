@@ -81,8 +81,16 @@ STRATEGY_CONFIGS: Dict[str, Dict] = {
     },
 
     "oversold_reversal": {
-        # 超跌反包：D+1开盘买入，D+2收盘卖出 → 复用 label_d2_return
-        "label": "label_d2_return",
+        # 超跌反包：D+1开盘买入，D+2收盘卖出 → 二分类标签（≥5%为正样本）
+        # 与 OversoldReversalStrategy.get_training_label_target() 保持一致
+        "label": "label_d2_5pct",
+        "strategy_specific_cols": [],
+    },
+
+    "trend_follow": {
+        # 趋势跟踪：D+1日内收益 ≥ 5% 为正样本
+        # 与 TrendFollowStrategy.get_training_label_target() 保持一致
+        "label": "label1",
         "strategy_specific_cols": [],
     },
 }

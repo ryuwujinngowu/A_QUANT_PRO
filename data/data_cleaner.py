@@ -50,7 +50,8 @@ _THROTTLE_STATE = {
 #   6 只股票全部 10 次重试失败 → 即使降速后仍持续失败，中断当日补全
 _THROTTLE_NORMAL_STOCK_STREAK = 3   # 连续 N 只股票永久失败 → throttled
 _THROTTLE_ABORT_STOCK_STREAK  = 6   # 连续 M 只股票永久失败 → abort（throttled 模式下累计）
-_THROTTLE_MIN_INTERVAL  = 3.0       # 限流模式下每次 API 调用最小间隔（秒），约 20次/分钟
+_THROTTLE_MIN_INTERVAL  = 6.0       # 限流模式下每次 API 调用最小间隔（秒）
+                                     # 配合 Semaphore(2)：2 槽位 × 1call/6s = 20次/分钟
 _MIN_FETCH_MAX_RETRIES  = 10        # 单只股票最大 API 重试次数（超出后纳入聚合告警）
 # _KLINE_MIN_COVERAGE_RATIO = 0.7     # 允许停牌导致的自然缺口，低于该比例视为覆盖严重不足
 # _KLINE_HIGH_COVERAGE_RATIO = 0.95   # 覆盖率超过此值时，即使首尾日未覆盖也视为完整（停牌导致的边缘缺口）
@@ -557,12 +558,27 @@ class DataCleaner:
                 if extra_wait > 0:
                     time.sleep(extra_wait)
                 try:
-                    raw_df = data_fetcher.fetch_stk_mins(
-                        ts_code=ts_code,
-                        freq="1min",
-                        start_date=f"{trade_date} 09:25:00",
-                        end_date=f"{trade_date} 15:00:00",
-                    )
+                    if mode == "throttled":
+                        # 限流模式：绕过 retry_decorator，每次 semaphore 持有仅发 1 次请求
+                        # 原因：fetch_stk_mins 的 @retry_decorator(3, 1.0) 会在 semaphore 内
+                        # 连发 3 次 API 调用（含 2×1s sleep），导致实际速率 ≈ 61次/分，
+                        # 远超 Tushare 限速后的 20次/分限制，造成全部请求被拒
+                        time.sleep(0.2)
+                        raw_df = data_fetcher.pro.stk_mins(
+                            ts_code=ts_code,
+                            freq="1min",
+                            start_date=f"{trade_date} 09:25:00",
+                            end_date=f"{trade_date} 15:00:00",
+                        )
+                        if raw_df is None:
+                            raw_df = pd.DataFrame()
+                    else:
+                        raw_df = data_fetcher.fetch_stk_mins(
+                            ts_code=ts_code,
+                            freq="1min",
+                            start_date=f"{trade_date} 09:25:00",
+                            end_date=f"{trade_date} 15:00:00",
+                        )
                 except Exception as e:
                     logger.warning(
                         f"[{ts_code}-{trade_date}] 第 {attempt}/{_MIN_FETCH_MAX_RETRIES} 次 fetch 异常：{e}"
@@ -584,9 +600,13 @@ class DataCleaner:
                     logger.error(f"[{ts_code}-{trade_date}] 入库后查库失败：{e}")
                 return pd.DataFrame()
 
-            # 本次 API 返回空 → 仅记录单次警告 + 指数退避等待，不计入股票级失败数
+            # 本次 API 返回空 → 仅记录单次警告 + 退避等待，不计入股票级失败数
             # （只有所有重试耗尽才算一只股票的「永久失败」，才影响限流状态机）
-            backoff = min(2 ** (attempt - 1), 30)
+            # 限流模式下配额耗尽时不使用指数退避，避免每只股票占用数分钟
+            if mode == "throttled":
+                backoff = 1  # 限流模式：固定1s，20次/分配额由 extra_wait 控制
+            else:
+                backoff = min(2 ** (attempt - 1), 30)
             logger.warning(
                 f"[{ts_code}-{trade_date}] 第 {attempt}/{_MIN_FETCH_MAX_RETRIES} 次拉取返回空"
                 f"{'（限流模式：已额外等待）' if mode == 'throttled' else ''}，{backoff}s 后重试"

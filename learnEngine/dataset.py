@@ -27,7 +27,7 @@ import pandas as pd
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from config.config import FILTER_BSE_STOCK, FILTER_STAR_BOARD, FILTER_688_BOARD
-from data.data_cleaner import data_cleaner
+from data.data_cleaner import data_cleaner, TushareRateLimitAbort
 from features import FeatureEngine
 import learnEngine.train_config as _cfg
 from learnEngine.label import LabelEngine
@@ -812,6 +812,20 @@ if __name__ == "__main__":
             except Exception:
                 pass
 
+        except TushareRateLimitAbort as e:
+            # Tushare 分钟线每日 50K 次限额已耗尽，abort 模式下后续所有日期都会失败
+            # 当前日期未写入 CSV / processed_dates.json，--resume-dir 重启时会自动重跑
+            manifest["status"] = "paused_rate_limit"
+            manifest["last_error_date"] = date
+            manifest["last_error_message"] = f"Tushare分钟线每日限额耗尽: {str(e)[:200]}"
+            manifest["last_updated_at"] = datetime.now().isoformat(timespec="seconds")
+            _write_json(DATASET_MANIFEST_PATH, manifest)
+            logger.critical(
+                f"[TushareRateLimitAbort] Tushare 分钟线每日限额已耗尽，"
+                f"当前日期 {date} 未写入（下次 --resume-dir 启动将自动重跑）。"
+                f"建议等待今日 0 点后重启。原因：{e}"
+            )
+            break  # 退出日期循环，进入最终校验阶段，不抛异常（进程正常退出）
         except Exception as e:
             consecutive_fails += 1
             manifest["status"] = "failed"
